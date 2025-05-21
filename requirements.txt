@@ -1,0 +1,3 @@
+sqlite-vec
+numpy
+fastembed-gpu
