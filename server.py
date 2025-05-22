@@ -18,16 +18,9 @@ class EventPayload(BaseModel):
 async def lifespan(app: FastAPI):
     # Startup logic
     print("Starting up server...")
-    try:
-        database = Database(db_path=DATABASE_PATH, file_path=FILE_PATH)
-        database.__enter__()  # Setup connection and schema
-        app.state.db = database
-        app.state.memoria_instance = Memoria(database)
-        print(f"Database and Memoria initialized successfully using {DATABASE_PATH}")
-    except Exception as e:
-        print(f"Error initializing Database or Memoria during startup: {e}")
-        app.state.db = None
-        app.state.memoria_instance = None
+    with Database(db_path=DATABASE_PATH, file_path=FILE_PATH) as db:
+        app.state.db = db
+        app.state.memoria = Memoria(db)
     
     yield  # The application runs while the context manager is active
     
@@ -55,10 +48,8 @@ def create_app():
         memoria_instance = request.app.state.memoria_instance
         
         try:
-            result = await memoria_instance.process(prev=payload.prev, prompt=payload.prompt)
-            return result
+            return await memoria_instance.process(prev=payload.prev, prompt=payload.prompt)
         except Exception as e:
-            print(f"Error processing event: {e}") # Basic logging
             raise HTTPException(status_code=500, detail=f"Failed to process event: {str(e)}")
 
     @app.get("/")

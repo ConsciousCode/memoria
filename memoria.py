@@ -18,12 +18,14 @@ PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS files (
     rowid INTEGER PRIMARY KEY,
-    multihash UNIQUE TEXT NOT NULL,
+    multihash TEXT NOT NULL,
     filename TEXT, /* filename at time of upload */
     mimetype TEXT NOT NULL,
     metadata JSONB,
     size INTEGER NOT NULL,
-    content BLOB(50kB) /* actual file content - NULL = external storage */
+    content BLOB, /* actual file content - NULL = external storage */
+
+    UNIQUE(multihash)
 );
 
 CREATE TABLE IF NOT EXISTS memories (
@@ -45,9 +47,9 @@ CREATE TABLE IF NOT EXISTS edges (
     FOREIGN KEY (dst_id) REFERENCES memories(rowid)
 );
 
-CREATE VIRTUAL TABLE memory_fts USING fts5(content);
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content);
 
-CREATE TABLE IF NOT EXISTS vss_nomic_v1_5_index USING vec0 (
+CREATE VIRTUAL TABLE IF NOT EXISTS vss_nomic_v1_5_index USING vec0 (
     memory_id INTEGER PRIMARY KEY,
     embedding FLOAT[768]
 );
@@ -202,11 +204,10 @@ class Graph[K, E, V]:
                         unseen.remove(src_id)
                         todo.append(src_id)
 
+@dataclass
 class Database:
-    def __init__(self, db_path: str = ":memory:", file_path: str = "files"):
-        super().__init__()
-        self.db_path = db_path
-        self.file_path = file_path
+    db_path: str = ":memory:"
+    file_path: str = "files"
     
     def __enter__(self):
         conn = self.conn = sqlite3.connect(self.db_path)
