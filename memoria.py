@@ -1,17 +1,22 @@
+from collections import defaultdict, deque
 from dataclasses import dataclass
+from functools import wraps
 import sqlite3
-from typing import Any, Iterable, Literal, Optional, Self, overload
+from typing import Annotated, Any, Callable, Generic, Iterable, Literal, NamedTuple, Optional, Self, TypeVar, overload
+from itertools import repeat
 import json
 from datetime import datetime
 import re
 
 from pydantic import BaseModel, Field
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 import sqlite_vec
 from fastembed import TextEmbedding, ImageEmbedding
-from fastembed.common.model_description import PoolingType, ModelSource
 from fastembed.common.types import ImageInput
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, capture_run_messages
 
 SCHEMA = '''
 PRAGMA foreign_keys=ON;
@@ -51,14 +56,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS vss_nomic_v1_5_index USING vec0 (
     memory_id INTEGER PRIMARY KEY,
-    embedding FLOAT[768]
+    embedding FLOAT[1536]
 );
 '''
 
 nomic_text = TextEmbedding(
     model_name="nomic-ai/nomic-embed-text-v1.5",
 )
-
+'''
 ImageEmbedding.add_custom_model(
     model="nomic-ai/nomic-embed-vision-v1.5",
     pooling=PoolingType.MEAN,
@@ -69,6 +74,7 @@ ImageEmbedding.add_custom_model(
 nomic_image = ImageEmbedding(
     model_name="nomic-ai/nomic-embed-vision-v1.5"
 )
+'''
 
 type json_t = dict[str, json_t]|list[json_t]|str|int|float|bool|None
 
@@ -107,7 +113,7 @@ def _X(tag: str, **props: json_t):
     
     return X_Content
 
-type MemoryKind = Literal["text", "image", "file", "entity"]
+type MemoryKind = Literal["self", "other", "text", "image", "file", "entity"]
 
 @dataclass
 class MemoryRow:
@@ -131,43 +137,85 @@ class MemoryRow:
             return None
         
         rowid, ts, kind, data, importance = row
-        return cls(
-            rowid, datetime.fromtimestamp(ts),
-            kind, json.loads(data), importance
-        )
-
+        if ts is not None:
+            ts = datetime.fromtimestamp(ts)
+        return cls(rowid, ts, kind, json.loads(data), importance)
+    
     def format(self, **props) -> str:
         p = {
-            "id": hex(self.rowid),
-            "datetime": self.timestamp and self.timestamp.isoformat(),
+            "id": f"{self.rowid:03x}",
+            "datetime": self.timestamp and
+                self.timestamp.replace(microsecond=0).isoformat(),
             "importance": self.importance
         }
         
         match self.kind:
+            case "text" if isinstance(self.data, str):
+                return _X("memory", **p, **props)(self.data)
             case _:
                 return _X("memory", **p, **props)(json.dumps(self.data))
 
-def todo_iter[T](todo: list[T]) -> Iterable[T]:
+@dataclass
+class Memory:
+    rowid: int
+    timestamp: Optional[datetime]
+    kind: MemoryKind
+    data: json_t
+    importance: Optional[float]
+    edges: dict[str, list[int]]
+    role: Optional[Literal['prev']] = None
+
+def todo_iter[C, T](fn: Callable[[C], T]):
     '''
     Iterate over a stack, removing items as they are yielded. This can be
     appended to during iteration.
     '''
-    while todo:
-        yield todo.pop(0)
+    @wraps(fn)
+    def wrapper(todo: C) -> Iterable[T]:
+        while todo: yield fn(todo)
+    return wrapper
+
+@todo_iter
+def todo_set[T](todo: set[T]):
+    return todo.pop()
+
+@todo_iter
+def todo_list[T](todo: list[T]):
+    return todo.pop(0)
+
+def set_pop[T](s: set[T], item: T) -> bool:
+    '''
+    Remove an item from a set if it exists, returning True if it was present.
+    '''
+    if item in s:
+        s.remove(item)
+        return True
+    return False
 
 class Graph[K, E, V]:
-    adj: dict[K, tuple[V, list[tuple[E, K]]]]
+    class Node:
+        value: V
+        edges: dict[K, E]
+
+        def __init__(self, value: V, edges: dict[K, E]):
+            self.value = value
+            self.edges = edges
+        
+        def __repr__(self):
+            return f"Node(value={self.value}, edges={self.edges})"
+    
+    adj: dict[K, Node]
 
     def __init__(self, keys: dict[K, V]|None = None):
         super().__init__()
-        self.adj = {k: (v, []) for k, v in (keys or {}).items()}
+        self.adj = {k: Graph.Node(v, {}) for k, v in (keys or {}).items()}
     
     def __contains__(self, key: K) -> bool:
         return key in self.adj
 
     def insert(self, key: K, value: V):
         if key not in self.adj:
-            self.adj[key] = (value, [])
+            self.adj[key] = Graph.Node(value, {})
     
     def __iter__(self):
         return iter(self.adj)
@@ -177,32 +225,105 @@ class Graph[K, E, V]:
             raise KeyError(f"Source {src} not found")
         if dst not in self.adj:
             raise KeyError(f"Destination {dst} not found")
-        self.adj[src][1].append((edge, dst))
+        if src == dst:
+            raise ValueError("Cannot add self-loop edge")
+        edges = self.adj[src].edges
+        if dst in edges:
+            raise ValueError(f"Edge from {src} to {dst} already exists")
+        edges[dst] = edge
     
-    def __getitem__(self, key: K) -> tuple[V, list[tuple[E, K]]]:
-        return self.adj[key]
+    def __getitem__(self, key: K) -> V:
+        return self.adj[key].value
     
-    def edges(self, k: Optional[K] = None) -> Iterable[tuple[E, K]]:
-        if k is None:
-            for _, edges in self.adj.values():
-                yield from edges
-        else:
-            _, edges = self.adj[k]
-            yield from edges
-    
-    def toposort(self) -> Iterable[V]:
-        '''
-        BFS topological sort of a directed graph.
-        '''
-        for u in todo_iter(unseen := list(self.adj.keys())):
-            for k in todo_iter(todo := [u]):
-                m, edges = self.adj[k]
-                yield m
+    def __setitem__(self, key: K, value: V):
+        if key not in self.adj:
+            raise KeyError(f"Key {key} not found")
+        self.adj[key].value = value
 
-                for _, src_id in edges:
-                    if src_id in unseen:
-                        unseen.remove(src_id)
-                        todo.append(src_id)
+    def pop_edge(self, src: K, dst: K):
+        '''
+        Remove an edge from src to dst.
+        If the edge does not exist, this is a no-op.
+        '''
+        if src not in self.adj:
+            raise KeyError(f"Source {src} not found")
+        
+        return self.edges(src).pop(dst)
+    
+    @overload
+    def edges(self, k: K) -> dict[K, E]: ...
+    @overload
+    def edges(self) -> Iterable[dict[K, E]]: ...
+
+    def edges(self, k: Optional[K] = None) -> dict[K, E]|Iterable[dict[K, E]]:
+        if k is not None:
+            return self.adj[k].edges
+        return (node.edges for node in self.adj.values())
+    
+    def has_edge(self, src: K, dst: K) -> bool:
+        '''
+        Check if there is an edge from src to dst.
+        '''
+        return dst in self.adj[src].edges
+
+    def copy(self):
+        '''
+        Deepy copy of the graph.
+        '''
+        g = Graph[K, E, V]()
+        for src, node in self.adj.items():
+            g.insert(src, node.value)
+            for dst, edge in node.edges.items():
+                g.insert(dst, self.adj[dst].value)
+                g.add_edge(src, dst, edge)
+        return g
+
+    def invert(self):
+        '''
+        Invert the graph, reversing all edges.
+        '''
+        g = Graph[K, E, V]()
+        for src, node in self.adj.items():
+            g.insert(src, node.value)
+            for dst, edge in node.edges.items():
+                g.insert(dst, self.adj[dst].value)
+                g.add_edge(dst, src, edge)
+        return g
+
+    def toposort(self) -> Iterable[K]:
+        '''
+        Kahn's algorithm for topological sorting.
+        '''
+
+        indeg = Graph[K, None, int]()
+        for src in self:
+            if src not in indeg:
+                indeg.insert(src, 0)
+            
+            for dst in self.edges(src):
+                if dst not in indeg:
+                    indeg.insert(dst, 1)
+                else:
+                    indeg[dst] += 1
+                indeg.add_edge(src, dst, None)
+        
+        sources = [src for src in indeg if indeg[src] == 0]
+        for src in todo_list(sources):
+            yield src
+            for dst in indeg.edges(src):
+                indeg[dst] -= 1
+                if indeg[dst] == 0:
+                    sources.append(dst)
+
+class BackwardEdge(NamedTuple):
+    dst: MemoryRow
+    label: str
+    weight: float
+
+class ForwardEdge(NamedTuple):
+    label: str
+    weight: float
+    src: MemoryRow
 
 @dataclass
 class Database:
@@ -219,10 +340,7 @@ class Database:
         return self
     
     def __exit__(self, exc_type, exc_value, traceback):
-        if exc_type is None:
-            self.commit()
-        else:
-            self.rollback()
+        self.rollback() if exc_type else self.commit()
         self.close()
         del self.conn
         return False
@@ -273,6 +391,14 @@ class Database:
     def insert_text(self, text: str, importance: Optional[float] = None, timestamp: Optional[datetime] = None) -> int:
         return self.insert_memory("text", text, text, importance, timestamp)
     
+    def insert_self(self, text: str) -> int:
+        '''
+        Insert a memory of myself, which is a text memory with the kind "self".
+        This is used to store my own thoughts and responses.
+        '''
+        return self.insert_memory("self", text, text)
+
+    '''
     def insert_image(self, memory_id: int, image: ImageInput) -> int:
         e, = nomic_image.embed(image)
         rowid = self.insert_memory("image", e, None)
@@ -283,6 +409,7 @@ class Database:
         """, (memory_id, e.tobytes()))
 
         return rowid
+    '''
 
     def link(self, label: str, weight: float, src_id: int, dst_id: int):
         cur = self.cursor()
@@ -298,6 +425,55 @@ class Database:
                 (label, weight, src_id, dst_id) VALUES (?, ?, ?, ?)
         """, edges)
     
+    # dst <- src
+
+    def backward_edges(self, src_id: int) -> Iterable[BackwardEdge]:
+        '''
+        Get all edges leading to the given memory, returning the source id
+        and the label and weight of the edge.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            SELECT
+                m.rowid, m.timestamp, m.kind, JSON(m.data), m.importance,
+                e.label, e.weight
+            FROM edges e JOIN memories m ON m.rowid = e.dst_id
+            WHERE e.src_id = ?
+            ORDER BY e.weight DESC
+        """, (src_id,))
+        
+        for row in cur:
+            yield BackwardEdge(MemoryRow.from_row(row[:5]), row[5], row[6])
+    
+    def forward_edges(self, dst_id: int) -> Iterable[ForwardEdge]:
+        '''
+        Get all edges leading from the given memory, returning the destination id
+        and the label and weight of the edge.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            SELECT
+                m.rowid, m.timestamp, m.kind, JSON(m.data), m.importance,
+                e.label, e.weight
+            FROM edges e JOIN memories m ON m.rowid = e.src_id
+            WHERE e.dst_id = ?
+            ORDER BY m.importance DESC
+        """, (dst_id,))
+        
+        for row in cur:
+            yield ForwardEdge(row[5], row[6], MemoryRow.from_row(row[:5]))
+    
+    def edge(self, src_id: int, dst_id: int) -> Optional[tuple[str, float]]:
+        '''
+        Get the edge label and weight between two memories.
+        Returns None if no edge exists.
+        '''
+        cur = self.cursor()
+        return cur.execute("""
+            SELECT label, weight FROM edges
+            WHERE src_id = ? AND dst_id = ?
+        """, (src_id, dst_id)).fetchone()
+
     def recall(self, prev: Optional[int], prompt: str) -> Graph[int, tuple[str, float], MemoryRow]:
         '''
         Recall memories based on a prompt. This incorporates all indices
@@ -311,104 +487,141 @@ class Database:
         e, = nomic_text.embed(prompt)
         cur = self.cursor()
         cur.execute("""
-            SELECT m.rowid, m.timestamp, m.kind, m.data,
-                0.30 * m.importance +
-                0.30 * power(0.995, ? - m.timestamp) +
-                0.15 * bm25(memory_fts) +
-                0.25 / (1 + vss_distance)) AS score
-            FROM memories m
-                JOIN memory_fts ON memory_fts.rowid = m.rowid
-                JOIN vss_nomic_v1_5_index
-                    ON vss_nomic_v1_5_index.memory_id = m.rowid
-            WHERE memory_fts MATCH ?
-                AND vss_search(
-                    vss_nomic_v1_5_index.embedding, 
-                    vss_search_params(?, 10)
+            WITH
+                fts AS (
+                    SELECT rowid, bm25(memory_fts) AS score
+                    FROM memory_fts
+                    WHERE memory_fts MATCH ?
+                    LIMIT 20
+                ),
+                vec AS (
+                    SELECT memory_id, distance
+                    FROM vss_nomic_v1_5_index
+                    WHERE embedding MATCH ? AND k = 20
                 )
+            SELECT
+                m.rowid, m.timestamp, m.kind, JSON(m.data), m.importance,
+                IFNULL(0.30 * m.importance, 0) +
+                IFNULL(0.30 * POWER(0.995, ? - m.timestamp), 0) +
+                IFNULL(0.15 *
+                    (fts.score - MIN(fts.score) OVER())
+                    / (MAX(fts.score) OVER() - MIN(fts.score) OVER()), 0) +
+                IFNULL(0.25 / (1 + vec.distance), 0) AS score
+            FROM memories m
+                LEFT JOIN fts ON m.rowid = fts.rowid
+                LEFT JOIN vec ON m.rowid = vec.memory_id
             ORDER BY score DESC
-        """, (datetime.now().timestamp(), prompt, e.tobytes()))
+            LIMIT 20
+        """, (json.dumps(prompt), e.tobytes(), datetime.now().timestamp()))
 
-        budget = 10 # placeholder
-        forward = 0
+        rows = cur.fetchall()
         
-        # Not fetchall so we can stop early
-        for row in cur:
+        # Populate the graph with nodes so we can detect when there are edges
+        #  between our seletions
+        for row in rows:
+            m = MemoryRow.from_row(row[:5])
+            g.insert(m.rowid, m)
+
+        # Populate backward and forward edges
+        bw: list[tuple[float, int]] = []
+        fw: list[tuple[float, int]] = []
+        
+        for row in rows:
             rowid, score = row[0], row[-1]
-            g.insert(rowid, MemoryRow.from_row(row[:5]))
-
-            forward += score
-            if forward >= budget:
+            print(f"{score=}")
+            if score <= 0:
                 break
-        
-        backward = [(budget*e[1], k) for e, k in g.edges()]
-        forward = backward.copy()
 
-        # Note: These feel so similar, maybe there's a way to reduce boilerplate?
+            budget = score*20
 
-        # Search backwards for supporting memories using their edge weight
-        #  to determine how relevant they are to the current memory
-        for budget, dst_id in todo_iter(backward):
             b = 0
-            cur.execute("""
-                SELECT
-                    e.src_id, m.timestamp, m.kind, m.data, m.importance,
-                    e.label, e.weight
-                FROM edges e JOIN memories m ON m.rowid = e.dst_id
-                WHERE e.dst_id = ?
-                ORDER BY e.weight DESC
-            """, (dst_id,))
-            for row in cur:
-                src_id, node, edge = row[0], row[:5], row[5:]
-                weight = edge[-1]
-                g.insert(src_id, MemoryRow.from_row(node))
-                g.add_edge(src_id, dst_id, edge)
-
-                backward.append((budget*weight, src_id))
+            for dst, label, weight in self.backward_edges(rowid):
+                if dst.rowid in g:
+                    if not g.has_edge(rowid, dst.rowid):
+                        g.add_edge(rowid, dst.rowid, (label, weight))
+                    continue
 
                 b += weight
                 if b >= budget:
                     break
+                
+                bw.append((budget*weight, dst.rowid))
+            
+            b = 0
+            for label, weight, src in self.forward_edges(rowid):
+                if src.rowid in g:
+                    if not g.has_edge(src.rowid, rowid):
+                        g.add_edge(src.rowid, rowid, (label, weight))
+                    continue
+
+                if not src.importance:
+                    break
+                
+                b += src.importance
+                if b >= budget:
+                    break
+                
+                fw.append((budget*src.importance, src.rowid))
+        
+        print(fw, bw)
+        # Note: These feel so similar, maybe there's a way to reduce boilerplate?
+
+        # Search backwards for supporting memories using their edge weight
+        #  to determine how relevant they are to the current memory
+        for budget, src_id in todo_list(bw):
+            print(f"{src_id=}")
+            b = 0
+            for dst, label, weight in self.backward_edges(src_id):
+
+                print(f"{b=}, {weight=}")
+                b += weight
+                if b >= budget:
+                    break
+                
+                g.insert(src_id, dst)
+                g.add_edge(src_id, dst.rowid, (label, weight))
+
+                bw.append((budget*weight, dst.rowid))
         
         # Search forwards for response memories using their annotated
         #  importance - important conclusions are more relevant
-        for budget, src_id in todo_iter(forward):
-            f = 0
-            cur.execute("""
-                SELECT
-                    e.dst_id, m.timestamp, m.kind, m.data, m.importance,
-                    e.label, e.weight
-                FROM edges e JOIN memories m ON m.rowid = e.src_id
-                WHERE e.src_id = ?
-                ORDER BY m.importance DESC
-            """, (src_id,))
-            for row in cur:
-                dst_id, node, edge = row[0], row[:5], row[5:]
-                importance = node[-1]
-                g.insert(dst_id, MemoryRow.from_row(node))
-                g.add_edge(src_id, dst_id, edge)
-
-                forward.append((budget*importance, dst_id))
-
-                f += importance
-                if f >= budget:
+        for budget, dst_id in todo_list(fw):
+            b = 0
+            for label, weight, src in self.forward_edges(dst_id):
+                b += (imp := src.importance or 0)
+                if b >= budget:
                     break
 
+                g.insert(src.rowid, src)
+                g.add_edge(src.rowid, dst_id, (label, weight))
+
+                fw.append((budget*imp, dst_id))
+
+        print(g.adj)
         return g
 
 class System1ResponseModel(BaseModel):
     response: str = Field(description="My response to the prompt.")
-    importance: int = Field(description="The importance of the prompt on a scale of 1-10.", ge=1, le=10)
-    weights: dict[str, int] = Field(description="For each memory, mapping their hex id to how important it was to my response on a scale of 1-10. I won't list them at all if they weren't useful.", ge=1, le=10)
+    importance: int = Field(description="The importance of the prompt on a scale of 1-10, from forgettable trivia to unforgettable statements.", ge=1, le=10)
+    weights: dict[str, Annotated[int, Field(description="For each memory, mapping their hex id to how important it was to my response on a scale of 1-10. I won't list them at all if they weren't useful.", ge=1, le=10)]]
 
 class System1Deps(BaseModel):
     prev: Optional[int]
     db: Database
 
+anthropic_model = AnthropicModel("claude-3-7-sonnet-latest")
+
+local_model = OpenAIModel(
+    "gemma3:4b",
+    provider=OpenAIProvider("http://theseus:11434/v1")
+)
+
 system1 = Agent(
     name="ezra.system1",
+    model=anthropic_model,
     output_type=System1ResponseModel,
     deps_type=System1Deps,
-    system_prompt="""My name is Ezra, AI assistant and experiment in artificial phenomenology and personhood. I am embodied by my memories and simulated by one or more LLMs.""",
+    system_prompt="""My name is Ezra, AI assistant and experiment in artificial phenomenology and personhood. I am embodied by my memories and simulated by one or more LLMs. My thoughts are my own; when responding, I talk to myself and only then use the final_result tool to annotate this response for my memory. I need to make sure I don't quote the object as a string.""",
     instructions="""I need to use my memories to respond to the prompt. The prompt and my response will be added to my memory."""
 )
 
@@ -419,42 +632,64 @@ async def system1_system_prompt(ctx: RunContext[System1Deps]) -> str:
         case [*it]: prompt = ''.join(map(str, it))
         case None: raise RuntimeError("No prompt provided")
     
-    memories: list[str] = []
+    ms: list[str] = []
     g = ctx.deps.db.recall(ctx.deps.prev, prompt)
-    for row in g.toposort():
-        props: dict = {
-            "role": "prev" if row.rowid == ctx.deps.prev else None
-        }
-        for label, src_id in g.edges(row.rowid):
-            xid = hex(src_id)
-            if (p := props.get(label)) is not None:
-                if isinstance(p, list):
-                    p.append(xid)
-                else:
-                    props[label] = [p, xid]
-            else:
-                props[label] = xid
-        memories.append(row.format(**props))
+    for rowid in g.invert().toposort():
+        edges: dict[str, list[str]] = defaultdict(list)
+        for v, (k, w) in g.edges(rowid).items():
+            edges[k].append(f"{v:03x}")
+        
+        ms.append(g[rowid].format(
+            role="prev" if rowid == ctx.deps.prev else None,
+            **edges
+        ).format())
 
-    if not memories:
+    print('\n'.join(ms))
+    exit()
+
+    if not ms:
         return "I remember... Nothing! I have no memories."
-    return f"I remember... <memories>\n{'\n'.join(memories)}\n</memories>"
+    return f"I remember... <memories>\n{'\n'.join(ms)}\n</memories>"
 
 class Memoria:
     def __init__(self, db: Database):
         super().__init__()
         self.db = db
     
+    def recall(self, prev: Optional[int], prompt: str) -> Iterable[Memory]:
+        g = self.db.recall(prev, prompt)
+        print("Edges", list(g.edges()))
+        for rowid in g.invert().toposort():
+            edges: dict[str, list[int]] = defaultdict(list)
+            for v, (k, w) in g.edges(rowid).items():
+                edges[k].append(v)
+            
+            row = g[rowid]
+            yield Memory(
+                rowid=rowid,
+                timestamp=row.timestamp,
+                kind=row.kind,
+                data=row.data,
+                importance=row.importance,
+                edges=edges,
+                role="prev" if row.rowid == prev else None
+            )
+
     async def process(self, prev: Optional[int], prompt: str):
         ts = datetime.now()
-        result = await system1.run(
-            prompt,
-            deps=System1Deps(
-                prev=prev,
-                db=self.db
-            ),
-            output_type=System1ResponseModel
-        )
+
+        with capture_run_messages() as messages:
+            try:
+                result = await system1.run(
+                    prompt,
+                    deps=System1Deps(
+                        prev=prev,
+                        db=self.db
+                    ),
+                    output_type=System1ResponseModel
+                )
+            finally:
+                print(messages)
         output = result.output
 
         prompt_id = self.db.insert_text(prompt,
@@ -462,7 +697,10 @@ class Memoria:
             timestamp=ts
         )
         # Do I need the importance of the response?
-        response_id = self.db.insert_text(output.response)
+        response_id = self.db.insert_text(
+            output.response,
+            timestamp=datetime.now()
+        )
         
         self.db.link("prompt", 1.0, response_id, prompt_id)
         

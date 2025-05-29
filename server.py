@@ -1,3 +1,5 @@
+import traceback as tb
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -21,8 +23,7 @@ async def lifespan(app: FastAPI):
     with Database(db_path=DATABASE_PATH, file_path=FILE_PATH) as db:
         app.state.db = db
         app.state.memoria = Memoria(db)
-    
-    yield  # The application runs while the context manager is active
+        yield  # The application runs while the context manager is active
     
     # Shutdown logic
     print("Shutting down server...")
@@ -33,34 +34,50 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"Error closing database connection: {e}")
 
-def create_app():
-    app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan)
 
-    @app.post("/events/")
-    async def create_event(payload: EventPayload, request: Request):
-        if not hasattr(request.app.state, 'memoria_instance') or \
-           request.app.state.memoria_instance is None or \
-           not hasattr(request.app.state, 'db') or \
-           request.app.state.db is None:
-            # This check might be redundant if startup guarantees these or exits
-            raise HTTPException(status_code=503, detail="Memoria service is not initialized properly.")
-        
-        memoria_instance = request.app.state.memoria_instance
-        
-        try:
-            return await memoria_instance.process(prev=payload.prev, prompt=payload.prompt)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to process event: {str(e)}")
+@app.post("/event")
+async def create_event(payload: EventPayload, request: Request):
+    memoria = request.app.state.memoria
+    
+    try:
+        return await memoria.process(prev=payload.prev, prompt=payload.prompt)
+    except Exception as e:
+        tb.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to process event: {str(e)}")
 
-    @app.get("/")
-    async def root():
-        return {"message": "Memoria REST server is running."}
+@app.get("/recall")
+async def recall(payload: EventPayload, request: Request):
+    memoria: Memoria = request.app.state.memoria
+    
+    try:
+        ms: dict[str, dict] = {}
+        for m in memoria.recall(prev=payload.prev, prompt=payload.prompt):
+            d = {
+                "kind": m.kind,
+                "data": m.data
+            }
+            if m.edges:
+                d['edges'] = {
+                    k: [f"{e:03x}" for e in v]
+                        for k, v in m.edges.items()
+                }
+            if m.timestamp: d["timestamp"] = m.timestamp.timestamp()
+            if m.role: d["role"] = m.role
+            
+            ms[f"{m.rowid:03x}"] = d
         
-    return app
+        return ms
+    except Exception as e:
+        tb.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to recall: {str(e)}")
 
-# Create the app instance for uvicorn discovery (e.g., uvicorn server:app)
-app = create_app()
+@app.get("/")
+async def root():
+    return {"message": "Memoria REST server is running."}
+
+def main():
+    uvicorn.run(app, host="127.0.0.1", port=8000)
 
 if __name__ == "__main__":
-    # This allows running the server with 'python server.py'
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    main()
