@@ -57,11 +57,7 @@ async def recall(payload: EventPayload, request: Request):
                 "kind": m.kind,
                 "data": m.data
             }
-            if m.edges:
-                d['edges'] = {
-                    k: [f"{e:03x}" for e in v]
-                        for k, v in m.edges.items()
-                }
+            if m.edges: d['edges'] = m.edges
             if m.timestamp: d["timestamp"] = m.timestamp.timestamp()
             if m.role: d["role"] = m.role
             
