@@ -1,9 +1,10 @@
 import json
-from typing import Callable, Iterable
+from typing import Callable, Concatenate, Iterable, Mapping, Protocol, Self, Sequence, Union, Unpack
 import re
 from functools import wraps
+from heapq import heappop
 
-type json_t = dict[str, json_t]|list[json_t]|str|int|float|bool|None
+type json_t = Mapping[str, json_t]|Sequence[json_t]|str|int|float|bool|None
 
 def _fattr(x: json_t) -> str:
     if isinstance(x, str) and re.match(r"""[\s'"=</>&;]""", x):
@@ -58,6 +59,10 @@ def todo_set[T](todo: set[T]):
 def todo_list[T](todo: list[T]):
     return todo.pop(0)
 
+@todo_iter
+def todo_heap[T](todo: list[T]):
+    return heappop(todo)
+
 def set_pop[T](s: set[T], item: T) -> bool:
     '''
     Remove an item from a set if it exists, returning True if it was present.
@@ -66,3 +71,24 @@ def set_pop[T](s: set[T], item: T) -> bool:
         s.remove(item)
         return True
     return False
+
+class Lexicographic(Protocol):
+    def __lt__(self, other: Self, /) -> bool: ...
+
+class LeastT:
+    def __init__(self):
+        raise NotImplementedError("LeastT cannot be instantiated directly")
+    
+    def __lt__(self, other: object, /) -> bool:
+        return True
+
+Least = LeastT.__new__(LeastT)
+
+def ifnone[*Ts](*args: *Ts): # type: ignore
+    '''
+    Return the first non-None argument, or None if all are None.
+    '''
+    for arg in args:
+        if arg is not None:
+            return arg
+    return None

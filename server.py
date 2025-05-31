@@ -38,10 +38,10 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/event")
 async def create_event(payload: EventPayload, request: Request):
-    memoria = request.app.state.memoria
+    memoria: Memoria = request.app.state.memoria
     
     try:
-        return await memoria.process(prev=payload.prev, prompt=payload.prompt)
+        return await memoria.prompt("user", payload.prev, "", payload.prompt)
     except Exception as e:
         tb.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to process event: {str(e)}")

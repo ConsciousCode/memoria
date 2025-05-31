@@ -5,10 +5,27 @@ from typing import Any, Iterable, Literal, NamedTuple, Optional, Self, TypedDict
 import sqlite3
 import json
 
-from graph import Graph
 from util import json_t
 
 import sqlite_vec
+from fastembed import TextEmbedding, ImageEmbedding
+from fastembed.common.types import ImageInput
+
+nomic_text = TextEmbedding(
+    model_name="nomic-ai/nomic-embed-text-v1.5",
+)
+'''
+ImageEmbedding.add_custom_model(
+    model="nomic-ai/nomic-embed-vision-v1.5",
+    pooling=PoolingType.MEAN,
+    normalization=True,
+    sources=ModelSource(hf="nomic-ai/nomic-embed-vision-v1.5"),
+    dim=768
+)
+nomic_image = ImageEmbedding(
+    model_name="nomic-ai/nomic-embed-vision-v1.5"
+)
+'''
 
 type MemoryKind = Literal["self", "other", "text", "image", "file", "entity"]
 
@@ -26,7 +43,7 @@ class MemoryRow:
     timestamp: Optional[datetime]
     kind: MemoryKind
     data: json_t
-    importance: Optional[float] = None
+    importance: Optional[float]
 
     @classmethod
     @overload
@@ -45,6 +62,25 @@ class MemoryRow:
         if ts is not None:
             ts = datetime.fromtimestamp(ts)
         return cls(rowid, ts, kind, json.loads(data), importance)
+
+@dataclass
+class ScoredMemoryRow:
+    rowid: int
+    timestamp: Optional[datetime]
+    kind: MemoryKind
+    data: json_t
+    importance: Optional[float]
+    score: float
+
+    @classmethod
+    def from_row(cls, row: tuple[int, float, MemoryKind, str, float, float]) -> Self:
+        rowid, ts, kind, data, importance, score = row
+        if ts is not None:
+            ts = datetime.fromtimestamp(ts)
+        return cls(rowid, ts, kind, json.loads(data), importance, score)
+    
+    def unscored(self):
+        return MemoryRow(self.rowid, self.timestamp, self.kind, self.data, self.importance)
 
 class BackwardEdge(NamedTuple):
     dst: MemoryRow
@@ -208,16 +244,7 @@ class Database:
             WHERE src_id = ? AND dst_id = ?
         """, (src_id, dst_id)).fetchone()
 
-    def recall(self, prev: Optional[int], prompt: str) -> Graph[int, tuple[str, float], MemoryRow]:
-        '''
-        Recall memories based on a prompt. This incorporates all indices
-        and returns a topological sort of relevant memories.
-        '''
-
-        g = Graph[int, tuple[str, float], MemoryRow]()
-        if pm := self.select_memory(prev):
-            g.insert(pm.rowid, pm)
-        
+    def recall(self, prompt: str, timestamp: Optional[datetime]) -> Iterable[ScoredMemoryRow]:
         e, = nomic_text.embed(prompt)
         cur = self.cursor()
         cur.execute("""
@@ -248,88 +275,5 @@ class Database:
             LIMIT 20
         """, (json.dumps(prompt), e.tobytes(), datetime.now().timestamp()))
 
-        rows = cur.fetchall()
-        
-        # Populate the graph with nodes so we can detect when there are edges
-        #  between our seletions
-        for row in rows:
-            m = MemoryRow.from_row(row[:5])
-            g.insert(m.rowid, m)
-
-        # Populate backward and forward edges
-        bw: list[tuple[float, int]] = []
-        fw: list[tuple[float, int]] = []
-        
-        for row in rows:
-            rowid, score = row[0], row[-1]
-            print(f"{score=}")
-            if score <= 0:
-                break
-
-            budget = score*20
-
-            b = 0
-            for dst, label, weight in self.backward_edges(rowid):
-                if dst.rowid in g:
-                    if not g.has_edge(rowid, dst.rowid):
-                        g.add_edge(rowid, dst.rowid, (label, weight))
-                    continue
-
-                b += weight
-                if b >= budget:
-                    break
-                
-                bw.append((budget*weight, dst.rowid))
-            
-            b = 0
-            for label, weight, src in self.forward_edges(rowid):
-                if src.rowid in g:
-                    if not g.has_edge(src.rowid, rowid):
-                        g.add_edge(src.rowid, rowid, (label, weight))
-                    continue
-
-                if not src.importance:
-                    break
-                
-                b += src.importance
-                if b >= budget:
-                    break
-                
-                fw.append((budget*src.importance, src.rowid))
-        
-        print(fw, bw)
-        # Note: These feel so similar, maybe there's a way to reduce boilerplate?
-
-        # Search backwards for supporting memories using their edge weight
-        #  to determine how relevant they are to the current memory
-        for budget, src_id in todo_list(bw):
-            print(f"{src_id=}")
-            b = 0
-            for dst, label, weight in self.backward_edges(src_id):
-
-                print(f"{b=}, {weight=}")
-                b += weight
-                if b >= budget:
-                    break
-                
-                g.insert(src_id, dst)
-                g.add_edge(src_id, dst.rowid, (label, weight))
-
-                bw.append((budget*weight, dst.rowid))
-        
-        # Search forwards for response memories using their annotated
-        #  importance - important conclusions are more relevant
-        for budget, dst_id in todo_list(fw):
-            b = 0
-            for label, weight, src in self.forward_edges(dst_id):
-                b += (imp := src.importance or 0)
-                if b >= budget:
-                    break
-
-                g.insert(src.rowid, src)
-                g.add_edge(src.rowid, dst_id, (label, weight))
-
-                fw.append((budget*imp, dst_id))
-
-        print(g.adj)
-        return g
+        for row in cur:
+            yield ScoredMemoryRow.from_row(row)

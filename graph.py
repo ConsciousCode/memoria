@@ -1,30 +1,31 @@
-from typing import Iterable, Optional, overload
-from util import todo_list
+from typing import Callable, Iterable, Optional, overload
+from util import Least, Lexicographic, ifnone, todo_heap
+from heapq import heapify, heappush
+
+class Node[K, E, V]:
+    value: V
+    edges: dict[K, E]
+
+    def __init__(self, value: V, edges: dict[K, E]):
+        self.value = value
+        self.edges = edges
+    
+    def __repr__(self):
+        return f"Node(value={self.value}, edges={self.edges})"
 
 class Graph[K, E, V]:
-    class Node:
-        value: V
-        edges: dict[K, E]
-
-        def __init__(self, value: V, edges: dict[K, E]):
-            self.value = value
-            self.edges = edges
-        
-        def __repr__(self):
-            return f"Node(value={self.value}, edges={self.edges})"
-    
     adj: dict[K, Node]
 
     def __init__(self, keys: dict[K, V]|None = None):
         super().__init__()
-        self.adj = {k: Graph.Node(v, {}) for k, v in (keys or {}).items()}
+        self.adj = {k: Node[K, E, V](v, {}) for k, v in (keys or {}).items()}
     
     def __contains__(self, key: K) -> bool:
         return key in self.adj
 
     def insert(self, key: K, value: V):
         if key not in self.adj:
-            self.adj[key] = Graph.Node(value, {})
+            self.adj[key] = Node[K, E, V](value, {})
     
     def __iter__(self):
         return iter(self.adj)
@@ -69,6 +70,9 @@ class Graph[K, E, V]:
             return self.adj[k].edges
         return (node.edges for node in self.adj.values())
     
+    def items(self) -> Iterable[tuple[K, Node[K, E, V]]]:
+        return self.adj.items()
+
     def has_edge(self, src: K, dst: K) -> bool:
         '''
         Check if there is an edge from src to dst.
@@ -99,10 +103,15 @@ class Graph[K, E, V]:
                 g.add_edge(dst, src, edge)
         return g
 
-    def toposort(self) -> Iterable[K]:
+    def toposort(self, key: Optional[Callable[[V], Optional[Lexicographic]]]=None) -> Iterable[K]:
         '''
         Kahn's algorithm for topological sorting.
+
+        :param key: Optional function to determine the lexicographical order of nodes.
         '''
+
+        if key is None:
+            key = lambda v: None
 
         indeg = Graph[K, None, int]()
         for src in self:
@@ -116,10 +125,15 @@ class Graph[K, E, V]:
                     indeg[dst] += 1
                 indeg.add_edge(src, dst, None)
         
-        sources = [src for src in indeg if indeg[src] == 0]
-        for src in todo_list(sources):
+        sources = [
+            (ifnone(key(self[src]), Least), src)
+                for src, deg in indeg.items()
+                    if deg.value == 0
+        ]
+        heapify(sources)
+        for _, src in todo_heap(sources):
             yield src
             for dst in indeg.edges(src):
                 indeg[dst] -= 1
                 if indeg[dst] == 0:
-                    sources.append(dst)
+                    heappush(sources, (key(self[dst]), dst))
