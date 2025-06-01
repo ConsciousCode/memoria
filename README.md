@@ -1,53 +1,22 @@
-# Memoria Project
+# Memoria
+Memoria is a cognitive architecture which reframes LLMs as interchangeable simulators of "sonas" which are wholly defined by the contents on their "sona file". MCP is used as the basis for coordinating the sona for great flexibility with interacting with the sona. The intended approach is to simulate it directly, but an MCP host could alternatively talk to the sona as a repository of memories stripped of subjective context or adopt its own secondary persona such as a "hypervisor" for debugging.
 
-This project implements Memoria, a system for storing and recalling information, with an AI agent interface.
-
-## Running the REST Server
-
-This server provides a REST API for sending events to Memoria.
-
-### Prerequisites
-
-- Python 3.x
-- Pip
-
-### Installation
-
-1.  Clone the repository (if you haven't already).
-2.  Navigate to the project directory.
-3.  Install the required dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-### Running the Server
-
-To run the FastAPI server, you have two main options:
-
-1.  **Using Uvicorn (recommended for development with auto-reload):**
-    ```bash
-    uvicorn server:app --reload
-    ```
-    -   `server:app` refers to the `app` instance of FastAPI in the `server.py` file.
-    -   `--reload` enables auto-reloading when code changes are detected.
-
-2.  **Directly executing the Python script:**
-    ```bash
-    python server.py
-    ```
-    -   This method will run the server using the Uvicorn settings specified within the script (e.g., host and port).
-
-The server will typically be available at `http://127.0.0.1:8000`. You can access the root endpoint at `http://127.0.0.1:8000/` to check if it's running, and the API documentation (Swagger UI) at `http://127.0.0.1:8000/docs`.
-
-### API Endpoints
-
--   **POST /events/**: Send an event to Memoria.
-    -   **Request Body**:
-        ```json
-        {
-            "prompt": "Your event description or query",
-            "prev": null // or an integer ID of a previous memory
-        }
-        ```
-    -   **Response**: Returns a JSON object with the processing result, including the ID of the new memory.
+## Technical details
+At the highest level, Memoria simulates sonas using LLMs in a state monad pattern, which can be modeled as:
 ```
+type Sona a = State MemoryDAG a
+
+sonaStep :: LLM -> UserInput -> Sona Response
+sonaStep llm input = do
+    appendNodeM input
+    response <- recall input >>= llm
+    appendNodeM response
+    pure response
+```
+
+Every interaction with the sona queries top-k memories along with their dependencies and renders them with a topological sort to reconstruct a new context for the LLM.[^1] The resulting context compared to most chat logs is very concise. We then use this to generate one new response to be added to memory. Unlike long linear chat logs, this allows the agent to maintain coherence over arbitrarily long time horizons, engage in multiple simultaneous conversations (including with itself), and respond asynchronously or even spontaneously. The only synchronization necessary is for concurrent writes to the sona file; order of writes doesn't matter.
+
+[^1]: topological sort helps to preserve causal order and better leverage LLM's autoregressive nature, but it isn't strictly necessary if we annotate with dependencies.
+
+## Ideas to explore
+- Flags to repress memories. May be useful if something goes catastrophic or you say something you shouldn't to avoid having to modify the sona file.

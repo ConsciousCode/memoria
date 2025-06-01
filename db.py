@@ -138,6 +138,22 @@ class Database:
         """, (rowid,))
         return MemoryRow.from_row(cur.fetchone())
 
+    def select_embedding(self, memory_id: int) -> Optional[bytes]:
+        cur = self.cursor()
+        cur.execute("""
+            SELECT embedding FROM vss_nomic_v1_5_index WHERE memory_id = ?
+        """, (memory_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def insert_text_embedding(self, memory_id: int, text: str):
+        e, = nomic_text.embed(text)
+        cur = self.cursor()
+        cur.execute("""
+            INSERT INTO vss_nomic_v1_5_index (memory_id, embedding)
+            VALUES (?, ?)
+        """, (memory_id, e.tobytes()))
+
     def insert_memory(self, kind: MemoryKind, data: Any, fts: Optional[str], importance: Optional[float] = None, timestamp: Optional[datetime] = None) -> int:
         ts = timestamp and timestamp.timestamp()
         cur = self.cursor()
@@ -148,16 +164,18 @@ class Database:
         
         if (rowid := cur.lastrowid) is None:
             raise RuntimeError("Failed to insert memory")
-        
+
         if fts is not None:
             cur.execute("""
                 INSERT INTO memory_fts (rowid, content) VALUES (?, ?)
             """, (rowid, fts))
+            self.insert_text_embedding(rowid, fts)
         
         return rowid
 
     def insert_text(self, text: str, importance: Optional[float] = None, timestamp: Optional[datetime] = None) -> int:
-        return self.insert_memory("text", text, text, importance, timestamp)
+        rowid = self.insert_memory("text", text, text, importance, timestamp)
+        return rowid
     
     def insert_self(self, text: str, timestamp: Optional[datetime] = None) -> int:
         return self.insert_memory("self", text, text, None, timestamp or datetime.now())

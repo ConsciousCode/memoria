@@ -78,7 +78,7 @@ class System1ResponseModel(BaseModel):
 
 class System1Deps(BaseModel):
     instructions: str
-    prev: Optional[int]
+    include: list[int]
     memories: list[Memory]
 
 system1 = Agent(
@@ -94,7 +94,7 @@ system1 = Agent(
 async def system1_system_prompt(ctx: RunContext[System1Deps]) -> str:
     ms = [
         format_memory(m,
-            role="prev" if m.rowid == ctx.deps.prev else None
+            role="prev" if m.rowid in ctx.deps.include else None
         ) for m in ctx.deps.memories
     ]
     print('\n'.join(ms))
@@ -104,21 +104,24 @@ async def system1_system_prompt(ctx: RunContext[System1Deps]) -> str:
     else:
         memory = "Nothing! I have no memories."
     
-    return f"I remember... {memory}\n\nI also know I need to follow these instructions:\n\n{ctx.deps.instructions}"
+    return f"I remember... {memory}\n\n{ctx.deps.instructions}"
 
 class Memoria:
     def __init__(self, db: Database):
         super().__init__()
         self.db = db
     
-    def recall(self, prev: Optional[int], prompt: str) -> Iterable[Memory]:
+    def recall(self, include: Optional[list[int]], prompt: str) -> Iterable[Memory]:
         '''
         Recall memories based on a prompt. This incorporates all indices
         and returns a topological sort of relevant memories.
         '''
 
+        include = include or []
+
         g = Graph[int, tuple[str, float], MemoryRow]()
-        if pm := self.db.select_memory(prev):
+        pms = [self.db.select_memory(rowid) for rowid in include or []]
+        for pm in filter(None, pms):
             g.insert(pm.rowid, pm)
         
         rows: list[ScoredMemoryRow] = []
@@ -218,11 +221,14 @@ class Memoria:
                 data=row.data,
                 importance=row.importance,
                 edges=edges,
-                role="prev" if row.rowid == prev else None
+                role="prev" if row.rowid in include else None
             )
 
-    async def prompt(self, name: str, prev: Optional[int], instructions: str, prompt: str):
+    async def prompt(self, name: str, include: Optional[list[int]], instructions: str, prompt: str):
         ts = datetime.now()
+
+        if include is None:
+            include = []
 
         with capture_run_messages() as messages:
             try:
@@ -230,11 +236,8 @@ class Memoria:
                     prompt,
                     deps=System1Deps(
                         instructions=instructions,
-                        prev=prev,
-                        memories=list(self.recall(
-                            prev=prev,
-                            prompt=prompt
-                        ))
+                        include=include,
+                        memories=list(self.recall(include, prompt))
                     ),
                     output_type=System1ResponseModel
                 )
@@ -262,8 +265,9 @@ class Memoria:
         )
         
         # If there was a previous message, link to it
-        if prev is not None:
-            self.db.link("prev", 1.0, response_id, prev)
+        self.db.link_many(
+            ("prev", 1.0, response_id, prev) for prev in include
+        )
         
         self.db.commit()
         

@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS vss_nomic_v1_5_index USING vec0 (
-    memory_id INTEGER PRIMARY KEY,
-    embedding FLOAT[1536]
+    rowid INTEGER PRIMARY KEY,
+    memory_id INTEGER,
+    embedding FLOAT[1536],
+
+    FOREIGN KEY (memory_id) REFERENCES memories(rowid),
+    UNIQUE(memory_id, embedding)
 );
