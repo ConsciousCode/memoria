@@ -6,7 +6,7 @@ from pydantic import Field
 from starlette.exceptions import HTTPException
 
 from memoria import Database, Memoria
-from util import json_t
+from util import JsonValue
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
@@ -15,7 +15,7 @@ async def lifespan(server: FastMCP):
 
 
 mcp = FastMCP("memoria",
-    """Manages and organizes the agent's persistent memory graph—a 'person file' that accumulates and links experiences. Designed to provide LLMs with a structured, append-only record of the agent's life and context, like a ROM for agent simulation.""",
+    """Coordinates a "sona" representing a cohesive identity and memory.""",
     lifespan=lifespan
 )
 
@@ -27,7 +27,7 @@ class MemorySchema(BaseModel):
     rowid: int
     timestamp: Optional[float]
     kind: str
-    data: json_t
+    data: JsonValue
     importance: Optional[float]
     edges: dict[str, MemoryEdge]
 
@@ -65,37 +65,36 @@ async def memory_resource(rowid: int):
 @mcp.tool("recall")
 async def recall(
         prompt: Annotated[str, Field(description="Prompt to base the recall on.")],
-        include: Annotated[Optional[list[int]], Field(description="List of memory ids to include as part of the recall. Example: just the previous message in chat log.")] = None
+        include: Annotated[Optional[list[int]], Field(description="List of memory ids to include as part of the recall. Example: the previous message in a chat log.")] = None
     ) -> list[MemorySchema]:
     '''
     Recall memories related to the prompt, including relevant extra memories
     and their dependencies.
     '''
-    try:
-        ctx = mcp.get_context()
-        memoria = cast(Memoria, ctx.request_context.lifespan_context)
-        results = memoria.recall(include, prompt)
-        return [
-            MemorySchema(
-                rowid=m.rowid,
-                timestamp=m.timestamp and m.timestamp.timestamp(),
-                kind=m.kind,
-                data=m.data,
-                importance=m.importance,
-                edges={
-                    edge.label: MemoryEdge(
-                        dst=edge.dst.rowid,
-                        weight=edge.weight
-                    ) for edge in memoria.db.backward_edges(m.rowid)
-                }
-             ) for m in results
-        ]
-    except Exception as e:
-        raise HTTPException(500, detail=str(e))
+    ctx = mcp.get_context()
+    memoria = cast(Memoria, ctx.request_context.lifespan_context)
+    results = memoria.recall(include, prompt)
+    return [
+        MemorySchema(
+            rowid=m.rowid,
+            timestamp=m.timestamp and m.timestamp.timestamp(),
+            kind=m.kind,
+            data=m.data,
+            importance=m.importance,
+            edges={
+                edge.label: MemoryEdge(
+                    dst=edge.dst.rowid,
+                    weight=edge.weight
+                ) for edge in memoria.db.backward_edges(m.rowid)
+            }
+            ) for m in results
+    ]
 
 @mcp.prompt()
-def converse(name: str):
+def converse(name: str=""):
     '''Talk to the agent as a user.'''
+    if not name:
+        return "I'm talking to a user."
     return f"I'm talking to a user named {name}."
 
 def main():

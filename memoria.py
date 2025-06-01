@@ -1,7 +1,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 import json
-from typing import Annotated, Iterable, Literal, Optional, cast
+from typing import Annotated, Any, Iterable, Literal, Optional, cast, overload
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -23,7 +23,7 @@ class Memory:
     data: json_t
     importance: Optional[float]
     edges: dict[str, list[int]]
-    role: Optional[Literal['prev']] = None
+    #role: Optional[Literal['prev']] = None
 
 def format_memory(memory: Memory, **props):
     p = {
@@ -36,14 +36,14 @@ def format_memory(memory: Memory, **props):
     match memory.kind:
         case "self":
             data = cast(SelfMemory, memory.data)
-            return X("self", name=data['name'],
+            return X("self", name=data.name,
                 **p, **memory.edges, **props
-            )(data['content'])
+            )(data.content)
         case "other":
             data = cast(OtherMemory, memory.data)
-            return X("other", name=data['name'],
+            return X("other", name=data.name,
                 **p, **memory.edges, **props
-            )(data["content"])
+            )(data.content)
         case "text" if isinstance(memory.data, str):
             return X("text", **p, **memory.edges, **props)(
                 memory.data
@@ -97,8 +97,7 @@ async def system1_system_prompt(ctx: RunContext[System1Deps]) -> str:
             role="prev" if m.rowid in ctx.deps.include else None
         ) for m in ctx.deps.memories
     ]
-    print('\n'.join(ms))
-    exit()
+
     if ms:
         memory = f"<memories>\n{'\n'.join(ms)}\n</memories>"
     else:
@@ -111,6 +110,66 @@ class Memoria:
         super().__init__()
         self.db = db
     
+    @overload
+    def append(self,
+        kind: Literal['self'],
+        data: SelfMemory,
+        timestamp: Optional[datetime],
+        edges: dict[str, list[int]],
+        description: Optional[str] = None,
+        importance: Optional[float] = None
+    ) -> Memory: ...
+    @overload
+    def append(self,
+        kind: Literal['other'],
+        data: OtherMemory,
+        timestamp: Optional[datetime],
+        edges: dict[str, list[int]],
+        description: Optional[str] = None,
+        importance: Optional[float] = None
+    ) -> Memory: ...
+
+    def append(self,
+            kind: MemoryKind,
+            data: Any, # Goddamned Python typing can't reconcile JsonValue with TypedDict
+            timestamp: Optional[datetime],
+            edges: dict[str, list[int]],
+            description: Optional[str] = None,
+            importance: Optional[float] = None
+        ) -> Memory:
+        '''
+        Append a memory to the sona file.
+        '''
+        match kind:
+            case "self":
+                rowid = self.db.insert_self(data, timestamp)
+            
+            case "other":
+                rowid = self.db.insert_other(
+                    data["name"],
+                    data["content"],
+                    importance,
+                    timestamp
+                )
+            
+            case _:
+                rowid = self.db.insert_text(
+                    data, importance, timestamp
+                )
+        
+        return Memory(rowid, timestamp, kind, data, importance, edges)
+    
+    '''
+    def recall(self,
+            prompt: str,
+            include: Optional[list[UUID]]=None,
+            timestamp: Optional[datetime]=None,
+            importance: float=0.30,
+            recency: float=0.30,
+            fts: float=0.15,
+            vss: float=0.25,
+            k: int=20
+        ) -> Iterable[tuple[Memory, float]]:'''
     def recall(self, include: Optional[list[int]], prompt: str) -> Iterable[Memory]:
         '''
         Recall memories based on a prompt. This incorporates all indices
@@ -138,7 +197,6 @@ class Memoria:
         
         for row in rows:
             rowid, score = row.rowid, row.score or 0
-            print(f"{score=}")
             if score <= 0:
                 break
 
@@ -173,17 +231,13 @@ class Memoria:
                 
                 fw.append((budget*src.importance, src.rowid))
         
-        print(fw, bw)
         # Note: These feel so similar, maybe there's a way to reduce boilerplate?
 
         # Search backwards for supporting memories using their edge weight
         #  to determine how relevant they are to the current memory
         for budget, src_id in todo_list(bw):
-            print(f"{src_id=}")
             b = 0
             for dst, label, weight in self.db.backward_edges(src_id):
-
-                print(f"{b=}, {weight=}")
                 b += weight
                 if b >= budget:
                     break
@@ -207,7 +261,6 @@ class Memoria:
 
                 fw.append((budget*imp, dst_id))
 
-        print("Edges", list(g.edges()))
         for rowid in g.invert().toposort(key=lambda v: v.timestamp):
             edges: dict[str, list[int]] = defaultdict(list)
             for v, (k, w) in g.edges(rowid).items():
@@ -221,7 +274,7 @@ class Memoria:
                 data=row.data,
                 importance=row.importance,
                 edges=edges,
-                role="prev" if row.rowid in include else None
+                #role="prev" if row.rowid in include else None
             )
 
     async def prompt(self, name: str, include: Optional[list[int]], instructions: str, prompt: str):

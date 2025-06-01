@@ -1,11 +1,15 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable, Literal, NamedTuple, Optional, Self, TypedDict, cast, overload
+from typing import Any, Iterable, Literal, Mapping, NamedTuple, Optional, Self, Sequence, TypedDict, cast, overload
 import sqlite3
 import json
 
-from util import json_t
+from numpy import ndarray
+import numpy
+from openai import BaseModel
+
+from util import finite, json_t
 
 import sqlite_vec
 from fastembed import TextEmbedding, ImageEmbedding
@@ -29,11 +33,11 @@ nomic_image = ImageEmbedding(
 
 type MemoryKind = Literal["self", "other", "text", "image", "file", "entity"]
 
-class SelfMemory(TypedDict):
+class SelfMemory(BaseModel):
     name: Optional[str]
     content: str
 
-class OtherMemory(TypedDict):
+class OtherMemory(BaseModel):
     name: str
     content: str
 
@@ -138,13 +142,14 @@ class Database:
         """, (rowid,))
         return MemoryRow.from_row(cur.fetchone())
 
-    def select_embedding(self, memory_id: int) -> Optional[bytes]:
+    def select_embedding(self, memory_id: int) -> Optional[ndarray]:
         cur = self.cursor()
         cur.execute("""
             SELECT embedding FROM vss_nomic_v1_5_index WHERE memory_id = ?
         """, (memory_id,))
-        row = cur.fetchone()
-        return row[0] if row else None
+        if row := cur.fetchone():
+            return numpy.frombuffer(row[0], dtype=numpy.float32)
+        return None
 
     def insert_text_embedding(self, memory_id: int, text: str):
         e, = nomic_text.embed(text)
@@ -262,36 +267,54 @@ class Database:
             WHERE src_id = ? AND dst_id = ?
         """, (src_id, dst_id)).fetchone()
 
-    def recall(self, prompt: str, timestamp: Optional[datetime]) -> Iterable[ScoredMemoryRow]:
+    def recall(self,
+            prompt: str,
+            timestamp: Optional[datetime]=None,
+            importance: float=0.30,
+            recency: float=0.30,
+            fts: float=0.15,
+            vss: float=0.25,
+            k: int=20
+        ) -> Iterable[ScoredMemoryRow]:
+        if timestamp is None:
+            timestamp = datetime.now()
+        
+        # Be defensive against SQL injection
+        importance = finite(float(importance))
+        recency = finite(float(recency))
+        fts = finite(float(fts))
+        vss = finite(float(vss))
+        k = int(k)
+
         e, = nomic_text.embed(prompt)
         cur = self.cursor()
-        cur.execute("""
+        cur.execute(f"""
             WITH
                 fts AS (
                     SELECT rowid, bm25(memory_fts) AS score
                     FROM memory_fts
                     WHERE memory_fts MATCH ?
-                    LIMIT 20
+                    LIMIT {k}
                 ),
                 vec AS (
                     SELECT memory_id, distance
                     FROM vss_nomic_v1_5_index
-                    WHERE embedding MATCH ? AND k = 20
+                    WHERE embedding MATCH ? AND k = {k}
                 )
             SELECT
                 m.rowid, m.timestamp, m.kind, JSON(m.data), m.importance,
-                IFNULL(0.30 * m.importance, 0) +
-                IFNULL(0.30 * POWER(0.995, ? - m.timestamp), 0) +
-                IFNULL(0.15 *
+                IFNULL({importance} * m.importance, 0) +
+                IFNULL({recency} * POWER(0.995, ? - m.timestamp), 0) +
+                IFNULL({fts} *
                     (fts.score - MIN(fts.score) OVER())
                     / (MAX(fts.score) OVER() - MIN(fts.score) OVER()), 0) +
-                IFNULL(0.25 / (1 + vec.distance), 0) AS score
+                IFNULL({vss} / (1 + vec.distance), 0) AS score
             FROM memories m
                 LEFT JOIN fts ON m.rowid = fts.rowid
                 LEFT JOIN vec ON m.rowid = vec.memory_id
             ORDER BY score DESC
-            LIMIT 20
-        """, (json.dumps(prompt), e.tobytes(), datetime.now().timestamp()))
+            LIMIT {k}
+        """, (json.dumps(prompt), e.tobytes(), timestamp.timestamp()))
 
         for row in cur:
             yield ScoredMemoryRow.from_row(row)

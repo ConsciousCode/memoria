@@ -1,10 +1,14 @@
 import json
-from typing import Callable, Concatenate, Iterable, Mapping, Protocol, Self, Sequence, Union, Unpack
+from typing import Callable, Iterable, Mapping, Protocol, Self, Sequence
 import re
 from functools import wraps
 from heapq import heappop
 
-type json_t = Mapping[str, json_t]|Sequence[json_t]|str|int|float|bool|None
+
+class JSONStructure(Protocol):
+    def __json__(self) -> "json_t": ...
+
+type json_t = JSONStructure|Mapping[str, json_t]|Sequence[json_t]|str|int|float|bool|None
 
 def _fattr(x: json_t) -> str:
     if isinstance(x, str) and re.match(r"""[\s'"=</>&;]""", x):
@@ -92,3 +96,11 @@ def ifnone[*Ts](*args: *Ts): # type: ignore
         if arg is not None:
             return arg
     return None
+
+def finite(f: float) -> float:
+    '''
+    Return a finite float, or 0.0 if the input is NaN or infinite.
+    '''
+    if f != f or f == float('inf') or f == float('-inf'):
+        return 0.0
+    return f
