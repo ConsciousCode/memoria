@@ -1,4 +1,5 @@
-from typing import Callable, Iterable, Optional, overload
+from typing import Callable, Iterable, Optional
+
 from util import Least, Lexicographic, ifnone, todo_heap
 from heapq import heapify, heappush
 
@@ -14,7 +15,7 @@ class Node[K, E, V]:
         return f"Node(value={self.value}, edges={self.edges})"
 
 class Graph[K, E, V]:
-    adj: dict[K, Node]
+    adj: dict[K, Node[K, E, V]]
 
     def __init__(self, keys: dict[K, V]|None = None):
         super().__init__()
@@ -22,6 +23,9 @@ class Graph[K, E, V]:
     
     def __contains__(self, key: K) -> bool:
         return key in self.adj
+    
+    def __bool__(self) -> bool:
+        return bool(self.adj)
 
     def insert(self, key: K, value: V):
         if key not in self.adj:
@@ -60,16 +64,18 @@ class Graph[K, E, V]:
         
         return self.edges(src).pop(dst)
     
-    @overload
-    def edges(self, k: K) -> dict[K, E]: ...
-    @overload
-    def edges(self) -> Iterable[dict[K, E]]: ...
-
-    def edges(self, k: Optional[K] = None) -> dict[K, E]|Iterable[dict[K, E]]:
-        if k is not None:
-            return self.adj[k].edges
-        return (node.edges for node in self.adj.values())
+    def keys(self) -> Iterable[K]:
+        return self.adj.keys()
     
+    def values(self) -> Iterable[V]:
+        return (node.value for node in self.adj.values())
+    
+    def edges(self, k: K) -> dict[K, E]:
+        return self.adj[k].edges
+    
+    def edges_x(self) -> Iterable[dict[K, E]]:
+        return (node.edges for node in self.adj.values())
+
     def items(self) -> Iterable[tuple[K, Node[K, E, V]]]:
         return self.adj.items()
 

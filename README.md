@@ -11,11 +11,12 @@ Memoria is a cognitive architecture which reframes LLMs as interchangeable simul
 ACTs exist in the MCP host which is meant to manage their interactions via MCP clients. Self, Sona, and Memory describe the core data structures managed by a Memoria server. ACTs do not communicate directly; their coordination is implicit through the memories they share semi-isolated by sonas.
 
 ## Interactions
-Sona isolation is not absolute. Memories in recall are weighted by the vector similarities between sonas they belong to and the sonas being used by an actor. Thus typically recalled memories will be from within the same sona. However, this is not a hard boundary; if a memory is deemed relevant enough, it may be recalled from another sona, at which point it is added to that sona. This allows for fuzzy sets of subpersonas, where sonas can overlap and share memories without being siloed.
+Sona isolation is not absolute. Memories in recall are weighted by the vector similarities between sonas they belong to and the sonas being used by an actor. Thus recalled memories will typically be from within the same sona. However, this is not a hard boundary; if a memory is deemed relevant enough, it may be recalled from another sona, at which point it is added to that sona. This allows for fuzzy sets of subpersonas, where sonas can overlap and share memories without being siloed.
 
 Compare this to typical thought patterns in humans. Subconscious processes operate in the background broadly unknown to the conscious mind, but when insights from it are determined to be important or relevant enough, they "bubble up" into conscious awareness. This emulates spontaneous "aha!" moments and more broadly matches the brain's "small-world network" structure; strong local connections with sparse global connections.
 
 ## Technical details
+### Overall architecture
 At the highest level, Memoria simulates sonas using LLMs in a state monad pattern, which can be modeled as:
 ```
 type Sona a = State MemoryDAG a
@@ -32,5 +33,35 @@ Every interaction with the sona queries top-k memories along with their dependen
 
 [^1]: topological sort helps to preserve causal order and better leverage LLM's autoregressive nature, but it isn't strictly necessary if we annotate with dependencies.
 
+### Recall
+Recall uses a weighted sum to calculate a score. [^2] The components used in this score are:
+- **Recency** - The time since the memory was created, with more recent memories being weighted higher. Memories may lack a timestamp which is treated as infinitely far in the past, and thus recency is not considered.
+- **Relevance** - The relevance of the memory to the current context, which is determined by the similarity of the memory's content to the current input. This is split into two separate components, vector similarity and fts (full-text search) for exact keyword matches.
+- **Importance** - The importance of the memory annotated by a model. This allows prioritization of memories. The model annotates 1-10 and it's divided by 10, but to better approach its "true" importance, every time a memory is fetched the importance is adjusted depending on how actually relevant it was to the response. Importance is never exposed to agent simulators so this mutation doesn't otherwise impact the memory immutability.
+- **Sona similarity** - The similarity between the name of the sona being used and the names of sonas the memory belongs to. This enables a kind of fuzzy small-world connectivity for isolating sonas and is calculated using a vector similarity metric such as cosine similarity.
+
+Each memory is assigned a "budget" based on their score to be filled with the weights of edges to dependencies. This is done recursively, multiplying the budget by the weight, until all budgets are exhausted or no more dependencies are found. The final set of memories is loaded into a graph and sorted topologically with the timestamp as a tie-breaker.
+
+### Endpoints
+- **Memory** - Fetch a memory by CID.
+- **File** - Fetch a file by CID.
+- **Recall** - Retrieve the memories that an agent would recall given a prompt.
+
 ## Ideas to explore
 - Flags to repress memories. May be useful if something goes catastrophic or you say something you shouldn't to avoid having to modify the sona file.
+
+## Citations
+[^2]: [Generative Agents: Interactive Simulacra of Human Behavior](https://arxiv.org/abs/2304.03442) - The original paper on generative agents which inspired Memoria's architecture.
+[^3]: [Memory-augmented neural networks](https://arxiv.org/abs/1605.06065) - A paper on memory-augmented neural networks which inspired the idea of using a DAG for memories.
+
+## Misc notes
+- Memory dependencies are immutable, but there's no limit on how many references can be made to a memory. If I go with IPLD, I probably want to encode dependency edges as parts of the content
+
+## IPLD
+```
+class Memory:
+    timestamp: Optional[float]
+    kind: str
+    data: CBOR
+    dependencies: dict[str, tuple[float, CID]]
+```

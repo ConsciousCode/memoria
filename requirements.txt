@@ -1,5 +1,7 @@
 sqlite-vec
 numpy
 fastembed-gpu
-fastapi
-uvicorn[standard]
+ipld
+mcp
+pydantic
+pydantic-ai

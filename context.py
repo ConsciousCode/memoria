@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional, TypedDict, cast
+from uuid import UUID
+
 from mcp.server.fastmcp import Context, FastMCP
 from openai import BaseModel
 from pydantic import Field
 from starlette.exceptions import HTTPException
 
 from memoria import Database, Memoria
-from util import JsonValue
+from util import json_t
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
@@ -27,7 +29,7 @@ class MemorySchema(BaseModel):
     rowid: int
     timestamp: Optional[float]
     kind: str
-    data: JsonValue
+    data: json_t
     importance: Optional[float]
     edges: dict[str, MemoryEdge]
 
@@ -42,13 +44,12 @@ async def memory_resource(rowid: int):
     try:
         ctx = mcp.get_context()
         memoria = cast(Memoria, ctx.request_context.lifespan_context)
-        m = memoria.db.select_memory(rowid)
-        if m is None:
+        if (m := memoria.db.select_memory_rowid(rowid)) is None:
             return {"error": "Memory not found"}, 404
         
         return MemorySchema(
             rowid= m.rowid,
-            timestamp= m.timestamp and m.timestamp.timestamp(),
+            timestamp= m.timestamp,
             kind= m.kind,
             data= m.data,
             importance= m.importance,
@@ -65,7 +66,7 @@ async def memory_resource(rowid: int):
 @mcp.tool("recall")
 async def recall(
         prompt: Annotated[str, Field(description="Prompt to base the recall on.")],
-        include: Annotated[Optional[list[int]], Field(description="List of memory ids to include as part of the recall. Example: the previous message in a chat log.")] = None
+        include: Annotated[Optional[list[str]], Field(description="List of memory UUIDs to include as part of the recall. Example: the previous message in a chat log.")] = None
     ) -> list[MemorySchema]:
     '''
     Recall memories related to the prompt, including relevant extra memories
@@ -73,7 +74,7 @@ async def recall(
     '''
     ctx = mcp.get_context()
     memoria = cast(Memoria, ctx.request_context.lifespan_context)
-    results = memoria.recall(include, prompt)
+    results = memoria.recall(prompt, [UUID(s) for s in include or []])
     return [
         MemorySchema(
             rowid=m.rowid,
@@ -87,7 +88,7 @@ async def recall(
                     weight=edge.weight
                 ) for edge in memoria.db.backward_edges(m.rowid)
             }
-            ) for m in results
+            ) for m in results.values()
     ]
 
 @mcp.prompt()

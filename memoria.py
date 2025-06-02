@@ -1,8 +1,7 @@
-from collections import defaultdict
-from dataclasses import dataclass
 import json
 from typing import Annotated, Any, Iterable, Literal, Optional, cast, overload
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 from pydantic_ai.models.anthropic import AnthropicModel
@@ -11,47 +10,9 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from pydantic_ai import Agent, RunContext, capture_run_messages
 
-from db import Database, MemoryKind, MemoryRow, OtherMemory, ScoredMemoryRow, SelfMemory
+from db import Database, MemoryKind, MemoryRow, OtherMemory, SelfMemory, Memory
 from graph import Graph
 from util import X, json_t, todo_list
-
-@dataclass
-class Memory:
-    rowid: int
-    timestamp: Optional[datetime]
-    kind: MemoryKind
-    data: json_t
-    importance: Optional[float]
-    edges: dict[str, list[int]]
-    #role: Optional[Literal['prev']] = None
-
-def format_memory(memory: Memory, **props):
-    p = {
-        "id": memory.rowid,
-        "datetime": memory.timestamp and
-            memory.timestamp.replace(microsecond=0).isoformat(),
-        "importance": memory.importance
-    }
-    
-    match memory.kind:
-        case "self":
-            data = cast(SelfMemory, memory.data)
-            return X("self", name=data.name,
-                **p, **memory.edges, **props
-            )(data.content)
-        case "other":
-            data = cast(OtherMemory, memory.data)
-            return X("other", name=data.name,
-                **p, **memory.edges, **props
-            )(data.content)
-        case "text" if isinstance(memory.data, str):
-            return X("text", **p, **memory.edges, **props)(
-                memory.data
-            )
-        case kind:
-            return X(kind, **p, **memory.edges, **props)(
-                json.dumps(memory.data)
-            )
 
 anthropic_model = AnthropicModel("claude-3-7-sonnet-latest")
 
@@ -78,8 +39,8 @@ class System1ResponseModel(BaseModel):
 
 class System1Deps(BaseModel):
     instructions: str
-    include: list[int]
-    memories: list[Memory]
+    #include: list[int]
+    memories: Graph[int, tuple[str, float], MemoryRow]
 
 system1 = Agent(
     name="ezra.system1",
@@ -90,20 +51,68 @@ system1 = Agent(
     instructions="""I need to use my memories to respond to the prompt. The prompt and my response will be added to my memory."""
 )
 
+def localize_memory(g: Graph[int, tuple[str, float], MemoryRow]) -> Iterable[tuple[Optional[int], MemoryRow, dict[str, int]]]:
+    '''
+    Serialize the memory graph into a sequence of memories with localized
+    references and edges.
+    '''
+    gv = g.invert()
+    refs: dict[int, int] = {} # rowid: ref index
+
+    for rowid in gv.toposort(key=lambda v: v.timestamp):
+        # Only include ids if they have references
+        if gv.edges(rowid):
+            ref = refs[rowid] = len(refs)
+        else:
+            ref = None
+        
+        # We don't have to check if rowid is in refs because of toposort
+        yield ref, gv[rowid], {
+            e: refs[rowid]
+                for rowid, (e, w) in gv.edges(rowid).items()
+        }
+
+def format_memory(g: Graph[int, tuple[str, float], MemoryRow]) -> Iterable[str]:
+    '''Render memory for the context.'''
+
+    for ref, memory, edges in localize_memory(g):
+        p = {
+            "id": ref,
+            "datetime": memory.timestamp and datetime
+                .fromtimestamp(memory.timestamp)
+                .replace(microsecond=0)
+                .isoformat(),
+            "importance": memory.importance,
+            **edges
+        }
+        
+        match memory.kind:
+            case "self":
+                data = cast(SelfMemory, memory.data)
+                yield X("self", name=data.name, **p)(data.content)
+            case "other":
+                data = cast(OtherMemory, memory.data)
+                yield X("other", name=data.name, **p)(data.content)
+            case "text" if isinstance(memory.data, str):
+                yield X("text", **p)(memory.data)
+            case kind:
+                yield X(kind, **p)(json.dumps(memory.data))
+
 @system1.system_prompt
 async def system1_system_prompt(ctx: RunContext[System1Deps]) -> str:
-    ms = [
-        format_memory(m,
-            role="prev" if m.rowid in ctx.deps.include else None
-        ) for m in ctx.deps.memories
-    ]
-
-    if ms:
-        memory = f"<memories>\n{'\n'.join(ms)}\n</memories>"
+    if ms := ctx.deps.memories:
+        memory = f"<memories>\n{'\n'.join(format_memory(ms))}\n</memories>"
     else:
         memory = "Nothing! I have no memories."
     
     return f"I remember... {memory}\n\n{ctx.deps.instructions}"
+
+class RecallConfig(BaseModel):
+    importance: Optional[float]=None
+    recency: Optional[float]=None
+    fts: Optional[float]=None
+    vss: Optional[float]=None
+    k: Optional[int]=None
 
 class Memoria:
     def __init__(self, db: Database):
@@ -142,10 +151,10 @@ class Memoria:
         '''
         match kind:
             case "self":
-                rowid = self.db.insert_self(data, timestamp)
+                return self.db.insert_self(data, timestamp)
             
             case "other":
-                rowid = self.db.insert_other(
+                return self.db.insert_other(
                     data["name"],
                     data["content"],
                     importance,
@@ -153,11 +162,9 @@ class Memoria:
                 )
             
             case _:
-                rowid = self.db.insert_text(
+                return self.db.insert_text(
                     data, importance, timestamp
                 )
-        
-        return Memory(rowid, timestamp, kind, data, importance, edges)
     
     '''
     def recall(self,
@@ -170,35 +177,52 @@ class Memoria:
             vss: float=0.25,
             k: int=20
         ) -> Iterable[tuple[Memory, float]]:'''
-    def recall(self, include: Optional[list[int]], prompt: str) -> Iterable[Memory]:
+    def recall(self,
+            prompt: str,
+            include: Optional[list[UUID]]=None,
+            timestamp: Optional[datetime]=None,
+            config: Optional[RecallConfig]=None
+        ) -> Graph[int, tuple[str, float], MemoryRow]:
         '''
         Recall memories based on a prompt. This incorporates all indices
         and returns a topological sort of relevant memories.
         '''
-
-        include = include or []
-
         g = Graph[int, tuple[str, float], MemoryRow]()
-        pms = [self.db.select_memory(rowid) for rowid in include or []]
-        for pm in filter(None, pms):
-            g.insert(pm.rowid, pm)
         
-        rows: list[ScoredMemoryRow] = []
+        for u in include or []:
+            if pm := self.db.select_memory(u):
+                g.insert(pm.rowid, pm)
         
+        rows: list[tuple[MemoryRow, float]] = []
+        
+        if config:
+            importance = config.importance
+            recency = config.recency
+            fts = config.fts
+            vss = config.vss
+            k = config.k
+        else:
+            importance = recency = fts = vss = k = None
+
+        memories = self.db.recall(
+            prompt, timestamp, importance, recency, fts, vss, k
+        )
         # Populate the graph with nodes so we can detect when there are edges
         #  between our seletions
-        for row in self.db.recall(prompt, datetime.now()):
-            rows.append(row)
-            g.insert(row.rowid, row.unscored())
+        for rs in memories:
+            row, score = rs
+            rows.append(rs)
+            g.insert(row.rowid, row)
 
         # Populate backward and forward edges
         bw: list[tuple[float, int]] = []
         fw: list[tuple[float, int]] = []
         
-        for row in rows:
-            rowid, score = row.rowid, row.score or 0
+        for rs in rows:
+            row, score = rs
             if score <= 0:
                 break
+            rowid = row.rowid
 
             budget = score*20
 
@@ -260,28 +284,15 @@ class Memoria:
                 g.add_edge(src.rowid, dst_id, (label, weight))
 
                 fw.append((budget*imp, dst_id))
+        
+        return g
 
-        for rowid in g.invert().toposort(key=lambda v: v.timestamp):
-            edges: dict[str, list[int]] = defaultdict(list)
-            for v, (k, w) in g.edges(rowid).items():
-                edges[k].append(v)
-            
-            row = g[rowid]
-            yield Memory(
-                rowid=rowid,
-                timestamp=row.timestamp,
-                kind=row.kind,
-                data=row.data,
-                importance=row.importance,
-                edges=edges,
-                #role="prev" if row.rowid in include else None
-            )
-
-    async def prompt(self, name: str, include: Optional[list[int]], instructions: str, prompt: str):
+    async def prompt(self, name: str, include: Optional[list[UUID]], instructions: str, prompt: str):
         ts = datetime.now()
 
-        if include is None:
-            include = []
+        inc = list(filter(None,
+            (self.db.memory_uuid_to_rowid(u) for u in include or [])
+        ))
 
         with capture_run_messages() as messages:
             try:
@@ -289,8 +300,7 @@ class Memoria:
                     prompt,
                     deps=System1Deps(
                         instructions=instructions,
-                        include=include,
-                        memories=list(self.recall(include, prompt))
+                        memories=self.recall(prompt, include)
                     ),
                     output_type=System1ResponseModel
                 )
@@ -298,34 +308,34 @@ class Memoria:
                 print(messages)
         output = result.output
 
-        prompt_id = self.db.insert_other(
+        p = self.db.insert_other(
             name, prompt,
             importance=output.importance / 10,
             timestamp=ts
         )
         # Do I need the importance of the response?
-        response_id = self.db.insert_self(
+        r = self.db.insert_self(
             output.response,
             timestamp=datetime.now()
         )
         
-        self.db.link("prompt", 1.0, response_id, prompt_id)
+        self.db.link("prompt", 1.0, r.rowid, p.rowid)
         
         # Connect referenced memories to response with weights
         self.db.link_many(
-            ("ref", weight / 10, response_id, int(rowid))
+            ("ref", weight / 10, r.rowid, int(rowid))
                 for rowid, weight in output.weights.items()
         )
         
         # If there was a previous message, link to it
         self.db.link_many(
-            ("prev", 1.0, response_id, prev) for prev in include
+            ("prev", 1.0, r.rowid, prev) for prev in inc
         )
         
         self.db.commit()
         
         return {
-            "id": response_id,
+            "id": r,
             "response": output.response,
             "importance": output.importance,
             "weights": output.weights

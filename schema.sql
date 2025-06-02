@@ -2,18 +2,17 @@ PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS files (
     rowid INTEGER PRIMARY KEY,
-    multihash TEXT NOT NULL,
+    cid BLOB NOT NULL UNIQUE,
     filename TEXT, /* filename at time of upload */
     mimetype TEXT NOT NULL,
     metadata JSONB,
     size INTEGER NOT NULL,
-    content BLOB, /* actual file content - NULL = external storage */
-
-    UNIQUE(multihash)
+    content BLOB /* actual file content - NULL = external storage */
 );
 
 CREATE TABLE IF NOT EXISTS memories (
     rowid INTEGER PRIMARY KEY,
+    cid BLOB NOT NULL UNIQUE,
     timestamp REAL,
     kind TEXT NOT NULL,
     data JSONB NOT NULL,
@@ -31,9 +30,11 @@ CREATE TABLE IF NOT EXISTS edges (
 
 CREATE TABLE IF NOT EXISTS sonas (
     rowid INTEGER PRIMARY KEY,
+    uuid BLOB NOT NULL UNIQUE,
     name TEXT NOT NULL
 )
 
+/* Memory membership in sonas */
 CREATE TABLE IF NOT EXISTS sona_memories (
     sona_id INTEGER REFERENCES sonas(id) ON DELETE CASCADE,
     memory_id INTEGER REFERENCES memories(id) ON DELETE CASCADE,
