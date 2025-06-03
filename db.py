@@ -1,20 +1,18 @@
-
 from dataclasses import dataclass
-from datetime import datetime, time
-from typing import Any, Iterable, Literal, Mapping, NamedTuple, Optional, Self, Sequence, TypedDict, cast, overload
+from datetime import datetime
+from typing import Iterable, Literal, NamedTuple, Optional
 import sqlite3
 import json
-from uuid import UUID
 
+from cid import CIDv1
 from numpy import ndarray
 import numpy
 from openai import BaseModel
-from uuid_extensions import uuid7
-
-from util import finite, json_t
-
 import sqlite_vec
 from fastembed import TextEmbedding
+import ipld
+
+from util import finite, json_t
 
 nomic_text = TextEmbedding(
     model_name="nomic-ai/nomic-embed-text-v1.5",
@@ -39,21 +37,26 @@ class OtherMemory(BaseModel):
 class MemoryRow(NamedTuple):
     '''Raw memory row from the database.'''
     rowid: int
-    uuid: bytes
+    cid: bytes
     timestamp: Optional[float]
     kind: MemoryKind
     data: str
     importance: Optional[float]
 
 @dataclass
+class Edge:
+    weight: float
+    target: CIDv1
+
+@dataclass
 class Memory:
     rowid: int
-    uuid: UUID
+    cid: CIDv1
     timestamp: Optional[datetime]
     kind: MemoryKind
     data: json_t
     importance: Optional[float]
-    #edges: dict[str, list[int]]
+    edges: dict[str, list[Edge]]
     #role: Optional[Literal['prev']] = None
 
 class BackwardEdge(NamedTuple):
@@ -65,6 +68,26 @@ class ForwardEdge(NamedTuple):
     label: str
     weight: float
     src: MemoryRow
+
+def memory_cid(
+        kind: MemoryKind,
+        data: json_t,
+        timestamp: Optional[float],
+        edges: dict[str, list[Edge]]
+    ) -> CIDv1:
+    return CIDv1("dag-cbor", ipld.multihash(ipld.dagcbor_marshal({
+        "kind": kind,
+        "data": data,
+        "timestamp": timestamp,
+        "edges": {
+            label: [
+                {
+                    "target": e.target,
+                    "weight": e.weight
+                } for e in dsts
+            ] for label, dsts in edges.items()
+        }
+    })))
 
 @dataclass
 class Database:
@@ -96,31 +119,27 @@ class Database:
         fn, x, yz, rest = mh[:2], mh[2], mh[3:5], mh[5:]
         return f"{self.file_path}/{fn}/{x}/{yz}/{rest}{ext}"
     
-    def select_memory_rowid(self, rowid: Optional[int]) -> Optional[MemoryRow]:
-        if rowid is None:
+    def select_memory(self, key: Optional[int|bytes|CIDv1]) -> Optional[MemoryRow]:
+        if key is None:
             return None
         cur = self.cursor()
-        cur.execute("""
-            SELECT
-                m.rowid, m.uuid, m.timestamp, m.kind, JSON(m.data), m.importance
-            FROM memories WHERE rowid = ?
-        """, (rowid,))
+        if isinstance(key, int):
+            cur.execute("""
+                SELECT
+                    m.rowid, m.cid, m.timestamp,
+                    m.kind, JSON(m.data), m.importance
+                FROM memories WHERE rowid = ?
+            """, (key,))
+        else:
+            if isinstance(key, CIDv1):
+                key = key.buffer
+            cur.execute("""
+                SELECT
+                    m.rowid, m.cid, m.timestamp,
+                    m.kind, JSON(m.data), m.importance
+                FROM memories WHERE cid = ?
+            """, (key,))
         return MemoryRow(*cur.fetchone())
-
-    def select_memory(self, uuid: UUID) -> Optional[MemoryRow]:
-        cur = self.cursor()
-        cur.execute("""
-            SELECT * FROM memories WHERE uuid = ?
-        """, (uuid.bytes,))
-        return MemoryRow(*cur.fetchone())
-
-    def memory_uuid_to_rowid(self, uuid: UUID) -> Optional[int]:
-        cur = self.cursor()
-        cur.execute("""
-            SELECT uuid FROM memories WHERE rowid = ?
-        """, (uuid,))
-        row = cur.fetchone()
-        return row and row[0]
 
     def select_embedding(self, memory_id: int) -> Optional[ndarray]:
         cur = self.cursor()
@@ -139,66 +158,50 @@ class Database:
             VALUES (?, ?)
         """, (memory_id, e.tobytes()))
 
-    def insert_memory(self, kind: MemoryKind, data: json_t, fts: Optional[str], importance: Optional[float] = None, timestamp: Optional[datetime] = None) -> Memory:
-        u = cast(UUID, uuid7())
+    def insert_memory(self,
+            kind: MemoryKind,
+            data: json_t,
+            description: Optional[str] = None,
+            importance: Optional[float] = None,
+            timestamp: Optional[datetime] = None,
+            edges: dict[str, list[Edge]] = {}
+        ) -> Memory:
+        ts = timestamp and timestamp.timestamp()
+        cid = memory_cid(kind, data, ts, edges)
         cur = self.cursor()
         cur.execute("""
-            INSERT INTO memories (uuid, timestamp, kind, data, importance)
-                VALUES (?, ?, JSONB(?), ?)
-        """, (u, timestamp and timestamp.timestamp(), kind, json.dumps(data), importance))
+            INSERT INTO memories (cid, timestamp, kind, data, importance)
+                VALUES (?, ?, ?, JSONB(?), ?)
+        """, (cid, ts, kind, json.dumps(data), importance))
         
         if (rowid := cur.lastrowid) is None:
             raise RuntimeError("Failed to insert memory")
 
-        if fts is not None:
+        if description is not None:
             cur.execute("""
                 INSERT INTO memory_fts (rowid, content) VALUES (?, ?)
-            """, (rowid, fts))
-            self.insert_text_embedding(rowid, fts)
-        
+            """, (rowid, description))
+            self.insert_text_embedding(rowid, description)
+
+        cur.executemany("""
+            INSERT INTO edges (src_id, dst_id, label, weight)
+            SELECT ?, dst_id, ?, ?
+            FROM memories WHERE rowid cid = ?
+        """, (
+            (rowid, label, e.weight, rowid, e.target.buffer)
+                for label, dsts in edges.items()
+                    for e in dsts
+        ))
+
         return Memory(
             rowid=rowid,
-            uuid=u,
+            cid=cid,
             timestamp=timestamp,
             kind=kind,
             data=data,
-            importance=importance
+            importance=importance,
+            edges=edges
         )
-
-    def insert_text(self, text: str, importance: Optional[float] = None, timestamp: Optional[datetime] = None) -> Memory:
-        return self.insert_memory("text", text, text, importance, timestamp)
-    
-    def insert_self(self, text: str, timestamp: Optional[datetime] = None) -> Memory:
-        return self.insert_memory("self", text, text, None, timestamp or datetime.now())
-    
-    def insert_other(self, name: str, text: str, importance: Optional[float] = None, timestamp: Optional[datetime] = None) -> Memory:
-        return self.insert_memory("other", {
-            "name": name,
-            "content": text
-        }, text, importance, timestamp)
-
-    '''
-    def insert_image(self, memory_id: int, image: ImageInput) -> int:
-        e, = nomic_image.embed(image)
-        rowid = self.insert_memory("image", e, None)
-        cur = self.cursor()
-        cur.execute("""
-            INSERT INTO vss_nomic_v1_5_index
-                (memory_id, embedding) VALUES (?, ?)
-        """, (memory_id, e.tobytes()))
-
-        return rowid
-    '''
-
-    def link_many(self, edges: Iterable[tuple[str, float, int|UUID, int|UUID]]):
-        cur = self.cursor()
-        cur.executemany("""
-            INSERT OR IGNORE INTO edges
-                (label, weight, src_id, dst_id) VALUES (?, ?, ?, ?)
-        """, edges)
-
-    def link(self, label: str, weight: float, src_id: int, dst_id: int):
-        self.link_many([(label, weight, src_id, dst_id)])
     
     # dst <- src
 
@@ -293,7 +296,7 @@ class Database:
                 LEFT JOIN vec ON m.rowid = vec.memory_id
             ORDER BY score DESC
             LIMIT {k}
-        """, (json.dumps(prompt), e.tobytes(), timestamp and timestamp.timestamp()))
+        """, (prompt, e.tobytes(), timestamp and timestamp.timestamp()))
 
         for row in cur:
             yield MemoryRow(*row[:-1]), row[-1]

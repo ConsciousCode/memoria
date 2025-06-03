@@ -1,11 +1,12 @@
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional, TypedDict, cast
-from uuid import UUID
 
 from mcp.server.fastmcp import Context, FastMCP
 from openai import BaseModel
 from pydantic import Field
 from starlette.exceptions import HTTPException
+import cid
 
 from memoria import Database, Memoria
 from util import json_t
@@ -22,21 +23,23 @@ mcp = FastMCP("memoria",
 )
 
 class MemoryEdge(BaseModel):
-    dst: int
     weight: float
+    target: cid.CIDv1
 
 class MemorySchema(BaseModel):
-    rowid: int
-    timestamp: Optional[float]
     kind: str
     data: json_t
-    importance: Optional[float]
-    edges: dict[str, MemoryEdge]
+    timestamp: Optional[float]
+    edges: dict[str, list[MemoryEdge]]
 
 class ErrorResult(TypedDict):
     error: str
 
-@mcp.resource("memory://{rowid}")
+'''
+memory://[{cidv1}/edges/{label}/{index}/target]
+'''
+
+@mcp.resource("memory://{path}")
 async def memory_resource(rowid: int):
     '''
     Memory resource handler.
@@ -44,21 +47,21 @@ async def memory_resource(rowid: int):
     try:
         ctx = mcp.get_context()
         memoria = cast(Memoria, ctx.request_context.lifespan_context)
-        if (m := memoria.db.select_memory_rowid(rowid)) is None:
+        if (m := memoria.db.select_memory(rowid)) is None:
             return {"error": "Memory not found"}, 404
         
+        edges = defaultdict(list[MemoryEdge])
+        for edge in memoria.db.backward_edges(m.rowid):
+            edges[edge.label].append(MemoryEdge(
+                target=cid.from_bytes(edge.dst.cid),
+                weight=edge.weight
+            ))
+
         return MemorySchema(
-            rowid= m.rowid,
-            timestamp= m.timestamp,
-            kind= m.kind,
-            data= m.data,
-            importance= m.importance,
-            edges={
-                edge.label: MemoryEdge(
-                    dst=edge.dst.rowid,
-                    weight=edge.weight
-                ) for edge in memoria.db.backward_edges(m.rowid)
-            }
+            timestamp=m.timestamp,
+            kind=m.kind,
+            data=m.data,
+            edges=edges
         )
     except Exception as e:
         raise HTTPException(500, detail=str(e))
@@ -74,21 +77,29 @@ async def recall(
     '''
     ctx = mcp.get_context()
     memoria = cast(Memoria, ctx.request_context.lifespan_context)
-    results = memoria.recall(prompt, [UUID(s) for s in include or []])
+    inc = []
+    for s in include or []:
+        if isinstance(c := cid.make_cid(s), cid.CIDv1):
+            inc.append(c)
+        else:
+            raise ValueError(f"Expected CIDv1, got {type(c)}")
+    results = memoria.recall(prompt, inc)
+
+    edges = defaultdict(list[MemoryEdge])
+    for m in results.values():
+        for edge in memoria.db.backward_edges(m.rowid):
+            edges[edge.label].append(MemoryEdge(
+                target=cid.from_bytes(edge.dst.cid),
+                weight=edge.weight
+            ))
+    
     return [
         MemorySchema(
-            rowid=m.rowid,
-            timestamp=m.timestamp and m.timestamp.timestamp(),
             kind=m.kind,
             data=m.data,
-            importance=m.importance,
-            edges={
-                edge.label: MemoryEdge(
-                    dst=edge.dst.rowid,
-                    weight=edge.weight
-                ) for edge in memoria.db.backward_edges(m.rowid)
-            }
-            ) for m in results.values()
+            timestamp=m.timestamp,
+            edges=edges
+        ) for m in results.values()
     ]
 
 @mcp.prompt()

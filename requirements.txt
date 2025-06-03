@@ -1,7 +1,8 @@
 sqlite-vec
 numpy
 fastembed-gpu
-ipld
-mcp
 pydantic
 pydantic-ai
+mcp
+ipld
+py-cid

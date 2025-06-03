@@ -104,3 +104,6 @@ def finite(f: float) -> float:
     if f != f or f == float('inf') or f == float('-inf'):
         return 0.0
     return f
+
+def error(e: BaseException):
+    raise e
