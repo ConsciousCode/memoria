@@ -1,17 +1,20 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, Literal, NamedTuple, Optional
+from typing import Iterable, Literal, NamedTuple, Optional, TypedDict, cast
 import sqlite3
 import json
+from uuid import UUID
 
 from cid import CIDv1
 from numpy import ndarray
 import numpy
-from openai import BaseModel
+from pydantic import validate_call
 import sqlite_vec
 from fastembed import TextEmbedding
-import ipld
+from uuid_extensions import uuid7
 
+import ipld
+from models import Edge, Memory, MemoryKind
 from util import finite, json_t
 
 nomic_text = TextEmbedding(
@@ -24,13 +27,11 @@ DEFAULT_FTS = 0.15
 DEFAULT_VSS = 0.25
 DEFAULT_K = 20
 
-type MemoryKind = Literal["self", "other", "text", "image", "file", "entity"]
-
-class SelfMemory(BaseModel):
+class SelfMemory(TypedDict):
     name: Optional[str]
     content: str
 
-class OtherMemory(BaseModel):
+class OtherMemory(TypedDict):
     name: str
     content: str
 
@@ -43,21 +44,10 @@ class MemoryRow(NamedTuple):
     data: str
     importance: Optional[float]
 
-@dataclass
-class Edge:
-    weight: float
-    target: CIDv1
-
-@dataclass
-class Memory:
+class SonaRow(NamedTuple):
     rowid: int
-    cid: CIDv1
-    timestamp: Optional[datetime]
-    kind: MemoryKind
-    data: json_t
-    importance: Optional[float]
-    edges: dict[str, list[Edge]]
-    #role: Optional[Literal['prev']] = None
+    uuid: UUID
+    last_id: Optional[int]
 
 class BackwardEdge(NamedTuple):
     dst: MemoryRow
@@ -68,26 +58,6 @@ class ForwardEdge(NamedTuple):
     label: str
     weight: float
     src: MemoryRow
-
-def memory_cid(
-        kind: MemoryKind,
-        data: json_t,
-        timestamp: Optional[float],
-        edges: dict[str, list[Edge]]
-    ) -> CIDv1:
-    return CIDv1("dag-cbor", ipld.multihash(ipld.dagcbor_marshal({
-        "kind": kind,
-        "data": data,
-        "timestamp": timestamp,
-        "edges": {
-            label: [
-                {
-                    "target": e.target,
-                    "weight": e.weight
-                } for e in dsts
-            ] for label, dsts in edges.items()
-        }
-    })))
 
 @dataclass
 class Database:
@@ -119,6 +89,35 @@ class Database:
         fn, x, yz, rest = mh[:2], mh[2], mh[3:5], mh[5:]
         return f"{self.file_path}/{fn}/{x}/{yz}/{rest}{ext}"
     
+    def find_sona(self, name: str):
+        '''
+        Find the sona which is closest to the given name, or else create
+        a new one.
+        '''
+        e, = nomic_text.embed(name)
+        ebs = e.tobytes()
+        cur = self.cursor()
+        cur.execute("""
+            SELECT rowid, sona_id, last_id FROM sona_embedding
+            WHERE embedding MATCH ? AND distance > 0.75
+            LIMIT 1 -- vec requires k to be set
+        """, (ebs,))
+        if row := cur.fetchone():
+            return SonaRow(row[0], UUID(bytes=row[1]), row[2])
+        
+        u = cast(UUID, uuid7())
+
+        cur.execute("INSERT INTO sona (uuid) VALUES (?)", (u.bytes,))
+        if (rowid := cur.lastrowid) is None:
+            raise RuntimeError("Failed to insert sona")
+
+        cur.execute("""
+            INSERT INTO sona_embedding (sona_id, embedding)
+            VALUES (?, ?)
+        """, (rowid, ebs))
+        
+        return SonaRow(rowid, u, None)
+
     def select_memory(self, key: Optional[int|bytes|CIDv1]) -> Optional[MemoryRow]:
         if key is None:
             return None
@@ -159,49 +158,38 @@ class Database:
         """, (memory_id, e.tobytes()))
 
     def insert_memory(self,
-            kind: MemoryKind,
-            data: json_t,
-            description: Optional[str] = None,
+            memory: Memory,
+            index: Optional[str] = None,
             importance: Optional[float] = None,
-            timestamp: Optional[datetime] = None,
             edges: dict[str, list[Edge]] = {}
-        ) -> Memory:
-        ts = timestamp and timestamp.timestamp()
-        cid = memory_cid(kind, data, ts, edges)
+        ) -> tuple[int, CIDv1]:
+        cid = memory.cid()
         cur = self.cursor()
         cur.execute("""
             INSERT INTO memories (cid, timestamp, kind, data, importance)
                 VALUES (?, ?, ?, JSONB(?), ?)
-        """, (cid, ts, kind, json.dumps(data), importance))
+        """, (cid, memory.timestamp, memory.kind, json.dumps(memory.data), importance))
         
         if (rowid := cur.lastrowid) is None:
             raise RuntimeError("Failed to insert memory")
 
-        if description is not None:
+        if index is not None:
             cur.execute("""
                 INSERT INTO memory_fts (rowid, content) VALUES (?, ?)
-            """, (rowid, description))
-            self.insert_text_embedding(rowid, description)
+            """, (rowid, index))
+            self.insert_text_embedding(rowid, index)
 
         cur.executemany("""
             INSERT INTO edges (src_id, dst_id, label, weight)
             SELECT ?, dst_id, ?, ?
             FROM memories WHERE rowid cid = ?
         """, (
-            (rowid, label, e.weight, rowid, e.target.buffer)
+            (rowid, label, e.weight, rowid, e.target)
                 for label, dsts in edges.items()
                     for e in dsts
         ))
 
-        return Memory(
-            rowid=rowid,
-            cid=cid,
-            timestamp=timestamp,
-            kind=kind,
-            data=data,
-            importance=importance,
-            edges=edges
-        )
+        return rowid, cid
     
     # dst <- src
 
@@ -252,15 +240,18 @@ class Database:
             WHERE src_id = ? AND dst_id = ?
         """, (src_id, dst_id)).fetchone()
 
+    # Note: Because we're using parameters to build the SQL query, we need to be absolutely sure that they're actually the types they say to avoid SQL injection.
+    @validate_call
     def recall(self,
             prompt: str,
-            timestamp: Optional[datetime]=None,
+            timestamp: Optional[float]=None,
             importance: Optional[float]=None,
             recency: Optional[float]=None,
             fts: Optional[float]=None,
             vss: Optional[float]=None,
             k: Optional[int]=None
         ) -> Iterable[tuple[MemoryRow, float]]:
+        # Even 1
         # Be defensive against SQL injection
         importance = finite(float(importance or DEFAULT_IMPORTANCE))
         recency = finite(float(recency or DEFAULT_RECENCY))
@@ -270,33 +261,36 @@ class Database:
 
         e, = nomic_text.embed(prompt)
         cur = self.cursor()
+        ### DANGER ZONE ###
+        # DO NOT SUFFER A BARE INTERPOLATION HERE - EVERY SINGLE INTERPOLATION
+        # ****MUST**** BE WRAPPED IN A PYTHON PRIMITIVE TYPE CONSTRUCTOR
         cur.execute(f"""
             WITH
                 fts AS (
                     SELECT rowid, bm25(memory_fts) AS score
                     FROM memory_fts
                     WHERE memory_fts MATCH ?
-                    LIMIT {k}
+                    LIMIT {int(k)}
                 ),
                 vec AS (
                     SELECT memory_id, distance
                     FROM vss_nomic_v1_5_index
-                    WHERE embedding MATCH ? AND k = {k}
+                    WHERE embedding MATCH ? AND k = {int(k)}
                 )
             SELECT
                 m.rowid, m.timestamp, m.kind, JSON(m.data), m.importance,
-                IFNULL({importance} * m.importance, 0) +
-                IFNULL({recency} * POWER(0.995, ? - m.timestamp), 0) +
-                IFNULL({fts} *
+                IFNULL({float(importance):.4} * m.importance, 0) +
+                IFNULL({float(recency):.4} * POWER(0.995, ? - m.timestamp), 0) +
+                IFNULL({float(fts):.4} *
                     (fts.score - MIN(fts.score) OVER())
                     / (MAX(fts.score) OVER() - MIN(fts.score) OVER()), 0) +
-                IFNULL({vss} / (1 + vec.distance), 0) AS score
+                IFNULL({float(vss):.4} / (1 + vec.distance), 0) AS score
             FROM memories m
                 LEFT JOIN fts ON m.rowid = fts.rowid
                 LEFT JOIN vec ON m.rowid = vec.memory_id
             ORDER BY score DESC
-            LIMIT {k}
-        """, (prompt, e.tobytes(), timestamp and timestamp.timestamp()))
+            LIMIT {int(k)}
+        """, (prompt, e.tobytes(), timestamp and timestamp))
 
         for row in cur:
             yield MemoryRow(*row[:-1]), row[-1]

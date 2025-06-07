@@ -1,16 +1,17 @@
-from typing import Any, Iterable, Literal
+from typing import Iterable, Literal, Mapping, cast, reveal_type
 import hashlib
 import json
 import base64
 
 import base58
-import cbor
-import cid
+import cbor2
 import multibase
 import multicodec
 
+from .cid import CID, CIDv0, CIDv1, Codec
+
 __all__ = (
-    'HashName', 'IPLDModel',
+    'HashName', 'IPLData',
     'dagjson_marshal', 'dagjson_unmarshal',
     'dagcbor_marshal', 'dagcbor_unmarshal',
     'multihash'
@@ -27,9 +28,9 @@ type HashName = Literal[
     'blake2s'
 ]
 
-type IPLDModel = dict[str, IPLDModel]|list[IPLDModel]|cid.CIDv0|cid.CIDv1|bytes|str|int|float|bool|None
+type IPLData = Mapping[str, IPLData]|Iterable[IPLData]|CIDv1|bytes|str|int|float|bool|None
 
-def dagjson_marshal(data: IPLDModel) -> str:
+def dagjson_marshal(data: IPLData) -> str:
     """
     Marshal a dictionary into DAG-JSON format.
     
@@ -40,7 +41,7 @@ def dagjson_marshal(data: IPLDModel) -> str:
         A JSON string representing the DAG-JSON format.
     """
 
-    def transform(data: IPLDModel) -> IPLDModel:
+    def transform(data: IPLData) -> IPLData:
         match data:
             case float() if data != data:
                 raise ValueError('DAG-JSON does not support NaN')
@@ -71,10 +72,10 @@ def dagjson_marshal(data: IPLDModel) -> str:
                 
                 return data
 
-            case cid.CIDv0():
+            case CIDv0():
                 return {"/": base58.b58encode(data.buffer)}
             
-            case cid.CIDv1():
+            case CIDv1():
                 return {"/": multibase.encode('base32', data.buffer)}
 
             case _:
@@ -82,7 +83,7 @@ def dagjson_marshal(data: IPLDModel) -> str:
     
     return json.dumps(transform(data), sort_keys=True)
 
-def dagjson_unmarshal(data: str) -> IPLDModel:
+def dagjson_unmarshal(data: str) -> IPLData:
     """
     Unmarshal a JSON string into a dictionary in DAG-JSON format.
     
@@ -93,23 +94,25 @@ def dagjson_unmarshal(data: str) -> IPLDModel:
         A dictionary representing the DAG-JSON format.
     """
     
-    def transform(data: Any) -> IPLDModel:
+    def transform(data: IPLData):
         match data:
             case None | bool() | int() | float() | str():
                 return data
             
             case {"/": {"bytes": bs}}:
-                return base64.b64decode(bs)
+                if isinstance(bs, bytes):
+                    return base64.b64decode(bs)
+                raise TypeError('{"/": {"bytes": ...}} Expected bytes, got ' + str(type(bs)))
             
             case {"/": link}:
                 if not isinstance(link, str):
-                    raise TypeError(f'Expected string for CID, got {type(link)}')
+                    raise TypeError('{"/": ...} Expected string for CID, got ' + str(type(link)))
                 
                 if link.startswith('Qm'):
-                    return cid.CIDv0(base58.b58decode(link))
+                    raise TypeError('DAG-JSON does not support CIDv0, use CIDv1 instead')
                 elif link.startswith('b'):
-                    return cid.CIDv1(
-                        multicodec.get_codec(link),
+                    return CIDv1(
+                        cast(Codec, multicodec.get_codec(link)),
                         multicodec.remove_prefix(link)
                     )
                 else:
@@ -126,28 +129,31 @@ def dagjson_unmarshal(data: str) -> IPLDModel:
     
     return transform(json.loads(data))
 
-def dagcbor_marshal(data: dict[str, Any]) -> str:
-    def transform(data: dict[str, Any]) -> Iterable[tuple[str, Any]]:
-        for k, v in data.items():
-            if not isinstance(k, str):
-                raise TypeError(f'DAG-CBOR forbids non-str keys, got {type(k)}')
+def dagcbor_marshal(data: IPLData) -> bytes:
+    def transform(data: IPLData):
+        match data:
+            case float() if data != data:
+                raise ValueError('DAG-CBOR does not support NaN')
+            case float() if data == INF:
+                raise ValueError('DAG-CBOR does not support Infinity')
+            case float() if data == -INF:
+                raise ValueError('DAG-CBOR does not support -Infinity')
+            
+            case None | bool() | int() | float() | str() | bytes():
+                return data
 
-            match v:
-                case float() if v != v:
-                    raise ValueError('DAG-CBOR does not support NaN')
-                case float() if v == INF:
-                    raise ValueError('DAG-CBOR does not support Infinity')
-                case float() if v == -INF:
-                    raise ValueError('DAG-CBOR does not support -Infinity')
-                
-                case cid.CIDv0() | cid.CIDv1():
-                    v = cbor.Tag(LINK_TAG, v.buffer)
-                case dict():
-                    v = dict(transform(v))
-            yield k, v
+            case CIDv1():
+                if data.codec != 'dag-cbor':
+                    raise TypeError(f'DAG-CBOR only supports CIDv1 with codec "dag-cbor", got {data.codec}')
+                return cbor2.CBORTag(LINK_TAG, data.buffer)
+            
+            case dict():
+                return transform(data)
+            
+            case _:
+                raise TypeError(f'Unsupported type in DAG-CBOR: {type(data)}')
 
-    return cbor.dumps(dict(transform(data)), sort_keys=True)
-
+    return cbor2.dumps(transform(data), canonical=True)
 
 def dagcbor_unmarshal(data: bytes):
     def transform(data):
@@ -165,10 +171,10 @@ def dagcbor_unmarshal(data: bytes):
             case list():
                 return list(map(transform, data))
             
-            case cbor.Tag():
+            case cbor2.CBORTag():
                 if data.tag != LINK_TAG:
                     raise ValueError(f'DAG-CBOR forbids all tags except 42 (CID). Got {data.tag}')
-                return cid.from_bytes(data.value)
+                return CID(data.value)
 
             case dict():
                 return {
@@ -179,7 +185,7 @@ def dagcbor_unmarshal(data: bytes):
             case _:
                 raise TypeError(f'Unsupported type in DAG-CBOR: {type(data)}')
     
-    return transform(cbor.loads(data))
+    return transform(cbor2.loads(data))
 
 
 def multihash(data: str|bytes, fn_name: HashName='sha2_256') -> str:

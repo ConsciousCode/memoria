@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS files (
 
 CREATE TABLE IF NOT EXISTS memories (
     rowid INTEGER PRIMARY KEY,
-    cid BLOB NOT NULL UNIQUE,
+    cid BLOB UNIQUE, -- NULL indicates an incomplete memory
     timestamp REAL,
     kind TEXT NOT NULL,
     data JSONB NOT NULL,
@@ -31,14 +31,15 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE TABLE IF NOT EXISTS sonas (
     rowid INTEGER PRIMARY KEY,
     uuid BLOB NOT NULL UNIQUE,
-    name TEXT NOT NULL
-)
+    last_id INTEGER REFERENCES memories(rowid) ON DELETE SET NULL
+);
 
-/* Memory membership in sonas */
-CREATE TABLE IF NOT EXISTS sona_memories (
-    sona_id INTEGER REFERENCES sonas(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS acthreads (
+    sona_id INTEGER REFERENCES sonas(rowid) ON DELETE CASCADE,
     memory_id INTEGER REFERENCES memories(id) ON DELETE CASCADE,
-    PRIMARY KEY (sona_id, memory_id)
+    last_id INTEGER REFERENCES memories(rowid) ON DELETE CASCADE,
+
+    PRIMARY KEY (sona_id, memory_id),
 );
 
 -------------
@@ -57,7 +58,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vss_nomic_v1_5_index USING vec0 (
     UNIQUE(memory_id, embedding)
 );
 
-CREATE VIRTUAL TABLE sona_embedding USING vec0(
+CREATE VIRTUAL TABLE IF NOT EXISTS sona_embedding USING vec0(
     sona_id INTEGER PRIMARY KEY REFERENCES sonas(rowid) ON DELETE CASCADE,
     embedding FLOAT[1536] NOT NULL
 );

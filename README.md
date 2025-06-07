@@ -65,3 +65,57 @@ class Memory:
     data: CBOR
     dependencies: dict[str, tuple[float, CID]]
 ```
+
+## Links
+- https://specs.ipfs.tech/http-gateways/trustless-gateway/
+- https://ipld.io/docs/
+
+## Misc
+- sonas themselves should *not* have names. Rather, names act as fuzzy references to sonas which are defined by the similarity between those names and the embeddings of names already connected to the sonas. As a result, they do not contain immutable state; they are purely nominal.
+  - Basically, sonas act as centroids in the vector space of the embeddings of their names.
+- sona state should contain:
+  - queue of pending joins (included memories, prompt) - top is the currently running continuation.
+- Because sonas have at most one ACT at any given time, this forms a linear chain of continuations, effectively one continuous ACT.
+- Process has to return the topmost ACT in the chain which already includes all the information needed:
+  1. Its cid (allows client to detect when ACT requests have merged)
+  2. The UUID of the sona within which the prompt was processed
+  3. The response cid
+  4. The ACT (cid, UUID of the sona within which the prompt was processed, the response's cid, and the cid of the previous memory in the ACT)
+  2. The response (cid and contents)
+  3. Final tool calls/continuation
+```
+Message = {
+    model: string
+    stopReason?: "endTurn" | "stopSequence" | "maxTokens" | string
+    role: "user" | "assistant"
+    content: {
+        type: "text"
+        text: string
+    } | {
+        type: "image"
+        data: string
+        mimeType: string
+    }
+}
+{
+    cid: CID
+    act: {
+        sona: UUID
+        memory: CID
+        last: CID
+    }
+    result: {
+        kind: "self" | "other" | "text" | "image" | "file"
+        data: Any
+        timestamp?: float
+        edges: {
+            [label: string]: {
+                target: CID
+                weight: float
+            }[]
+        }
+    }
+}
+```
+
+Oh interesting note, when memories are recalled their grounding memories are found via both backward and *forward* edges, but this is only for the primary memories, not their supporting memories. So if memory A depends on memory B, any other references to B are not included in the recall unless they were also considered relevant.

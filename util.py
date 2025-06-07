@@ -4,6 +4,7 @@ import re
 from functools import wraps
 from heapq import heappop
 
+from ipld import CID
 
 class JSONStructure(Protocol):
     def __json__(self) -> "json_t": ...
@@ -107,3 +108,21 @@ def finite(f: float) -> float:
 
 def error(e: BaseException):
     raise e
+
+def cidstr(c: bytes) -> str:
+    """
+    Convert a CID byte string to a base32-encoded string.
+    
+    Args:
+        c: The CID byte string.
+    
+    Returns:
+        A base32-encoded string representation of the CID.
+    """
+    return CID(c).encode().decode('utf-8')
+
+def iter_in(item: object, iterable: Iterable) -> bool:
+    for it in iterable:
+        if item == it:
+            return True
+    return False

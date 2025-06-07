@@ -1,0 +1,7 @@
+{
+    "stubPath": "./typings",
+    "executionEnvironments": [{
+        "root": ".",
+        "extraPaths": ["./ipld", "./typings"]
+    }]
+}

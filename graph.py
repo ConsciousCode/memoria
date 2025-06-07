@@ -1,38 +1,73 @@
-from typing import Callable, Iterable, Optional
+from abc import ABC, abstractmethod
+from typing import Callable, Iterable, Optional, override
 
-from util import Least, Lexicographic, ifnone, todo_heap
+from util import Least, Lexicographic, ifnone, iter_in, todo_heap
 from heapq import heapify, heappush
 
-class Node[K, E, V]:
-    value: V
-    edges: dict[K, E]
+class IGraph[K, E, V, Node](ABC):
+    adj: dict[K, Node]
 
-    def __init__(self, value: V, edges: dict[K, E]):
-        self.value = value
-        self.edges = edges
+    ### Abstract methods for interfacing with the node ###
+
+    @abstractmethod
+    def _node(self, value: V) -> Node:
+        '''Build a node with no edges for the graph.'''
+
+    @abstractmethod
+    def _setvalue(self, node: Node, value: V):
+        '''Set the value of a node.'''
     
-    def __repr__(self):
-        return f"Node(value={self.value}, edges={self.edges})"
+    @abstractmethod
+    def _valueof(self, node: Node) -> V:
+        '''Return the value of a node.'''
 
-class Graph[K, E, V]:
-    adj: dict[K, Node[K, E, V]]
+    @abstractmethod
+    def _edges(self, node: Node) -> Iterable[tuple[K, E]]:
+        '''Return the edges of a node.'''
+    
+    @abstractmethod
+    def _add_edge(self, src: Node, dst: K, edge: E):
+        '''Add edge to a node.'''
+
+    @abstractmethod
+    def _pop_edge(self, src: Node, dst: K) -> Optional[E]:
+        '''Remove an edge from a node. If the edge does not exist, return None.'''
+
+    ### Concrete methods ###
 
     def __init__(self, keys: dict[K, V]|None = None):
         super().__init__()
-        self.adj = {k: Node[K, E, V](v, {}) for k, v in (keys or {}).items()}
+        self.adj = {k: self._node(v) for k, v in (keys or {}).items()}
     
     def __contains__(self, key: K) -> bool:
         return key in self.adj
     
     def __bool__(self) -> bool:
         return bool(self.adj)
+    
+    def __setitem__(self, key: K, value: V):
+        '''Set the value of a node.'''
+        if key in self.adj:
+            self._setvalue(self.adj[key], value)
+        else:
+            self.adj[key] = self._node(value)
 
-    def insert(self, key: K, value: V):
+    def __getitem__(self, key: K) -> V:
+        '''Get the value of a node.'''
         if key not in self.adj:
-            self.adj[key] = Node[K, E, V](value, {})
+            raise KeyError(f"Node {key} not found")
+        
+        return self._valueof(self.adj[key])
     
     def __iter__(self):
         return iter(self.adj)
+    
+    def insert(self, key: K, value: V):
+        if key not in self.adj:
+            self.adj[key] = self._node(value)
+
+    def edges(self, node: K) -> Iterable[tuple[K, E]]:
+        return self._edges(self.adj[node])
 
     def add_edge(self, src: K, dst: K, edge: E):
         if src not in self.adj:
@@ -41,18 +76,8 @@ class Graph[K, E, V]:
             raise KeyError(f"Destination {dst} not found")
         if src == dst:
             raise ValueError("Cannot add self-loop edge")
-        edges = self.adj[src].edges
-        if dst in edges:
-            raise ValueError(f"Edge from {src} to {dst} already exists")
-        edges[dst] = edge
-    
-    def __getitem__(self, key: K) -> V:
-        return self.adj[key].value
-    
-    def __setitem__(self, key: K, value: V):
-        if key not in self.adj:
-            raise KeyError(f"Key {key} not found")
-        self.adj[key].value = value
+        
+        self._add_edge(self.adj[src], dst, edge)
 
     def pop_edge(self, src: K, dst: K):
         '''
@@ -62,50 +87,40 @@ class Graph[K, E, V]:
         if src not in self.adj:
             raise KeyError(f"Source {src} not found")
         
-        return self.edges(src).pop(dst)
+        return self._pop_edge(self.adj[src], dst)
     
     def keys(self) -> Iterable[K]:
         return self.adj.keys()
     
     def values(self) -> Iterable[V]:
-        return (node.value for node in self.adj.values())
-    
-    def edges(self, k: K) -> dict[K, E]:
-        return self.adj[k].edges
-    
-    def edges_x(self) -> Iterable[dict[K, E]]:
-        return (node.edges for node in self.adj.values())
+        return map(self._valueof, self.adj.values())
 
-    def items(self) -> Iterable[tuple[K, Node[K, E, V]]]:
+    def items(self) -> Iterable[tuple[K, Node]]:
         return self.adj.items()
 
     def has_edge(self, src: K, dst: K) -> bool:
         '''
         Check if there is an edge from src to dst.
         '''
-        return dst in self.adj[src].edges
+        return iter_in(dst, self.edges(src))
 
     def copy(self):
-        '''
-        Deepy copy of the graph.
-        '''
-        g = Graph[K, E, V]()
+        '''Deepy copy of the graph.'''
+        g = type(self)()
         for src, node in self.adj.items():
-            g.insert(src, node.value)
-            for dst, edge in node.edges.items():
-                g.insert(dst, self.adj[dst].value)
+            g.insert(src, self._valueof(node))
+            for dst, edge in self._edges(node):
+                g.insert(dst, self._valueof(self.adj[dst]))
                 g.add_edge(src, dst, edge)
         return g
 
     def invert(self):
-        '''
-        Invert the graph, reversing all edges.
-        '''
-        g = Graph[K, E, V]()
+        '''Invert the graph, reversing all edges.'''
+        g = type(self)()
         for src, node in self.adj.items():
-            g.insert(src, node.value)
-            for dst, edge in node.edges.items():
-                g.insert(dst, self.adj[dst].value)
+            g.insert(src, self._valueof(node))
+            for dst, edge in self._edges(node):
+                g.insert(dst, self._valueof(self.adj[dst]))
                 g.add_edge(dst, src, edge)
         return g
 
@@ -119,12 +134,12 @@ class Graph[K, E, V]:
         if key is None:
             key = lambda v: None
 
-        indeg = Graph[K, None, int]()
+        indeg = SimpleGraph[K, int]()
         for src in self:
             if src not in indeg:
                 indeg.insert(src, 0)
             
-            for dst in self.edges(src):
+            for dst, _ in self.edges(src):
                 if dst not in indeg:
                     indeg.insert(dst, 1)
                 else:
@@ -139,7 +154,89 @@ class Graph[K, E, V]:
         heapify(sources)
         for _, src in todo_heap(sources):
             yield src
-            for dst in indeg.edges(src):
+            for dst, _ in indeg.edges(src):
                 indeg[dst] -= 1
                 if indeg[dst] == 0:
                     heappush(sources, (key(self[dst]), dst))
+
+class SimpleNode[K, V]:
+    value: V
+    edges: set[K]
+
+    def __init__(self, value: V):
+        self.value = value
+        self.edges = set()
+    
+    def __repr__(self):
+        return f"SimpleNode(value={self.value}, edges={self.edges})"
+
+class SimpleGraph[K, V](IGraph[K, None, V, SimpleNode[K, V]]):
+    '''Simple graph using an extrusive node type with no edges.'''
+
+    @override
+    def _node(self, value: V) -> SimpleNode[K, V]:
+        return SimpleNode(value)
+    
+    @override
+    def _setvalue(self, node: SimpleNode[K, V], value: V):
+        node.value = value
+    
+    @override
+    def _valueof(self, node: SimpleNode[K, V]) -> V:
+        return node.value
+    
+    @override
+    def _edges(self, node: SimpleNode[K, V]) -> Iterable[tuple[K, None]]:
+        for edge in node.edges:
+            yield edge, None
+    
+    @override
+    def _add_edge(self, src: SimpleNode[K, V], dst: K, edge: None):
+        src.edges.add(dst)
+    
+    @override
+    def _pop_edge(self, src: SimpleNode[K, V], dst: K) -> Optional[None]:
+        if dst in src.edges:
+            src.edges.remove(dst)
+        return None
+
+class Node[K, E, V]:
+    '''Basic graph node.'''
+    value: V
+    edges: dict[K, E]
+
+    def __init__(self, value: V):
+        self.value = value
+        self.edges = {}
+    
+    def __repr__(self):
+        return f"Node(value={self.value}, edges={self.edges})"
+
+class Graph[K, E, V](IGraph[K, E, V, Node[K, E, V]]):
+    '''Easy default graph using an extrusive node type.'''
+
+    @override
+    def _node(self, value: V) -> Node[K, E, V]:
+        return Node(value)
+    
+    @override
+    def _setvalue(self, node: Node[K, E, V], value: V):
+        node.value = value
+    
+    @override
+    def _valueof(self, node: Node[K, E, V]) -> V:
+        return node.value
+    
+    @override
+    def _edges(self, node: Node[K, E, V]) -> Iterable[tuple[K, E]]:
+        return node.edges.items()
+    
+    @override
+    def _add_edge(self, src: Node[K, E, V], dst: K, edge: E):
+        if dst in src.edges:
+            raise ValueError(f"Edge to {dst} already exists in {src.value}")
+        src.edges[dst] = edge
+    
+    @override
+    def _pop_edge(self, src: Node[K, E, V], dst: K) -> Optional[E]:
+        return src.edges.pop(dst)
