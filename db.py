@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, Literal, NamedTuple, Optional, TypedDict, cast
+from typing import Iterable, Literal, NamedTuple, Optional, TypedDict, cast, overload
 import sqlite3
 import json
 from uuid import UUID
 
 from cid import CIDv1
-from numpy import ndarray
+from numpy import ndarray, size
 import numpy
 from pydantic import validate_call
 import sqlite_vec
@@ -14,12 +14,14 @@ from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
 import ipld
-from models import Edge, Memory, MemoryKind
+from models import ACThread, Edge, MemoryKind
 from util import finite, json_t
 
 nomic_text = TextEmbedding(
     model_name="nomic-ai/nomic-embed-text-v1.5",
 )
+
+type JSONB = str
 
 DEFAULT_IMPORTANCE = 0.30
 DEFAULT_RECENCY = 0.30
@@ -35,19 +37,36 @@ class OtherMemory(TypedDict):
     name: str
     content: str
 
+class FileRow(NamedTuple):
+    '''Raw file row from the database.'''
+    rowid: int
+    cid: bytes
+    filename: Optional[str]
+    mimetype: str
+    metadata: Optional[JSONB]
+    size: int
+    content: Optional[bytes]
+
 class MemoryRow(NamedTuple):
     '''Raw memory row from the database.'''
     rowid: int
     cid: bytes
     timestamp: Optional[float]
     kind: MemoryKind
-    data: str
+    data: JSONB
     importance: Optional[float]
 
 class SonaRow(NamedTuple):
     rowid: int
     uuid: UUID
-    last_id: Optional[int]
+    pending: JSONB
+
+class ActhreadRow(NamedTuple):
+    rowid: int
+    cid: bytes
+    sona_id: int
+    memory_id: int
+    prev_id: Optional[int]
 
 class BackwardEdge(NamedTuple):
     dst: MemoryRow
@@ -89,6 +108,44 @@ class Database:
         fn, x, yz, rest = mh[:2], mh[2], mh[3:5], mh[5:]
         return f"{self.file_path}/{fn}/{x}/{yz}/{rest}{ext}"
     
+    def index(self, memory_id: int, index: str):
+        '''
+        Index a memory with a text embedding.
+        '''
+        self.insert_text_embedding(memory_id, index)
+        self.insert_text_fts(memory_id, index)
+
+    def lookup_cid(self, cid: CIDv1) -> Optional[FileRow|MemoryRow|ActhreadRow]:
+        '''
+        Lookup a CID in the database, returning the associated row if it exists.
+        '''
+
+        c = cid.buffer
+
+        cur = self.cursor()
+        cur.execute("""
+            SELECT rowid, cid, timestamp, kind, JSON(data), importance
+            FROM memories WHERE cid = ?
+        """, (c,))
+        if row := cur.fetchone():
+            return MemoryRow(*row)
+
+        cur.execute("""
+            SELECT rowid, cid, filename, mimetype, JSON(metadata), size, content
+            FROM files WHERE cid = ?
+        """, (c,))
+        if row := cur.fetchone():
+            return FileRow(*row)
+
+        cur.execute("""
+            SELECT cid, sona_id, memory_id, last_id FROM acthread
+            WHERE cid = ?
+        """, (c,))
+        if row := cur.fetchone():
+            return ActhreadRow(*row)
+        
+        return None
+
     def find_sona(self, name: str):
         '''
         Find the sona which is closest to the given name, or else create
@@ -98,7 +155,7 @@ class Database:
         ebs = e.tobytes()
         cur = self.cursor()
         cur.execute("""
-            SELECT rowid, sona_id, last_id FROM sona_embedding
+            SELECT rowid, sona_id, pending FROM sona_embedding
             WHERE embedding MATCH ? AND distance > 0.75
             LIMIT 1 -- vec requires k to be set
         """, (ebs,))
@@ -116,8 +173,38 @@ class Database:
             VALUES (?, ?)
         """, (rowid, ebs))
         
-        return SonaRow(rowid, u, None)
+        return SonaRow(rowid, u, '[]')
 
+    def get_acthread_active(self, sona_id: int) -> Optional[ActhreadRow]:
+        '''Get the sona's active thread node currently receiving updates.'''
+        cur = self.cursor()
+        row = cur.execute("""
+            SELECT cid, sona_id, memory_id, last_id
+            FROM acthread
+            JOIN memories ON memories.rowid = acthread.memory_id
+            WHERE
+                sona_id = ? AND
+                acthread.cid IS NULL AND
+                memories.data IS NOT NULL
+        """, (sona_id,)).fetchone()
+
+        return row and ActhreadRow(*row)
+
+    def get_acthread_pending(self, sona_id: int) -> Optional[ActhreadRow]:
+        '''Get the sona's pending thread node which is aggregating requests.'''
+        cur = self.cursor()
+        row = cur.execute("""
+            SELECT cid, sona_id, memory_id, last_id
+            FROM acthread
+            JOIN memories ON memories.rowid = acthread.memory_id
+            WHERE
+                sona_id = ? AND
+                memories.cid IS NULL AND
+                memories.data IS NULL
+        """, (sona_id,)).fetchone()
+
+        return row and ActhreadRow(*row)
+    
     def select_memory(self, key: Optional[int|bytes|CIDv1]) -> Optional[MemoryRow]:
         if key is None:
             return None
@@ -149,47 +236,105 @@ class Database:
             return numpy.frombuffer(row[0], dtype=numpy.float32)
         return None
 
-    def insert_text_embedding(self, memory_id: int, text: str):
-        e, = nomic_text.embed(text)
+    def insert_text_embedding(self, memory_id: int, index: str):
+        e, = nomic_text.embed(index)
         cur = self.cursor()
         cur.execute("""
             INSERT INTO vss_nomic_v1_5_index (memory_id, embedding)
             VALUES (?, ?)
         """, (memory_id, e.tobytes()))
 
-    def insert_memory(self,
-            memory: Memory,
-            index: Optional[str] = None,
-            importance: Optional[float] = None,
-            edges: dict[str, list[Edge]] = {}
-        ) -> tuple[int, CIDv1]:
-        cid = memory.cid()
+    def insert_text_fts(self, memory_id: int, index: str):
+        '''
+        Index a memory by inserting it into the full-text search index.
+        '''
         cur = self.cursor()
         cur.execute("""
-            INSERT INTO memories (cid, timestamp, kind, data, importance)
+            INSERT INTO memory_fts (rowid, content)
+            VALUES (?, ?)
+        """, (memory_id, index))
+
+    def insert_memory(self,
+            cid: Optional[CIDv1],
+            kind: MemoryKind,
+            data: json_t,
+            timestamp: Optional[float],
+            importance: Optional[float] = None
+        ) -> int:
+        cur = self.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO memories (cid, timestamp, kind, data, importance)
                 VALUES (?, ?, ?, JSONB(?), ?)
-        """, (cid, memory.timestamp, memory.kind, json.dumps(memory.data), importance))
+        """, (cid, timestamp, kind, json.dumps(data), importance))
         
         if (rowid := cur.lastrowid) is None:
-            raise RuntimeError("Failed to insert memory")
+            # Memory already exists
+            rowid, = cur.execute("""
+                SELECT rowid FROM memories WHERE cid = ?
+            """, (cid,)).fetchone()
 
-        if index is not None:
-            cur.execute("""
-                INSERT INTO memory_fts (rowid, content) VALUES (?, ?)
-            """, (rowid, index))
-            self.insert_text_embedding(rowid, index)
+        return rowid
+    
+    def insert_acthread(self,
+            cid: Optional[CIDv1],
+            sona_id: int,
+            memory_id: int,
+            prev_id: Optional[int]
+        ) -> int:
+        '''
+        Insert an acthread for a sona.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO acthread
+            (cid, sona_id, memory_id, prev_id)
+            VALUES (?, ?, ?, ?)
+        """, (cid and cid.buffer, sona_id, memory_id, prev_id))
+        
+        if rowid := cur.lastrowid:
+            return rowid
+        raise RuntimeError("Failed to insert acthread, it may already exist.")
+    
+    def get_last_act(self, sona_id: int) -> Optional[ActhreadRow]:
+        '''
+        Get the last act thread for a sona.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            SELECT rowid, cid, sona_id, memory_id, prev_id
+            FROM acthread
+            WHERE sona_id = ?
+            ORDER BY rowid DESC LIMIT 1
+        """, (sona_id,))
+        
+        if row := cur.fetchone():
+            return ActhreadRow(*row)
+        return None
 
+    def link_memory_edges(self, rowid: int, edges: dict[str, list[Edge]]):
+        '''
+        Link the edges of a memory to the database.
+        This is used when inserting a memory with edges that are already in the
+        database.
+        '''
+        cur = self.cursor()
         cur.executemany("""
-            INSERT INTO edges (src_id, dst_id, label, weight)
+            INSERT OR IGNORE INTO edges (src_id, dst_id, label, weight)
             SELECT ?, dst_id, ?, ?
-            FROM memories WHERE rowid cid = ?
+            FROM memories WHERE rowid = ?
         """, (
-            (rowid, label, e.weight, rowid, e.target)
+            (rowid, label, e.weight, e.target)
                 for label, dsts in edges.items()
                     for e in dsts
         ))
-
-        return rowid, cid
+    
+    def link_sona(self, sona_id: int, memory_id: int):
+        '''Link a memory to a sona.'''
+        cur = self.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO sona_memories
+            (sona_id, memory_id) VALUES (?, ?)
+        """, (sona_id, memory_id))
     
     # dst <- src
 

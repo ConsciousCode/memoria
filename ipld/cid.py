@@ -10,7 +10,7 @@ __all__ = (
     'CID', 'CIDv0', 'CIDv1', 'AnyCID'
 )
 
-type Codec = Literal['dag-pb', 'dag-cbor', 'dag-json']
+type Codec = Literal['raw', 'dag-pb', 'dag-cbor', 'dag-json']
 type AnyCID = 'CIDv0|CIDv1'
 
 def _ensure_bytes(obj, encoding=None):
@@ -22,6 +22,8 @@ def _ensure_bytes(obj, encoding=None):
     return obj.encode(encoding or 'utf-8')
 
 class CID:
+    buffer: bytes
+
     __slots__ = ("buffer",)
     __match_args__ = ("version", "codec", "multihash")
 
@@ -292,7 +294,7 @@ class CIDv1(CID):
         """
         :param codec: codec for the CID
         :type codec: str or bytes
-        :param multihash: multihash for the CID, if not provided, it is expected that `codec` is a multibase encoded string
+        :param multihash: multihash for the CID, if not provided, it is cidexpected that `codec` is a multibase encoded string
         :type multihash: str or bytes, optional
         """
 

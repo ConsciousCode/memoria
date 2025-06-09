@@ -6,6 +6,7 @@ from typing import Annotated, Any, Iterable, Literal, Optional, TypedDict, cast
 
 from fastapi import FastAPI, Request
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.prompts.base import Message
 from mcp.server.session import ServerSession
 from openai import BaseModel
 from pydantic import Field
@@ -112,15 +113,15 @@ class ErrorResult(TypedDict):
 memory://[{cidv1}/edges/{label}/{index}/target]
 '''
 
-@mcp.resource("memory://{path}")
-def memory_resource(rowid: int):
+@mcp.resource("memory://{cid}")
+def memory_resource(cid: str):
     '''
     Memory resource handler.
     '''
     try:
         ctx = mcp.get_context()
         memoria = cast(Memoria, ctx.request_context.lifespan_context)
-        if (m := memoria.db.select_memory(rowid)) is None:
+        if (m := memoria.db.select_memory(CIDv1(cid))) is None:
             return {"error": "Memory not found"}, 404
         
         edges = defaultdict(list[MemoryEdge])
@@ -142,9 +143,13 @@ def memory_resource(rowid: int):
 
 @mcp.tool()
 def insert(
+        sona: Annotated[
+            Optional[str],
+            Field(description="Sona to push the memory to.")
+        ],
         memory: Annotated[
             Memory,
-            Field(description="Memory to insert into the sona.")
+            Field(description="Memory to insert.")
         ],
         index: Annotated[
             Optional[str],
@@ -156,12 +161,43 @@ def insert(
         ] = None
     ) -> str:
     '''Insert a new memory into the sona.'''
-    ctx = mcp.get_context()
-    memoria = cast(Memoria, ctx.request_context.lifespan_context)
-    return str(memoria.insert(memory, index, importance))
+    ctx, memoria = mcp_context()
+    return str(memoria.insert(memory, sona, index, importance))
+
+@mcp.tool()
+def act_push(
+        sona: Annotated[
+            str,
+            Field(description="Sona to push the memory to.")
+        ],
+        prompt: Annotated[
+            Memory|str,
+            Field(description="Memory to insert as a prompt for the ACT.")
+        ],
+        index: Annotated[
+            Optional[str],
+            Field(description="Plaintext indexing field for the memory if available.")
+        ] = None,
+        include: Annotated[
+            Optional[dict[str, list[Edge]]],
+            Field(description="Additional memories to include in the ACT, keyed by label.")
+        ] = None,
+        importance: Annotated[
+            Optional[float],
+            Field(description="Initial importance of the memory [0-1] biasing how easily it's recalled.")
+        ] = None
+    ):
+    '''Insert a new memory into the sona, formatted for an ACT (Autonomous Cognitive Thread).'''
+    ctx, memoria = mcp_context()
+    if not memoria.act_push(sona, prompt, index, include, importance):
+        raise HTTPException(404, detail=f"Sona '{sona}' not found or prompt memory not found.")
 
 @mcp.tool()
 def recall(
+        sona: Annotated[
+            str,
+            Field(description="Sona to focus the recall on.")
+        ],
         prompt: Annotated[
             str,
             Field(description="Prompt to base the recall on.")
@@ -180,7 +216,7 @@ def recall(
         ] = None
     ) -> MemoryDAG:
     '''
-    Recall memories related to the prompt, including relevant extra memories
+    Recall memories related to the prompt, including relevant included memories
     and their dependencies.
     '''
     ctx, memoria = mcp_context()
@@ -192,125 +228,38 @@ def recall(
         config
     )
 
-class ProcessResponse(BaseModel):
-    sona_uuid: str
-    result_cid: str
-
-@mcp.tool()
-def process(
-        sona: Annotated[str, Field(description="Sona to process within.")],
-        prompt: Annotated[str, Field(description="Prompt to process.")],
-        include: Annotated[Optional[dict[str, str]], Field(description="List of memory CIDv1 to include as part of the processing. Example: the previous message in a chat log.")] = None
-    ) -> str:
-    '''
-    Process a prompt and return a response.
-    '''
-    ctx = mcp.get_context()
-    memoria = cast(Memoria, ctx.request_context.lifespan_context)
-    
-    if include is None:
-        include = {}
-    ts = datetime.now()
-
-    s = memoria.find_sona(sona)
-
-    g = memoria.recall(prompt, (
-        cid.from_string(e) for edges in include.values()
-            for e in edges
-    ))
-
-    # Serialize the memory graph with localized references and edges.
-    gv = g.invert()
-    refs: dict[int, tuple[int, MemoryRow]] = {} # rowid: ref index
-    memories: list[str] = []
-
-    for rowid in gv.toposort(key=lambda v: v.timestamp):
-        # Only include ids if they have references
-        if gv.edges(rowid):
-            ref = len(refs)
-            refs[rowid] = (ref, gv[rowid])
-        else:
-            ref = None
-        
-        memories.append(format_memory(
-            ref, gv[rowid], {
-                e: refs[rowid]
-                    for rowid, (e, w) in gv.edges(rowid).items()
-            }
-        ))
-
-    result = yield memories
-    
-    yield f"I remember... {memory}"
-    with capture_run_messages() as messages:
-        try:
-            result = await system1.run(
-                prompt,
-                deps=System1Deps(
-                    instructions=instructions,
-                    memories=memories
-                ),
-                output_type=System1ResponseModel
-            )
-        finally:
-            print(messages)
-    output = result.output
-
-    p = memoria.append(
-        "other", {
-            "name": name,
-            "content": prompt
-        },
-        prompt, ts, None
-    )
-    # Do I need the importance of the response?
-    r = memoria.append(
-        "self", {
-            "name": None,
-            "content": output.response
-        },
-        output.response,
-        datetime.now(),
-        edges={
-            "prompt": [Edge(1.0, p.cid)],
-            "ref": [
-                Edge(weight / 10, cid.from_bytes(refs[int(ref)][1].cid))
-                    for ref, weight in output.weights.items()
-            ],
-            **{
-                label: [Edge(1.0, cid) for cid in edges]
-                    for label, edges in include.items()
-            }
-        }
-    )
-    
-    memoria.db.commit()
-    
-    return {
-        "id": r,
-        "response": output.response,
-        "weights": output.weights
-    }
-
 @mcp.prompt()
 def acthread(
-        include: Annotated[Optional[dict[str, str]], Field(description="List of memory CIDv1 to include as part of the processing. Example: the previous message in a chat log.")] = None
-    ) -> ProcessResponse:
-    '''
-    Process a prompt and return a response.
-    '''
-    ctx = mcp.get_context()
-    memoria = cast(Memoria, ctx.request_context.lifespan_context)
-    
-    if include is None:
-        include = {}
-    
-    ts = datetime.now()
+        sona: Annotated[
+            str,
+            Field(description="Sona to process within.")
+        ],
+        prompt: Annotated[
+            str,
+            Field(description="Prompt to base the recall on.")
+        ],
+        timestamp: Annotated[
+            Optional[float],
+            Field(description="Timestamp to use for the recall, if available. If `null`, uses the current time.")
+        ] = None,
+        config: Annotated[
+            RecallConfig,
+            Field(description="Configuration for how to weight memory recall.")
+        ] = RecallConfig(),
+        include: Annotated[
+            Optional[list[str]],
+            Field(description="List of memory CIDv1 to include as part of the recall. Example: the previous message in a chat log.")
+        ] = None
+    ) -> list[Message]:
+    '''Formatted context for an ACT (Autonomous Cognitive Thread).'''
+    ctx, memoria = mcp_context()
 
-    g = memoria.recall(prompt, (
-        cid.from_string(e) for edges in include.values()
-            for e in edges
-    ))
+    g = memoria.recall(
+        prompt,
+        (CIDv1(inc) for inc in include or []),
+        timestamp or datetime.now().timestamp(),
+        config
+    )
 
     # Serialize the memory graph with localized references and edges.
     gv = g.invert()

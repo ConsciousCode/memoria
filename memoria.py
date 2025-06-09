@@ -1,11 +1,10 @@
+from datetime import datetime
 from typing import Iterable, Optional
-
-from pydantic import BaseModel
 
 from ipld import CIDv1
 
-from db import Database, MemoryRow, Memory
-from models import DAGEdge, Memory, MemoryDAG, RecallConfig
+from db import Database, MemoryRow
+from models import ACThread, DAGEdge, Edge, Memory, MemoryDAG, RecallConfig
 from util import todo_list
 
 class Memoria:
@@ -13,24 +12,121 @@ class Memoria:
     Wraps all memoria-related functionality to abstract away the details
     of the underlying database, but doesn't implement the MCP server.
     '''
+
     def __init__(self, db: Database):
         super().__init__()
         self.db = db
     
     def insert(self,
             memory: Memory,
+            sona: Optional[str] = None,
             index: Optional[str] = None,
             importance: Optional[float] = None
-        ) -> CIDv1:
+        ) -> tuple[int, CIDv1]:
         '''
         Append a memory to the sona file.
         '''
 
-        _, cid = self.db.insert_memory(memory, index, importance)
-        return cid
+        rowid = self.db.insert_memory(
+            memory.cid,
+            memory.kind,
+            memory.data,
+            memory.timestamp,
+            importance
+        )
+        
+        self.db.link_memory_edges(rowid, memory.edges or {})
+        
+        if index:
+            self.db.insert_text_embedding(rowid, index)
+            self.db.insert_text_fts(rowid, index)
+        
+        if sona:
+            sona_row = self.db.find_sona(sona)
+            self.db.link_sona(sona_row.rowid, rowid)
+        
+        self.db.commit()
+        return rowid, memory.cid
     
     def find_sona(self, sona: str):
         return self.db.find_sona(sona)
+    
+    def act_push(self,
+            sona: str,
+            prompt: Memory|str,
+            index: Optional[str]=None,
+            include: Optional[dict[str, list[Edge]]]=None,
+            importance: Optional[float]=None
+        ) -> Optional[int]:
+        '''Push a prompt to the sona for processing.'''
+        # Find or create the sona
+        sona_row = self.db.find_sona(sona)
+
+        if isinstance(prompt, str):
+            if row := self.db.select_memory(CIDv1(prompt)):
+                prompt_cid = CIDv1(row.cid)
+                prompt_id = row.rowid
+            else:
+                return None
+        else:
+            prompt_cid = prompt.cid
+            # Insert the prompt
+            prompt_id = self.db.insert_memory(
+                prompt.cid,
+                prompt.kind,
+                prompt.data,
+                prompt.timestamp,
+                importance
+            )
+            if index:
+                self.db.index(prompt_id, index)
+        
+        # Figure out where it's going
+        
+        if pending_thread := self.db.get_acthread_pending(sona_row.rowid):
+            # Pending thread already exists, add to its context
+            response_id = pending_thread.memory_id
+            pending_id = pending_thread.rowid
+        else:
+            # No pending thread, we need to create one
+            active_thread = (
+                self.db.get_acthread_active(sona_row.rowid) or
+                self.db.get_last_act(sona_row.rowid)
+            )
+
+            # Create the incomplete memory to receive the response
+            response_id = self.db.insert_memory(
+                cid=None,
+                kind="self",
+                data=None,
+                timestamp=datetime.now().timestamp(),
+                importance=importance
+            )
+
+            # Create a new pending thread
+            pending_id = self.db.insert_acthread(
+                cid=None,
+                sona_id=sona_row.rowid,
+                memory_id=prompt_id,
+                prev_id=active_thread and active_thread.rowid
+            )
+        
+        if include is None:
+            include = {}
+        
+        # Now that we have the pending thread, link it to the prompt
+        prompt_edges = include.get("prompt", [])
+        prompt_edges.append(Edge(
+            target=prompt_cid,
+            weight=1.0
+        ))
+
+        self.db.link_memory_edges(response_id, {
+            **include,
+            "prompt": prompt_edges
+        })
+
+        return pending_id
     
     def recall(self,
             prompt: str,

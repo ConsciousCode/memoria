@@ -105,7 +105,7 @@ Message = {
         last: CID
     }
     result: {
-        kind: "self" | "other" | "text" | "image" | "file"
+        kind: "self" | "other" | "text" | "image" | "file- Host "
         data: Any
         timestamp?: float
         edges: {
@@ -119,3 +119,16 @@ Message = {
 ```
 
 Oh interesting note, when memories are recalled their grounding memories are found via both backward and *forward* edges, but this is only for the primary memories, not their supporting memories. So if memory A depends on memory B, any other references to B are not included in the recall unless they were also considered relevant.
+
+Ok new lifecycle:
+- Host gets user input
+- Host calls `act_push` with the prompt and a list of included memories
+  - If the ACT is running, this is pushed to the sona's `pending` queue.
+  - If the ACT is not running, this is combined with the `pending` queue and the ACT is started.
+- Host calls `act_next` to get the next prompt
+  - `act_next`, in addition to being the prompt for the LLM, stages the ACT for the next step by constructing an *incomplete* memory (lacking a CID) to be streamed to the server
+- Host simulates a response with an LLM using this prompt
+  - As part of this, it may stream the response to the server using `act_stream`
+  - Even if not streaming, this is still used to finalize the response.
+
+NOTE: We don't need to mark memories as "ephemeral" or whatever, we automatically know that a memory ought to be GC'd because it's not referenced by anything AND it references nothing itself.

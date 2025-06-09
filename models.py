@@ -1,7 +1,9 @@
 from collections import defaultdict
+from functools import cached_property
 from typing import Annotated, Iterable, Literal, Optional, override
+from uuid import UUID
 from cid import CIDv1
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer
 
 from graph import IGraph
 import ipld
@@ -60,7 +62,14 @@ class FileMemory(BaseModel):
     content: Annotated[str, Field(description="Base64 encoded file contents.")]
     mimeType: Optional[str] = None
 
-class Memory(BaseModel):
+class IPLDModel(BaseModel):
+    @cached_property
+    def cid(self):
+        return CIDv1("dag-cbor",
+            ipld.multihash(ipld.dagcbor_marshal(self.model_dump()))
+        )
+
+class Memory(IPLDModel):
     '''
     IPLD doesn't allow links as keys, so edges is label: [(edge, target), ...].
     This differs from Graph which uses the target as the key.
@@ -68,14 +77,16 @@ class Memory(BaseModel):
     kind: MemoryKind
     data: json_t
     timestamp: Optional[float]
-    edges: defaultdict[str, list[Edge]] = Field(
+    edges: dict[str, list[Edge]] = Field(
         default_factory=lambda: defaultdict(list)
     ) # label: [(edge, target), ...]
 
-    def cid(self):
-        return CIDv1("dag-cbor",
-            ipld.multihash(ipld.dagcbor_marshal(self.model_dump()))
-        )
+class ACThread(IPLDModel):
+    sona: Annotated[UUID,
+        PlainSerializer(lambda u: CIDv1("raw", u.bytes))
+    ]
+    memory: CIDv1
+    prev: Optional[CIDv1] = None
 
 class DAGEdge(BaseModel):
     '''Edge for use in graph operations.'''
