@@ -1,10 +1,12 @@
 from datetime import datetime
 from typing import Iterable, Optional
 
+from pydantic import TypeAdapter
+
 from ipld import CIDv1
 
 from db import Database, MemoryRow
-from models import ACThread, DAGEdge, Edge, Memory, MemoryDAG, RecallConfig
+from models import ACThread, DAGEdge, Edge, Memory, MemoryDataAdapter, MemoryDAG, RecallConfig, build_memory, model_dump
 from util import todo_list
 
 class Memoria:
@@ -17,6 +19,9 @@ class Memoria:
         super().__init__()
         self.db = db
     
+    def lookup_memory(self, cid: CIDv1) -> Optional[Memory]:
+        return self.db.lookup_ipld_memory(cid)
+
     def insert(self,
             memory: Memory,
             sona: Optional[str] = None,
@@ -30,7 +35,7 @@ class Memoria:
         rowid = self.db.insert_memory(
             memory.cid,
             memory.kind,
-            memory.data,
+            model_dump(memory.data),
             memory.timestamp,
             importance
         )
@@ -63,7 +68,7 @@ class Memoria:
         sona_row = self.db.find_sona(sona)
 
         if isinstance(prompt, str):
-            if row := self.db.select_memory(CIDv1(prompt)):
+            if row := self.db.select_memory_cid(CIDv1(prompt)):
                 prompt_cid = CIDv1(row.cid)
                 prompt_id = row.rowid
             else:
@@ -74,7 +79,7 @@ class Memoria:
             prompt_id = self.db.insert_memory(
                 prompt.cid,
                 prompt.kind,
-                prompt.data,
+                model_dump(prompt.data),
                 prompt.timestamp,
                 importance
             )
@@ -83,14 +88,14 @@ class Memoria:
         
         # Figure out where it's going
         
-        if pending_thread := self.db.get_acthread_pending(sona_row.rowid):
+        if pending_thread := self.db.get_act_pending(sona_row.rowid):
             # Pending thread already exists, add to its context
             response_id = pending_thread.memory_id
             pending_id = pending_thread.rowid
         else:
             # No pending thread, we need to create one
             active_thread = (
-                self.db.get_acthread_active(sona_row.rowid) or
+                self.db.get_act_active(sona_row.rowid) or
                 self.db.get_last_act(sona_row.rowid)
             )
 
@@ -104,7 +109,7 @@ class Memoria:
             )
 
             # Create a new pending thread
-            pending_id = self.db.insert_acthread(
+            pending_id = self.db.insert_act(
                 cid=None,
                 sona_id=sona_row.rowid,
                 memory_id=prompt_id,
@@ -128,11 +133,40 @@ class Memoria:
 
         return pending_id
     
+    def act_stream(self,
+            sona: str,
+            prompt: Memory|str,
+            index: Optional[str]=None,
+            include: Optional[dict[str, list[Edge]]]=None,
+            importance: Optional[float]=None
+        ) -> ACThread:
+        '''
+        Stream a prompt to the sona for processing.
+        This will create a new thread and return it.
+        '''
+        pending_id = self.act_push(
+            sona=sona,
+            prompt=prompt,
+            index=index,
+            include=include,
+            importance=importance
+        )
+
+        if pending_id is None:
+            raise ValueError("Failed to push prompt to sona")
+
+        return ACThread(
+            sona=sona,
+            memory=CIDv1(prompt.cid if isinstance(prompt, Memory) else prompt),
+            prev=None
+    )
+
     def recall(self,
+            sona: Optional[str],
             prompt: str,
-            include: Optional[Iterable[CIDv1]]=None,
             timestamp: Optional[float]=None,
-            config: Optional[RecallConfig]=None
+            config: Optional[RecallConfig]=None,
+            include: Optional[Iterable[CIDv1]]=None
         ) -> MemoryDAG:
         '''
         Recall memories based on a prompt. This incorporates all indices
@@ -141,33 +175,22 @@ class Memoria:
         g = MemoryDAG()
         
         for c in include or []:
-            if pm := self.db.select_memory(c):
-                g.insert(CIDv1(pm.cid), Memory(
-                    kind=pm.kind,
-                    data=pm.data,
-                    timestamp=pm.timestamp
+            if pm := self.db.select_memory_cid(c):
+                g.insert(CIDv1(pm.cid), build_memory(
+                    pm.kind,
+                    MemoryDataAdapter.validate_json(pm.data),
+                    pm.timestamp
                 ))
         
         rows: list[tuple[MemoryRow, float]] = []
         
-        if config:
-            importance = config.importance
-            recency = config.recency
-            fts = config.fts
-            vss = config.vss
-            k = config.k
-        else:
-            importance = recency = fts = vss = k = None
-
-        memories = self.db.recall(
-            prompt, timestamp, importance, recency, fts, vss, k
-        )
+        memories = self.db.recall(sona, prompt, timestamp, config)
         # Populate the graph with nodes so we can detect when there are edges
         #  between our seletions
         for rs in memories:
             row, _ = rs
             rows.append(rs)
-            g.insert(CIDv1(row.cid), Memory(
+            g.insert(CIDv1(row.cid), build_memory(
                 kind=row.kind,
                 data=row.data,
                 timestamp=row.timestamp
@@ -237,7 +260,7 @@ class Memoria:
                 
                 dstcid = CIDv1(dst.cid)
 
-                g.insert(srccid, Memory(
+                g.insert(srccid, build_memory(
                     kind=dst.kind,
                     data=dst.data,
                     timestamp=dst.timestamp
@@ -260,7 +283,7 @@ class Memoria:
 
                 srccid = CIDv1(src.cid)
 
-                g.insert(srccid, Memory(
+                g.insert(srccid, build_memory(
                     kind=src.kind,
                     data=src.data,
                     timestamp=src.timestamp

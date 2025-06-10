@@ -3,7 +3,7 @@ from typing import Any, Literal, Optional, Self, cast, overload, override
 import base58
 import multibase
 import multicodec
-import multihash as mh
+from multihash import Multihash
 
 __all__ = (
     'Codec',
@@ -28,6 +28,10 @@ class CID:
     __match_args__ = ("version", "codec", "multihash")
 
     @overload
+    def __new__(cls, cid: 'CIDv0', /) -> 'CIDv0': ...
+    @overload
+    def __new__(cls, cid: 'CIDv1', /) -> 'CIDv1': ...
+    @overload
     def __new__(cls, data: str|bytes, /) -> AnyCID: ...
     @overload
     def __new__(cls, /, version: Literal[0], codec: Literal['dag-pb'], multihash: str|bytes) -> 'CIDv0': ...
@@ -46,6 +50,7 @@ class CID:
         args = list(args)
         if (multihash := kwargs.get('multihash')) is None:
             match args:
+                case [CIDv0()|CIDv1() as cid]: return cid.copy()
                 case [str(data)]: return cls.from_string(data)
                 case [bytes(data)]: return cls.from_bytes(data)
                 case []: raise ValueError("Multihash required for CID construction.")
@@ -83,6 +88,15 @@ class CID:
         """CID multihash"""
         raise NotImplementedError("multihash")
     
+    def copy(self) -> Self:
+        """
+        Returns a copy of the CID object.
+
+        :return: a copy of the CID object
+        :rtype: CID
+        """
+        return type(self)(self.buffer)
+
     def encode(self, encoding: str="") -> bytes:
         """
         Encoded representation of the CID
@@ -93,6 +107,9 @@ class CID:
         """
         raise NotImplementedError("encode")
     
+    def __len__(self):
+        return len(self.buffer)
+
     def __iter__(self):
         yield self.version
         yield self.codec
@@ -206,7 +223,7 @@ class CID:
                 raise ValueError('multihash is not a valid base58 encoded multihash') from None
 
         try:
-            mh.decode(multihash)
+            Multihash(multihash) # validate multihash
         except ValueError:
             raise
 

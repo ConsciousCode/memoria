@@ -6,65 +6,17 @@ from typing import Annotated, Any, Iterable, Literal, Optional, TypedDict, cast
 
 from fastapi import FastAPI, Request
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.prompts.base import Message
+from mcp.server.fastmcp.prompts.base import AssistantMessage, Message, UserMessage
 from mcp.server.session import ServerSession
-from openai import BaseModel
-from pydantic import Field
+from mcp.types import BlobResourceContents, EmbeddedResource
+from pydantic import AnyUrl, Field
 from starlette.exceptions import HTTPException
 
-from ipld import CID, CIDv0, CIDv1
+from ipld import CIDv1
 
-from db import MemoryKind, MemoryRow, Edge
+from db import Edge
 from memoria import Database, Memoria
-from models import FileMemory, Memory, MemoryDAG, OtherMemory, RecallConfig, SelfMemory, TextMemory
-from util import X, json_t
-from graph import Graph
-
-def localize_memory(g: Graph[int, tuple[str, float], MemoryRow]) -> Iterable[tuple[Optional[int], MemoryRow, dict[str, int]]]:
-    '''
-    Serialize the memory graph into a sequence of memories with localized
-    references and edges.
-    '''
-    gv = g.invert()
-    refs: dict[int, int] = {} # rowid: ref index
-
-    for rowid in gv.toposort(key=lambda v: v.timestamp):
-        # Only include ids if they have references
-        if gv.edges(rowid):
-            ref = refs[rowid] = len(refs)
-        else:
-            ref = None
-        
-        # We don't have to check if rowid is in refs because of toposort
-        yield ref, gv[rowid], {
-            e: refs[rowid]
-                for rowid, (e, w) in gv.edges(rowid).items()
-        }
-
-def format_memory(ref: Optional[int], memory: MemoryRow, edges: dict[str, Any]) -> str:
-    '''Render memory for the context.'''
-
-    p = {
-        "id": ref,
-        "datetime": memory.timestamp and datetime
-            .fromtimestamp(memory.timestamp)
-            .replace(microsecond=0)
-            .isoformat(),
-        "importance": memory.importance,
-        **edges
-    }
-    
-    match memory.kind:
-        case "self":
-            data = cast(SelfMemory, memory.data)
-            return X("self", name=data['name'], **p)(data['content'])
-        case "other":
-            data = cast(OtherMemory, memory.data)
-            return X("other", name=data['name'], **p)(data['content'])
-        case "text" if isinstance(memory.data, str):
-            return X("text", **p)(memory.data)
-        case kind:
-            return X(kind, **p)(json.dumps(memory.data))
+from models import Memory, MemoryDAG, RecallConfig
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
@@ -96,23 +48,6 @@ def get_ipfs_empty(request: Request):
 def get_ipfs(path: str, request: Request):
     pass
 
-class MemoryEdge(BaseModel):
-    weight: float
-    target: CIDv1
-
-class MemorySchema(BaseModel):
-    kind: MemoryKind
-    data: json_t
-    timestamp: Optional[float]
-    edges: dict[str, list[MemoryEdge]]
-
-class ErrorResult(TypedDict):
-    error: str
-
-'''
-memory://[{cidv1}/edges/{label}/{index}/target]
-'''
-
 @mcp.resource("memory://{cid}")
 def memory_resource(cid: str):
     '''
@@ -121,25 +56,12 @@ def memory_resource(cid: str):
     try:
         ctx = mcp.get_context()
         memoria = cast(Memoria, ctx.request_context.lifespan_context)
-        if (m := memoria.db.select_memory(CIDv1(cid))) is None:
+        if (m := memoria.lookup_memory(CIDv1(cid))) is None:
             return {"error": "Memory not found"}, 404
         
-        edges = defaultdict(list[MemoryEdge])
-        for edge in memoria.db.backward_edges(m.rowid):
-            edges[edge.label].append(MemoryEdge(
-                target=CIDv1(edge.dst.cid),
-                weight=edge.weight
-            ))
-
-        return MemorySchema(
-            timestamp=m.timestamp,
-            kind=m.kind,
-            data=m.data,
-            edges=edges
-        )
+        return m
     except Exception as e:
         raise HTTPException(500, detail=str(e))
-
 
 @mcp.tool()
 def insert(
@@ -195,7 +117,7 @@ def act_push(
 @mcp.tool()
 def recall(
         sona: Annotated[
-            str,
+            Optional[str],
             Field(description="Sona to focus the recall on.")
         ],
         prompt: Annotated[
@@ -214,22 +136,74 @@ def recall(
             Optional[list[str]],
             Field(description="List of memory CIDv1 to include as part of the recall. Example: the previous message in a chat log.")
         ] = None
-    ) -> MemoryDAG:
+    ) -> dict[str, Memory]:
     '''
     Recall memories related to the prompt, including relevant included memories
     and their dependencies.
     '''
     ctx, memoria = mcp_context()
 
-    return memoria.recall(
+    dag = memoria.recall(
+        sona,
         prompt,
-        list(map(CIDv1, include or [])),
         timestamp,
-        config
+        config,
+        map(CIDv1, include or [])
     )
+    return {
+        str(cid): mem
+            for cid, mem in dag.items()
+    }
+
+def memory_to_message(ref: Optional[int], refs: dict[CIDv1, int], memory: Memory) -> Message:
+    '''Render memory for the context.'''
+
+    p: dict[str, Any] = {
+        label: [r for e in edges if (r := refs.get(e.target))]
+            for label, edges in memory.edges.items()
+                if edges
+    }
+    # Not included:
+    # - importance - do not expose to the agent never ever
+    if ref: p["id"] = ref
+    if memory.timestamp:
+        p['datetime'] = (datetime
+            .fromtimestamp(memory.timestamp)
+            .replace(microsecond=0)
+            .isoformat()
+        )
+    
+    match memory.kind:
+        case "self":
+            return AssistantMessage(json.dumps({
+                **memory.data.model_dump(),
+                **p
+            }))
+        case "text" if isinstance(memory.data, str):
+            return AssistantMessage(json.dumps({
+                "text": memory.data,
+                **p
+            }))
+        case "other":
+            return UserMessage(json.dumps({
+                **memory.data.model_dump(),
+                **p
+            }))
+        case "file":
+            return AssistantMessage(EmbeddedResource(
+                type="resource",
+                resource=BlobResourceContents(
+                    uri=AnyUrl(f"memory://{memory.cid}"),
+                    mimeType=memory.data.mimeType or "application/octet-stream",
+                    blob=memory.data.content
+                )
+            ))
+        
+        case _:
+            raise ValueError(f"Unknown memory kind: {memory.kind}")
 
 @mcp.prompt()
-def acthread(
+def act_next(
         sona: Annotated[
             str,
             Field(description="Sona to process within.")
@@ -251,19 +225,33 @@ def acthread(
             Field(description="List of memory CIDv1 to include as part of the recall. Example: the previous message in a chat log.")
         ] = None
     ) -> list[Message]:
-    '''Formatted context for an ACT (Autonomous Cognitive Thread).'''
+    '''Get the prompt for the next step of an ACT (Autonomous Cognitive Thread).'''
     ctx, memoria = mcp_context()
 
     g = memoria.recall(
+        sona,
         prompt,
-        (CIDv1(inc) for inc in include or []),
         timestamp or datetime.now().timestamp(),
-        config
+        config,
+        (CIDv1(inc) for inc in include or [])
     )
 
     # Serialize the memory graph with localized references and edges.
     gv = g.invert()
-    refs: dict[int, tuple[int, MemoryRow]] = {}
+    refs: dict[CIDv1, int] = {}
+    messages: list[Message] = []
+
+    for cid in gv.toposort(key=lambda v: v.timestamp):
+        memory = gv[cid]
+        # Only include ids if they have references
+        if gv.edges(cid):
+            ref = refs[cid] = len(refs)
+        else:
+            ref = None
+        
+        messages.append(memory_to_message(ref, refs, memory))
+    
+    return messages
 
 async def main():
     import uvicorn

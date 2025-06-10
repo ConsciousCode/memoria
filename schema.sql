@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS memories (
     rowid INTEGER PRIMARY KEY,
     cid BLOB UNIQUE, -- NULL indicates an incomplete memory
     timestamp REAL,
-    kind TEXT NOT NULL CHECK (object_type IN ('self', 'other', 'text', 'file')),
+    kind TEXT NOT NULL CHECK (kind IN ('self', 'other', 'text', 'file')),
     data JSONB NOT NULL,
     importance REAL
 );
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 
 /**
- * A sona is a fuzzy-isolated component of a total self which processes
+ * A sona is a fuzzy-isolated subcomponent of a total self which processes
  * incoming information independently, but can share information with
  * other sonas via memories. They act as de-facto centroids of their name
  * embeddings for emergent compartmentalization of the self.
@@ -48,8 +48,19 @@ CREATE TABLE IF NOT EXISTS edges (
 **/
 CREATE TABLE IF NOT EXISTS sonas (
     rowid INTEGER PRIMARY KEY,
-    uuid BLOB NOT NULL UNIQUE
+    uuid BLOB NOT NULL UNIQUE,
+    active_id INTEGER REFERENCES memories(rowid) ON DELETE SET NULL,
+    pending_id INTEGER REFERENCES memories(rowid) ON DELETE SET NULL
 );
+
+/**
+ * Aliases associated with sonas.
+**/
+CREATE TABLE IF NOT EXISTS sona_aliases (
+    sona_id INTEGER REFERENCES sonas(rowid) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    PRIMARY KEY (sona_id, name)
+)
 
 /**
  * Memories seen or recalled at some point by the sona. This makes them easier

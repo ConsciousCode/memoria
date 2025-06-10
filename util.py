@@ -1,5 +1,5 @@
 import json
-from typing import Callable, Iterable, Mapping, Protocol, Self, Sequence
+from typing import Callable, Iterable, Mapping, Optional, Protocol, Self, Sequence, TypeVar
 import re
 from functools import wraps
 from heapq import heappop
@@ -126,3 +126,10 @@ def iter_in(item: object, iterable: Iterable) -> bool:
         if item == it:
             return True
     return False
+
+class classproperty[T, R]:
+    def __init__(self, fn: Callable[[type[T]], R]):
+        self.fn = fn
+    
+    def __get__(self, instance, owner: type[T]) -> R:
+        return self.fn(owner)

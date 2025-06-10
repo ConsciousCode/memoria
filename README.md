@@ -132,3 +132,6 @@ Ok new lifecycle:
   - Even if not streaming, this is still used to finalize the response.
 
 NOTE: We don't need to mark memories as "ephemeral" or whatever, we automatically know that a memory ought to be GC'd because it's not referenced by anything AND it references nothing itself.
+
+## Future scope
+- IPFS integration with file memories, UnixFS seems absurdly fragmented and poorly documented so I don't want to mess with it, but...
