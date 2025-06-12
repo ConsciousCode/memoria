@@ -4,7 +4,7 @@ import re
 from functools import wraps
 from heapq import heappop
 
-from ipld import CID
+from ipld.cid import CID
 
 class JSONStructure(Protocol):
     def __json__(self) -> "json_t": ...
@@ -119,7 +119,7 @@ def cidstr(c: bytes) -> str:
     Returns:
         A base32-encoded string representation of the CID.
     """
-    return CID(c).encode().decode('utf-8')
+    return CID(c).encode()
 
 def iter_in(item: object, iterable: Iterable) -> bool:
     for it in iterable:

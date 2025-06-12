@@ -1,10 +1,10 @@
 from typing import Iterable
-from hashlib import sha256
 
 import varint
-from multihash import Multihash
-from cid import CIDv1
-from ipld import dagcbor_marshal
+
+from .multihash import multihash
+from .cid import CIDv1
+from .ipld import dagcbor_marshal
 
 def _car_block(cid: CIDv1, data: bytes) -> bytes:
     return varint.encode(len(cid) + len(data)) + cid.buffer + data
@@ -14,7 +14,9 @@ def _carv1_iter(blocks: Iterable[tuple[CIDv1, bytes]]) -> Iterable[bytes]:
         "version": 1,
         "roots": [cid for cid, _ in blocks]
     })
-    header_cid = CIDv1("dag-cbor", Multihash("sha2-256", sha256(header).digest()).buffer)
+    header_cid = CIDv1("dag-cbor",
+        multihash("sha2-256").update(header).digest().buffer
+    )
     
     yield _car_block(header_cid, header)
 

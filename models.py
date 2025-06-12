@@ -5,7 +5,7 @@ from cid import CIDv1
 from pydantic import BaseModel, Field, PlainSerializer, TypeAdapter
 
 from graph import IGraph
-import ipld
+import ipld.ipld as ipld
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
 type UUIDCID = Annotated[CIDv1, PlainSerializer(lambda u: CIDv1("raw", u.bytes))]

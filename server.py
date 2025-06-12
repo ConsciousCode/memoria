@@ -12,7 +12,7 @@ from mcp.types import BlobResourceContents, EmbeddedResource
 from pydantic import AnyUrl, Field
 from starlette.exceptions import HTTPException
 
-from ipld import CIDv1
+from ipld.cid import CIDv1
 
 from db import Edge
 from memoria import Database, Memoria
@@ -260,7 +260,7 @@ async def main():
     config = uvicorn.Config(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=3001,
         log_level="DEBUG"
     )
     server = uvicorn.Server(config)

@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Iterable, Optional
 from uuid import UUID
 
-from ipld import CIDv1
+from ipld.cid import CIDv1
 
 from db import Database, MemoryRow
 from models import DAGEdge, Edge, Memory, MemoryDataAdapter, MemoryDAG, RecallConfig, SelfMemory, StopReason, build_memory, memory_document, model_dump

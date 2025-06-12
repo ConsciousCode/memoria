@@ -1,11 +1,16 @@
 from io import BytesIO
-from typing import Literal, overload
+from typing import Literal, Self, overload
+import hashlib
 
 import base58
 import varint
 
+__all__ = (
+    'Multihash', 'multihash'
+)
+
 HASH_CODES: dict[str, int] = {
-    'id':   0,
+    'id': 0,
     'sha1': 0x11,
     'sha2-256': 0x12,
     'sha2-512': 0x13,
@@ -19,14 +24,36 @@ HASH_CODES: dict[str, int] = {
     'keccak-256': 0x1b,
     'keccak-384': 0x1c,
     'keccak-512': 0x1d,
-    'murmur3-128':  0x22,
-    'murmur3-32':   0x23,
-    'dbl-sha2-256': 0x56,
+    'blake3': 0x1e,
+    'sha2-384': 0x20,
+    'dbl-sha2-256': 0x56, # draft
+    'md4': 0xd4, # draft but Python supports it
+    'md5': 0xd5, # draft
+    #'fr32-sha256-trunc254-padbintree': 0x1011, # draft
+    'sha2-256-trunc254-padded': 0x1012, # zeros 2 most significant bits
+    'sha2-224': 0x1013,
+    'sha2-512-224': 0x1014,
+    'sha2-512-256': 0x1015,
+    #'murmur3-x64-128': 0x1022, # draft, also "hash" instead of "multihash"?
+    #'ripemd-128': 0x1052, # draft
+    #'ripemd-160': 0x1053, # draft
+    #'ripemd-256': 0x1054, # draft
+    #'ripemd-320': 0x1055, # draft
+    #'x11': 0x1100, # draft
+    #'kangarootwelve': 0x1d01, # draft
+    #'sm3-256': 0x534d, # draft
+    'murmur3-128': 0x22,
+    'murmur3-32': 0x23,
     **{f"blake2b-{i*8}"  : 0xb200 + i for i in range(1, 0x41)},
     **{f"blake2s-{i*8}"  : 0xb240 + i for i in range(1, 0x21)},
     **{f"skein256-{i*8}" : 0xb300 + i for i in range(1, 0x21)},
     **{f"skein512-{i*8}" : 0xb320 + i for i in range(1, 0x41)},
     **{f"skein1024-{i*8}": 0xb360 + i for i in range(1, 0x81)},
+    'poseidon-bls12_381-a2-fc1': 0xb401,
+    #'poseidon-bls12_381-a2-fc1-sc': 0xb402, # draft
+    #'ssz-sha2-256-bmt': 0xb502, # draft
+    #'sha2-256-chunked': 0xb510, # draft
+    #'bcrypt-pbkdf': 0xd00d, # draft
 }
 CODE_HASHES: dict[int, str] = {
     v: k for k, v in HASH_CODES.items()
@@ -36,6 +63,7 @@ def _pack_mh(function: int, digest: bytes) -> bytes:
     return varint.encode(function) + varint.encode(len(digest)) + digest
 
 class Multihash:
+    '''A hash with a function code and digest.'''
     __slots__ = ("function", "digest")
     __match_args__ = ("function", "digest")
 
@@ -97,7 +125,7 @@ class Multihash:
         super().__setattr__('digest', digest)
     
     @classmethod
-    def from_hex(cls, hex_string: str) -> 'Multihash':
+    def from_hex(cls, hex_string: str) -> Self:
         """
         Create a Multihash from a hex encoded string
 
@@ -107,7 +135,7 @@ class Multihash:
         return cls(bytes.fromhex(hex_string))
     
     @classmethod
-    def from_b58(cls, b58_string: str) -> 'Multihash':
+    def from_b58(cls, b58_string: str) -> Self:
         """
         Create a Multihash from a base58 encoded string
 
@@ -177,3 +205,21 @@ class Multihash:
             case 'b58': return base58.b58encode(self.buffer).decode()
             case _:
                 raise ValueError(f"Unsupported codec: {codec}")
+
+class multihash:
+    """A class to handle multihashing with a specific hash function."""
+
+    def __init__(self, name: str):
+        if name not in HASH_CODES:
+            raise ValueError(f"Unknown hash function: {name}")
+        self.name = name
+        self.hash = hashlib.new(name)
+
+    def update(self, data: bytes):
+        """Update the hash with the given data."""
+        self.hash.update(data)
+        return self
+    
+    def digest(self) -> Multihash:
+        """Return the digest as a Multihash."""
+        return Multihash(self.name, self.hash.digest())

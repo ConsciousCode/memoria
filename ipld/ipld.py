@@ -1,4 +1,4 @@
-from typing import Iterable, Literal, Mapping, cast, reveal_type
+from typing import Iterable, Literal, Mapping, cast
 import hashlib
 import json
 import base64

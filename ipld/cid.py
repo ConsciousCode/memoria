@@ -1,17 +1,37 @@
 from typing import Any, Literal, Optional, Self, cast, overload, override
 
 import base58
-import multibase
-import multicodec
-from multihash import Multihash
+from pydantic import GetCoreSchemaHandler
+from pydantic_core import core_schema
+
+from .multihash import Multihash
+from . import multibase
+from . import multicodec
 
 __all__ = (
-    'Codec',
+    'Version', 'Codec',
     'CID', 'CIDv0', 'CIDv1', 'AnyCID'
 )
 
-type Codec = Literal['raw', 'dag-pb', 'dag-cbor', 'dag-json']
-type AnyCID = 'CIDv0|CIDv1'
+type Version = Literal[0, 1]
+type Codec = Literal[
+    'raw', 'dag-pb', 'dag-cbor',
+    'libp2p-key',
+    'git-raw',
+    'torrent-info', 'torrent-file',
+    'leofcoin-block', 'leofcoin-tx', 'leofcoin-pr',
+    'eth-block', 'eth-block-list',
+    'eth-tx-trie', 'eth-tx', 'eth-tx-receipt-trie', 'eth-tx-receipt',
+    'eth-state-trie', 'eth-account-snapshot', 'eth-storage-trie',
+    'bitcoin-block', 'bitcoin-tx',
+    'zcash-block', 'zcash-tx',
+    'stellar-block', 'stellar-tx',
+    'decred-block', 'decred-tx',
+    'dash-block', 'dash-tx',
+    'swarm-manifest', 'swarm-feed',
+    'dag-json'
+]
+type AnyCID = 'CID|CIDv0|CIDv1'
 
 def _ensure_bytes(obj, encoding=None):
     match obj:
@@ -47,12 +67,15 @@ class CID:
     def __new__(cls, /, codec: Codec, multihash: str|bytes) -> 'CIDv1': ...
 
     def __new__(cls, *args, **kwargs) -> AnyCID:
+        if cls is not CID:
+            return super().__new__(cls)
+        
         args = list(args)
         if (multihash := kwargs.get('multihash')) is None:
             match args:
                 case [CIDv0()|CIDv1() as cid]: return cid.copy()
-                case [str(data)]: return cls.from_string(data)
-                case [bytes(data)]: return cls.from_bytes(data)
+                case [str(data)]: return CID(*cls.parse(data))
+                case [bytes(data)]: return CID(*cls.parse(data))
                 case []: raise ValueError("Multihash required for CID construction.")
                 case _: multihash = args.pop()
         
@@ -68,7 +91,7 @@ class CID:
     
     def __init__(self, data: str|bytes, /):
         super().__init__()
-        super().__setattr__('buffer', _ensure_bytes(data))
+        super().__setattr__('buffer', CID.normalize(data))
 
     def __setattr__(self, name: str, value: Any):
         raise AttributeError("CID objects are immutable.")
@@ -97,7 +120,7 @@ class CID:
         """
         return type(self)(self.buffer)
 
-    def encode(self, encoding: str="") -> bytes:
+    def encode(self, encoding: multibase.Encoding="identity") -> str:
         """
         Encoded representation of the CID
 
@@ -134,7 +157,32 @@ class CID:
         return hash(self.buffer)
     
     def __str__(self):
-        return self.encode().decode('utf-8')
+        return self.encode()
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        """
+        Integrates the CID class with Pydantic's validation and serialization,
+        correctly handling the factory pattern where __new__ returns subclasses.
+        """
+        def validate_cid(value: Any) -> 'CID':
+            """Validate and convert input to a CID object."""
+            if isinstance(value, CID):
+                return value
+            try:
+                return cls(value)
+            except Exception as e:
+                raise ValueError(f"Invalid CID: {e}") from e
+
+        return core_schema.no_info_plain_validator_function(
+            validate_cid,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda instance: str(instance),
+                return_schema=core_schema.str_schema(),
+            ),
+        )
 
     @classmethod
     def is_cid(cls, cidstr: str|bytes) -> bool:
@@ -157,49 +205,31 @@ class CID:
         except ValueError:
             return False
 
-    @classmethod
-    def from_string(cls, cidstr: str) -> AnyCID:
+    @staticmethod
+    def parse(cidbytes: str|bytes) -> tuple[Version, Codec, bytes]:
         """
-        Creates a CID object from a encoded form
+        Parses a CID string and returns a CID object.
 
-        :param str cidstr: can be
+        :param cidstr: input string which can be a
 
             - base58-encoded multihash
             - multihash
             - multibase-encoded multihash
+        :type cidstr: str or bytes
         :return: a CID object
         :rtype: :py:class:`cid.CIDv0` or :py:class:`cid.CIDv1`
-        """
-        return cls.from_bytes(_ensure_bytes(cidstr, 'utf-8'))
-
-    @classmethod
-    def from_bytes(cls, cidbytes: bytes) -> AnyCID:
-        """
-        Creates a CID object from a encoded form
-
-        :param bytes cidbytes: can be
-
-            - base58-encoded multihash
-            - multihash
-            - multibase-encoded multihash
-        :return: a CID object
-        :rtype: :py:class:`cid.CIDv0` or :py:class:`cid.CIDv1`
-        :raises: `ValueError` if the base58-encoded string is not a valid string
-        :raises: `ValueError` if the length of the argument is zero
-        :raises: `ValueError` if the length of decoded CID is invalid
         """
         if len(cidbytes) < 2:
             raise ValueError('argument length can not be zero')
-
-        version: int
-        codec: Codec
+        
+        cidbytes = _ensure_bytes(cidbytes, 'utf-8')
 
         # first byte for identity multibase and CIDv0 is 0x00
         # putting in assumption that multibase for CIDv0 can not be identity
         # refer: https://github.com/ipld/cid/issues/13#issuecomment-326490275
-        if cidbytes[0] != 0 and multibase.is_encoded(cidbytes):
+        if cidbytes[0] != 0 and multibase.is_encoded(cidbytes.decode('utf-8')):
             # if the bytestream is multibase encoded
-            cid = multibase.decode(cidbytes)
+            cid = multibase.decode(cidbytes.decode('utf-8'))
 
             if len(cid) < 2:
                 raise ValueError('cid length is invalid')
@@ -208,7 +238,7 @@ class CID:
             data = cid[1:]
             codec = cast(Codec, multicodec.get_codec(data))
             multihash = multicodec.remove_prefix(data)
-        elif cidbytes[0] in (0, 1):
+        elif cidbytes[0] in {0, 1}:
             # if the bytestream is a CID
             version = cidbytes[0]
             data = cidbytes[1:]
@@ -219,15 +249,51 @@ class CID:
                 version = 0
                 codec = CIDv0.CODEC
                 multihash = base58.b58decode(cidbytes)
-            except ValueError:
-                raise ValueError('multihash is not a valid base58 encoded multihash') from None
+            except ValueError as e:
+                raise ValueError('multihash is not a valid base58 encoded multihash') from e
 
         try:
             Multihash(multihash) # validate multihash
         except ValueError:
             raise
+        
+        if version != 0 and version != 1:
+            raise ValueError(f"Unsupported CID version {version}, expected 0 or 1")
+        return version, codec, multihash
+    
+    @staticmethod
+    def unparse(version: Version, codec: Codec, multihash: str|bytes) -> bytes:
+        """
+        Constructs a CID byte string from its components.
 
-        return CID(version, codec, multihash)
+        :param version: CID version
+        :type version: int
+        :param codec: CID codec
+        :type codec: Codec
+        :param multihash: Multihash for the CID
+        :type multihash: str or bytes
+        :return: CID byte string
+        :rtype: bytes
+        """
+        if isinstance(multihash, str):
+            multihash = _ensure_bytes(multihash, 'utf-8')
+        
+        if version == 0 and codec == CIDv0.CODEC:
+            return base58.b58encode(multihash)
+        
+        return b'\1' + multicodec.add_prefix(codec, multihash)
+    
+    @staticmethod
+    def normalize(cid: str|bytes) -> bytes:
+        """
+        Normalizes a CID string or bytes to its canonical byte representation.
+
+        :param cid: CID string or bytes
+        :type cid: str or bytes
+        :return: normalized CID byte representation
+        :rtype: bytes
+        """
+        return CID.unparse(*CID.parse(cid))
 
 class CIDv0(CID):
     """ CID version 0 object """
@@ -246,12 +312,34 @@ class CIDv0(CID):
         if isinstance(self, CIDv0):
             return self
         raise TypeError(f"Expected CIDv0, got {type(self).__name__}")
+    
+    def __repr__(self):
+        return f"CIDv0({base58.b58encode(self.buffer).decode('utf-8')!r})"
 
-    def __init__(self, multihash: bytes):
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
         """
-        :param bytes multihash: multihash for the CID
+        Integrates the CID class with Pydantic's validation and serialization,
+        correctly handling the factory pattern where __new__ returns subclasses.
         """
-        super(CIDv0, self).__init__(multihash)
+        def validate_cid(value) -> 'CIDv0':
+            """Validate and convert input to a CIDv1 object."""
+            try:
+                match cid := CID(value):
+                    case CIDv1(): return cid.v0()
+                    case CIDv0(): return cid
+                    case _: raise ValueError(f"Invalid CIDv0 input: {value}")
+            except Exception as e:
+                raise ValueError(f"Invalid CIDv0: {e}") from e
+
+        return core_schema.no_info_plain_validator_function(
+            validate_cid,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                str, return_schema=core_schema.str_schema(),
+            )
+        )
 
     @property
     @override
@@ -269,16 +357,16 @@ class CIDv0(CID):
         return self.buffer
 
     @override
-    def encode(self, encoding=None) -> bytes:
+    def encode(self, encoding: multibase.Encoding="base58btc") -> str:
         """
         base58-encoded buffer
 
         :return: encoded representation or CID
         :rtype: bytes
         """
-        if encoding is not None:
+        if encoding != "base58btc":
             raise ValueError('CIDv0 does not support encoding, use CIDv1 instead')
-        return _ensure_bytes(base58.b58encode(self.buffer))
+        return base58.b58encode(self.buffer).decode('utf-8')
 
     def v1(self):
         """
@@ -327,6 +415,33 @@ class CIDv1(CID):
                 multihash = multibase.decode(multihash)
             super().__init__(multicodec.add_prefix(codec, multihash))
 
+    def __repr__(self):
+        return f"CIDv1({multibase.encode('base32', self.buffer)!r})"
+
+    @classmethod    
+    def __get_pydantic_core_schema__(
+        cls, source_type, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        """
+        Integrates the CIDv1 class with Pydantic's validation and serialization.
+        """
+        def validate_cidv1(value) -> 'CIDv1':
+            """Validate and convert input to a CIDv1 object."""
+            try:
+                match cid := CID(value):
+                    case CIDv1(): return cid
+                    case CIDv0(): return cid.v1()
+                    case _: raise ValueError(f"Invalid CIDv1 input: {value}")
+            except Exception as e:
+                raise ValueError(f"Invalid CIDv1: {e}") from e
+
+        return core_schema.no_info_plain_validator_function(
+            validate_cidv1,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                str, return_schema=core_schema.str_schema(),
+            ),
+        )
+
     @property
     @override
     def version(self):
@@ -336,7 +451,7 @@ class CIDv1(CID):
     @override
     def codec(self):
         """Codec for the CID, without multibase prefix."""
-        return cast(Codec, multicodec.get_codec(self.buffer))
+        return cast(Codec, multicodec.get_codec(self.buffer[1:]))
     
     @property
     @override
@@ -345,7 +460,7 @@ class CIDv1(CID):
         return multicodec.remove_prefix(self.buffer)
 
     @override
-    def encode(self, encoding: str='base58btc') -> bytes:
+    def encode(self, encoding: multibase.Encoding='base58btc') -> str:
         """
         Encoded version of the raw representation
 
@@ -365,6 +480,6 @@ class CIDv1(CID):
         :raise ValueError: if the codec is not 'dag-pb'
         """
         if self.codec != CIDv0.CODEC:
-            raise ValueError('CIDv1 can only be converted for codec {}'.format(CIDv0.CODEC))
+            raise ValueError(f'CIDv1 can only be converted for codec {CIDv0.CODEC}')
 
         return CIDv0(self.multihash)
