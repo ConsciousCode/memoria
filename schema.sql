@@ -54,13 +54,23 @@ CREATE TABLE IF NOT EXISTS sonas (
 );
 
 /**
+ * UUIDs are incorporated into IPLD by hashing them with the raw codec. This
+ * table maps CIDs to UUIDs for easy lookup and retrieval.
+**/
+CREATE TABLE IF NOT EXISTS uuid_cid (
+    cid BLOB NOT NULL UNIQUE,
+    uuid BLOB NOT NULL UNIQUE,
+    PRIMARY KEY (cid, uuid)
+);
+
+/**
  * Aliases associated with sonas.
 **/
 CREATE TABLE IF NOT EXISTS sona_aliases (
     sona_id INTEGER REFERENCES sonas(rowid) ON DELETE CASCADE,
     name TEXT NOT NULL,
     PRIMARY KEY (sona_id, name)
-)
+);
 
 /**
  * Memories seen or recalled at some point by the sona. This makes them easier

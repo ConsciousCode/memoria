@@ -16,7 +16,7 @@ from ipld import CIDv1
 
 from db import Edge
 from memoria import Database, Memoria
-from models import Memory, MemoryDAG, RecallConfig
+from models import Memory, MemoryDAG, RecallConfig, StopReason
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
@@ -50,9 +50,7 @@ def get_ipfs(path: str, request: Request):
 
 @mcp.resource("memory://{cid}")
 def memory_resource(cid: str):
-    '''
-    Memory resource handler.
-    '''
+    '''Memory resource handler.'''
     try:
         ctx = mcp.get_context()
         memoria = cast(Memoria, ctx.request_context.lifespan_context)
@@ -92,27 +90,37 @@ def act_push(
             str,
             Field(description="Sona to push the memory to.")
         ],
-        prompt: Annotated[
-            Memory|str,
-            Field(description="Memory to insert as a prompt for the ACT.")
-        ],
-        index: Annotated[
-            Optional[str],
-            Field(description="Plaintext indexing field for the memory if available.")
-        ] = None,
-        include: Annotated[
-            Optional[dict[str, list[Edge]]],
+        prompts: Annotated[
+            dict[str, list[Edge]],
             Field(description="Additional memories to include in the ACT, keyed by label.")
-        ] = None,
-        importance: Annotated[
-            Optional[float],
-            Field(description="Initial importance of the memory [0-1] biasing how easily it's recalled.")
-        ] = None
+        ]
     ):
     '''Insert a new memory into the sona, formatted for an ACT (Autonomous Cognitive Thread).'''
     ctx, memoria = mcp_context()
-    if not memoria.act_push(sona, prompt, index, include, importance):
+    if not memoria.act_push(sona, prompts):
         raise HTTPException(404, detail=f"Sona '{sona}' not found or prompt memory not found.")
+
+@mcp.tool()
+def act_stream(
+        sona: Annotated[
+            str,
+            Field(description="Sona to push the memory to.")
+        ],
+        delta: Annotated[
+            Optional[str],
+            Field(description="Delta to append to the memory.")
+        ],
+        model: Annotated[
+            Optional[str],
+            Field(description="Model which generated this delta.")
+        ] = None,
+        stop_reason: Annotated[
+            Optional[StopReason],
+            Field(description="Reason for stopping the stream, if applicable.")
+        ] = None,
+    ):
+    ctx, memoria = mcp_context()
+    return memoria.act_stream(sona, delta, model, stop_reason)
 
 @mcp.tool()
 def recall(
@@ -142,17 +150,18 @@ def recall(
     and their dependencies.
     '''
     ctx, memoria = mcp_context()
-
-    dag = memoria.recall(
-        sona,
-        prompt,
-        timestamp,
-        config,
-        map(CIDv1, include or [])
-    )
     return {
         str(cid): mem
-            for cid, mem in dag.items()
+            for cid, mem in memoria.recall(
+                sona,
+                prompt,
+                timestamp,
+                config,
+                {"include": [
+                    Edge(weight=1.0, target=CIDv1(cid))
+                        for cid in include
+                ]} if include else None
+            ).items()
     }
 
 def memory_to_message(ref: Optional[int], refs: dict[CIDv1, int], memory: Memory) -> Message:
@@ -206,35 +215,27 @@ def memory_to_message(ref: Optional[int], refs: dict[CIDv1, int], memory: Memory
 def act_next(
         sona: Annotated[
             str,
-            Field(description="Sona to process within.")
-        ],
-        prompt: Annotated[
-            str,
-            Field(description="Prompt to base the recall on.")
+            Field(description="Sona to process, either a name or UUID.")
         ],
         timestamp: Annotated[
             Optional[float],
-            Field(description="Timestamp to use for the recall, if available. If `null`, uses the current time.")
+            Field(description="Timestamp to use for the recall recency. If `null`, uses the current time.")
         ] = None,
         config: Annotated[
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
-        ] = RecallConfig(),
-        include: Annotated[
-            Optional[list[str]],
-            Field(description="List of memory CIDv1 to include as part of the recall. Example: the previous message in a chat log.")
-        ] = None
-    ) -> list[Message]:
+        ] = RecallConfig()
+    ) -> Optional[list[Message]]:
     '''Get the prompt for the next step of an ACT (Autonomous Cognitive Thread).'''
     ctx, memoria = mcp_context()
 
-    g = memoria.recall(
+    g = memoria.act_next(
         sona,
-        prompt,
         timestamp or datetime.now().timestamp(),
-        config,
-        (CIDv1(inc) for inc in include or [])
+        config
     )
+    if g is None:
+        return None
 
     # Serialize the memory graph with localized references and edges.
     gv = g.invert()

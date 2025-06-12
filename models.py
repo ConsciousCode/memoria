@@ -1,6 +1,6 @@
 from collections import defaultdict
 from functools import cached_property
-from typing import Annotated, Any, Iterable, Literal, Optional, overload, override
+from typing import Annotated, Any, Iterable, Literal, Optional, Union, overload, override
 from cid import CIDv1
 from pydantic import BaseModel, Field, PlainSerializer, TypeAdapter
 
@@ -9,6 +9,8 @@ import ipld
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
 type UUIDCID = Annotated[CIDv1, PlainSerializer(lambda u: CIDv1("raw", u.bytes))]
+
+type StopReason = Literal["end", "error", "cancel"]
 
 def build_cid(data) -> CIDv1:
     return CIDv1("dag-cbor", ipld.multihash(ipld.dagcbor_marshal(data)))
@@ -22,6 +24,10 @@ class RecallConfig(BaseModel):
     recency: Annotated[
         Optional[float],
         Field(description="Weight of the recency of the memory.")
+    ]=None
+    sona: Annotated[
+        Optional[float],
+        Field(description="Weight of the sona relevance.")
     ]=None
     fts: Annotated[
         Optional[float],
@@ -56,9 +62,13 @@ class BaseMemory(IPLDModel):
 
 class SelfMemory(BaseMemory):
     class Data(BaseModel):
+        class Part(BaseModel):
+            content: str = ""
+            model: Optional[str] = None
+        
         name: Optional[str] = None
-        model: Optional[str] = None
-        content: str
+        parts: list[Part]
+        stop_reason: Optional[StopReason] = None
     
     kind: Literal["self"] = "self"
     data: Data
@@ -89,7 +99,10 @@ class FileMemory(BaseMemory):
     kind: Literal["file"] = "file"
     data: Data
 
-type Memory = SelfMemory | OtherMemory | TextMemory | FileMemory
+type Memory = Annotated[
+    Union[SelfMemory, OtherMemory, TextMemory, FileMemory],
+    Field(discriminator="kind")
+]
 type MemoryData = SelfMemory.Data | OtherMemory.Data | TextMemory.Data | FileMemory.Data
 MemoryDataAdapter = TypeAdapter[MemoryData](MemoryData)
 
@@ -111,11 +124,25 @@ def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float]=
     }
     if edges: args['edges'] = edges
     match kind:
-        case "self":  return SelfMemory(**args)
+        case "self": return SelfMemory(**args)
         case "other": return OtherMemory(**args)
-        case "text":  return TextMemory(**args)
-        case "file":  return FileMemory(**args)
+        case "text": return TextMemory(**args)
+        case "file": return FileMemory(**args)
         case _: raise ValueError(f"Unknown memory kind: {kind}")
+
+def memory_document(memory: Memory) -> str:
+    '''Construct a document for FTS from a memory.'''
+    match memory.kind:
+        case "self":
+            return "".join(part.content for part in memory.data.parts)
+        case "other":
+            return memory.data.content
+        case "text":
+            return memory.data
+        case "file":
+            return memory.data.content
+        case _:
+            raise ValueError(f"Unknown memory kind: {memory.kind}")
 
 def model_dump(obj: Any) -> Any:
     try:

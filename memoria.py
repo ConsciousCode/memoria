@@ -1,12 +1,12 @@
+from collections import defaultdict
 from datetime import datetime
 from typing import Iterable, Optional
-
-from pydantic import TypeAdapter
+from uuid import UUID
 
 from ipld import CIDv1
 
 from db import Database, MemoryRow
-from models import ACThread, DAGEdge, Edge, Memory, MemoryDataAdapter, MemoryDAG, RecallConfig, build_memory, model_dump
+from models import DAGEdge, Edge, Memory, MemoryDataAdapter, MemoryDAG, RecallConfig, SelfMemory, StopReason, build_memory, memory_document, model_dump
 from util import todo_list
 
 class Memoria:
@@ -56,208 +56,83 @@ class Memoria:
     def find_sona(self, sona: str):
         return self.db.find_sona(sona)
     
-    def act_push(self,
-            sona: str,
-            prompt: Memory|str,
-            index: Optional[str]=None,
-            include: Optional[dict[str, list[Edge]]]=None,
-            importance: Optional[float]=None
-        ) -> Optional[int]:
-        '''Push a prompt to the sona for processing.'''
-        # Find or create the sona
-        sona_row = self.db.find_sona(sona)
-
-        if isinstance(prompt, str):
-            if row := self.db.select_memory_cid(CIDv1(prompt)):
-                prompt_cid = CIDv1(row.cid)
-                prompt_id = row.rowid
-            else:
-                return None
-        else:
-            prompt_cid = prompt.cid
-            # Insert the prompt
-            prompt_id = self.db.insert_memory(
-                prompt.cid,
-                prompt.kind,
-                model_dump(prompt.data),
-                prompt.timestamp,
-                importance
-            )
-            if index:
-                self.db.index(prompt_id, index)
-        
-        # Figure out where it's going
-        
-        if pending_thread := self.db.get_act_pending(sona_row.rowid):
-            # Pending thread already exists, add to its context
-            response_id = pending_thread.memory_id
-            pending_id = pending_thread.rowid
-        else:
-            # No pending thread, we need to create one
-            active_thread = (
-                self.db.get_act_active(sona_row.rowid) or
-                self.db.get_last_act(sona_row.rowid)
-            )
-
-            # Create the incomplete memory to receive the response
-            response_id = self.db.insert_memory(
-                cid=None,
-                kind="self",
-                data=None,
-                timestamp=datetime.now().timestamp(),
-                importance=importance
-            )
-
-            # Create a new pending thread
-            pending_id = self.db.insert_act(
-                cid=None,
-                sona_id=sona_row.rowid,
-                memory_id=prompt_id,
-                prev_id=active_thread and active_thread.rowid
-            )
-        
-        if include is None:
-            include = {}
-        
-        # Now that we have the pending thread, link it to the prompt
-        prompt_edges = include.get("prompt", [])
-        prompt_edges.append(Edge(
-            target=prompt_cid,
-            weight=1.0
-        ))
-
-        self.db.link_memory_edges(response_id, {
-            **include,
-            "prompt": prompt_edges
-        })
-
-        return pending_id
-    
-    def act_stream(self,
-            sona: str,
-            prompt: Memory|str,
-            index: Optional[str]=None,
-            include: Optional[dict[str, list[Edge]]]=None,
-            importance: Optional[float]=None
-        ) -> ACThread:
+    def build_subgraph(self, edges: dict[str, list[Edge]], budget: float=20) -> MemoryDAG:
         '''
-        Stream a prompt to the sona for processing.
-        This will create a new thread and return it.
-        '''
-        pending_id = self.act_push(
-            sona=sona,
-            prompt=prompt,
-            index=index,
-            include=include,
-            importance=importance
-        )
-
-        if pending_id is None:
-            raise ValueError("Failed to push prompt to sona")
-
-        return ACThread(
-            sona=sona,
-            memory=CIDv1(prompt.cid if isinstance(prompt, Memory) else prompt),
-            prev=None
-    )
-
-    def recall(self,
-            sona: Optional[str],
-            prompt: str,
-            timestamp: Optional[float]=None,
-            config: Optional[RecallConfig]=None,
-            include: Optional[Iterable[CIDv1]]=None
-        ) -> MemoryDAG:
-        '''
-        Recall memories based on a prompt. This incorporates all indices
-        and returns a topological sort of relevant memories.
+        Build a subgraph of memories.
+        
+        This is used to build a subgraph of memories that are related to the
+        initial memories. It will return a MemoryDAG containing the memories
+        and their edges.
         '''
         g = MemoryDAG()
         
-        for c in include or []:
-            if pm := self.db.select_memory_cid(c):
-                g.insert(CIDv1(pm.cid), build_memory(
-                    pm.kind,
-                    MemoryDataAdapter.validate_json(pm.data),
-                    pm.timestamp
-                ))
-        
-        rows: list[tuple[MemoryRow, float]] = []
-        
-        memories = self.db.recall(sona, prompt, timestamp, config)
-        # Populate the graph with nodes so we can detect when there are edges
-        #  between our seletions
-        for rs in memories:
-            row, _ = rs
-            rows.append(rs)
-            g.insert(CIDv1(row.cid), build_memory(
-                kind=row.kind,
-                data=row.data,
-                timestamp=row.timestamp
-            ))
-
-        # Populate backward and forward edges
-        bw: list[tuple[float, int, CIDv1]] = []
+        # Populate initial backward and forward edges
+        bw: list[tuple[float, int, CIDv1]] = [] # [(score, rowid, cid)]
         fw: list[tuple[float, int, CIDv1]] = []
         
-        for rs in rows:
-            row, score = rs
-            if score <= 0:
-                break
-
-            rowid = row.rowid
-            origcid = CIDv1(row.cid)
-
-            budget = score*20
-
-            b = 0
-            for dst, label, weight in self.db.backward_edges(rowid):
-                dstcid = CIDv1(dst.cid)
-                if dstcid in g:
-                    if not g.has_edge(origcid, dstcid):
-                        g.add_edge(origcid, dstcid, DAGEdge(
-                            label=label,
-                            weight=weight
-                        ))
+        for label, es in edges.items():
+            for e in es:
+                score = e.weight
+                if score <= 0:
+                    break
+                
+                origcid = e.target
+                if (rowid := self.db.memory_cid_to_rowid(origcid)) is None:
                     continue
 
-                b += weight
-                if b >= budget:
-                    break
-                
-                bw.append((budget*weight, dst.rowid, CIDv1(dst.cid)))
-            
-            b = 0
-            for label, weight, src in self.db.forward_edges(rowid):
-                dstcid = CIDv1(src.cid)
-                if dstcid in g:
-                    if not g.has_edge(dstcid, origcid):
-                        g.add_edge(dstcid, origcid, DAGEdge(
-                            label=label,
-                            weight=weight
-                        ))
-                    continue
+                energy = score*budget
 
-                if not src.importance:
-                    break
+                b = 0
+                for dst, label, weight in self.db.backward_edges(rowid):
+                    assert dst.cid
+                    dstcid = CIDv1(dst.cid)
+                    if dstcid in g:
+                        if not g.has_edge(origcid, dstcid):
+                            g.add_edge(origcid, dstcid, DAGEdge(
+                                label=label,
+                                weight=weight
+                            ))
+                        continue
+
+                    b += weight
+                    if b >= energy:
+                        break
+                    
+                    bw.append((energy*weight, dst.rowid, CIDv1(dst.cid)))
                 
-                b += src.importance
-                if b >= budget:
-                    break
-                
-                fw.append((budget*src.importance, src.rowid, CIDv1(src.cid)))
+                b = 0
+                for label, weight, src in self.db.forward_edges(rowid):
+                    assert src.cid
+                    dstcid = CIDv1(src.cid)
+                    if dstcid in g:
+                        if not g.has_edge(dstcid, origcid):
+                            g.add_edge(dstcid, origcid, DAGEdge(
+                                label=label,
+                                weight=weight
+                            ))
+                        continue
+
+                    if not src.importance:
+                        break
+                    
+                    b += src.importance
+                    if b >= energy:
+                        break
+                    
+                    fw.append((energy*src.importance, src.rowid, CIDv1(src.cid)))
         
         # Note: These feel so similar, maybe there's a way to reduce boilerplate?
 
         # Search backwards for supporting memories using their edge weight
         #  to determine how relevant they are to the current memory
-        for budget, src_id, srccid in todo_list(bw):
+        for energy, src_id, srccid in todo_list(bw):
             b = 0
             for dst, label, weight in self.db.backward_edges(src_id):
                 b += weight
-                if b >= budget:
+                if b >= energy:
                     break
                 
+                assert dst.cid
                 dstcid = CIDv1(dst.cid)
 
                 g.insert(srccid, build_memory(
@@ -270,17 +145,20 @@ class Memoria:
                     weight=weight
                 ))
 
-                bw.append((budget*weight, dst.rowid, dstcid))
+                bw.append((energy*weight, dst.rowid, dstcid))
         
         # Search forwards for response memories using their annotated
-        #  importance - important conclusions are more relevant
-        for budget, dst_id, dstcid in todo_list(fw):
+        #  importance - important conclusions are more relevant.
+        # These iterate over *edges* which is why we needed to populate them
+        #  in the first place
+        for energy, dst_id, dstcid in todo_list(fw):
             b = 0
             for label, weight, src in self.db.forward_edges(dst_id):
                 b += (imp := src.importance or 0)
-                if b >= budget:
+                if b >= energy:
                     break
 
+                assert src.cid
                 srccid = CIDv1(src.cid)
 
                 g.insert(srccid, build_memory(
@@ -293,6 +171,156 @@ class Memoria:
                     weight=weight
                 ))
 
-                fw.append((budget*imp, dst_id, dstcid))
+                fw.append((energy*imp, dst_id, dstcid))
         
         return g
+
+    def act_push(self,
+            sona: str,
+            prompts: dict[str, list[Edge]] # label: [edge]
+        ) -> Optional[UUID]:
+        '''
+        Push prompts to the sona for processing. Return the receiving
+        sona's UUID.
+        '''
+        # Find or create the sona
+        sona_row = self.db.find_sona(sona)
+        
+        # Figure out where it's going
+        
+        if pending_thread := self.db.get_act_pending(sona_row.rowid):
+            # Pending thread already exists, add to its context
+            response_id = pending_thread.memory_id
+        else:
+            # No pending thread, we need to create one
+            prev_thread = ( # Previous thread to link to
+                self.db.get_act_active(sona_row.rowid) or
+                self.db.get_last_act(sona_row.rowid)
+            )
+
+            # Create the incomplete memory to receive the response
+            response_id = self.db.insert_memory(
+                cid=None,
+                kind="self",
+                data=None,
+                timestamp=datetime.now().timestamp()
+            )
+
+            # Create a new pending thread
+            self.db.update_sona_pending(sona_row.rowid,
+                self.db.insert_act(
+                    cid=None,
+                    sona_id=sona_row.rowid,
+                    memory_id=response_id,
+                    prev_id=prev_thread and prev_thread.rowid
+                )
+            )
+        
+        self.db.link_memory_edges(response_id, prompts)
+
+        return UUID(bytes=sona_row.uuid)
+    
+    def act_next(self,
+            sona: str,
+            timestamp: Optional[float]=None,
+            config: Optional[RecallConfig]=None
+        ) -> Optional[MemoryDAG]:
+        '''
+        Get the next pending thread for the sona.
+        
+        Returns the rowid of the pending thread or None if there is no
+        pending thread.
+        '''
+        # Find or stage the active thread
+        sona_row = self.db.find_sona(sona)
+        if act := self.db.get_act_active(sona_row.rowid):
+            memory_id = act.memory_id
+        else: # No active thread, check for pending
+            if (memory_id := sona_row.pending_id) is None:
+                return None # No threads at all
+            self.db.sona_stage_active(sona_row.rowid)
+        
+        # We used the incomplete memory's edges to store prompts, only now
+        #  do we actually run recall on them.
+        edges: dict[str, list[Edge]] = defaultdict(list)
+        for e in self.db.backward_edges(memory_id):
+            prompt = memory_document(e.dst.to_memory())
+            for row, score in self.db.recall(sona, prompt, timestamp, config):
+                if cid := row.cid:
+                    edges[e.label].append(Edge(
+                        target=CIDv1(cid),
+                        weight=e.weight*score
+                    ))
+        
+        return self.build_subgraph(edges)
+
+    def act_stream(self,
+            sona: str,
+            delta: Optional[str],
+            model: Optional[str]=None,
+            stop_reason: Optional[StopReason] = None
+        ) -> Optional[str]:
+        '''
+        Stream a delta to the active thread of the sona.
+        
+        Returns a failure reason.
+        '''
+        
+        if (sona_row := self.db.find_sona(sona)) is None:
+            return "sona not found"
+        
+        if (thread := self.db.get_act_active(sona_row.rowid)) is None:
+            # No active thread, check for pending
+            if (thread := self.db.get_act_pending(sona_row.rowid)) is None:
+                return "no active or pending thread"
+            
+            # Move pending to active as long as we're not ending immediately
+            if stop_reason is None:
+                self.db.sona_stage_active(sona_row.rowid)
+        
+        # Update the memory data
+        if (memory := self.db.select_memory_rowid(thread.memory_id)) is None:
+            return "thread memory not found"
+        
+        if memory.kind != "self":
+            return "thread memory is not a self memory"
+        
+        data = SelfMemory.Data.model_validate_json(memory.data)
+        last = data.parts[-1] if data.parts else None
+        if last and (model is None or last.model == model):
+            last.content += delta or ""
+        else:
+            data.parts.append(SelfMemory.Data.Part(
+                content=delta or "",
+                model=model
+            ))
+        
+        # Commit the updates
+        if stop_reason:
+            data.stop_reason = stop_reason
+            self.db.update_sona_active(sona_row.rowid, None)
+            self.db.finalize_memory(memory.rowid)
+            self.db.finalize_act(thread.rowid)
+        
+        self.db.update_memory_data(memory.rowid, data.model_dump_json())
+
+    def recall(self,
+            sona: Optional[str],
+            prompt: str,
+            timestamp: Optional[float]=None,
+            config: Optional[RecallConfig]=None,
+            include: Optional[dict[str, list[Edge]]]=None
+        ) -> MemoryDAG:
+        '''Recall memories based on a prompt as a memory subgraph.'''
+        edges: dict[str, list[Edge]] = defaultdict(list, {
+            label: es.copy()
+                for label, es in (include or {}).items()
+        })
+        for row, score in self.db.recall(sona, prompt, timestamp, config):
+            if cid := row.cid:
+                edges[""].append(Edge(
+                    target=CIDv1(cid),
+                    weight=score
+                ))
+        
+        return self.build_subgraph(edges)

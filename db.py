@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import ClassVar, Iterable, NamedTuple, Optional, TypedDict, cast
 import sqlite3
 import json
@@ -8,7 +9,6 @@ from uuid import UUID
 from cid import CIDv1
 from numpy import ndarray
 import numpy
-from pydantic import validate_call
 import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extensions import uuid7
@@ -27,6 +27,7 @@ DEFAULT_IMPORTANCE = 0.30
 DEFAULT_RECENCY = 0.30
 DEFAULT_FTS = 0.15
 DEFAULT_VSS = 0.25
+DEFAULT_SONA = 0.10
 DEFAULT_K = 20
 
 ## Rows are represented as the raw output from a select query with no processing
@@ -46,11 +47,15 @@ class FileRow(NamedTuple):
 class MemoryRow(NamedTuple):
     type PrimaryKey = int
     rowid: PrimaryKey
-    cid: bytes
+    cid: Optional[bytes] # None when the memory is incomplete
     timestamp: Optional[float]
     kind: MemoryKind
     data: JSONB
     importance: Optional[float]
+
+    def to_memory(self):
+        '''Convert this row to a Memory object.'''
+        return build_memory(self.kind, json.loads(self.data), self.timestamp)
 
 class EdgeRow(NamedTuple):
     src_id: MemoryRow.PrimaryKey
@@ -68,7 +73,7 @@ class SonaRow(NamedTuple):
 class ACThreadRow(NamedTuple):
     type PrimaryKey = int
     rowid: PrimaryKey
-    cid: bytes
+    cid: Optional[bytes] # Depends on memory CID and previous CID
     sona_id: SonaRow.PrimaryKey
     memory_id: MemoryRow.PrimaryKey
     prev_id: Optional[int]
@@ -135,6 +140,80 @@ class Database:
         self.insert_text_embedding(memory_id, index)
         self.insert_text_fts(memory_id, index)
     
+    @lru_cache
+    def memory_cid_to_rowid(self, cid: CIDv1) -> Optional[int]:
+        '''
+        Lookup a CID in the database and return the associated rowid.
+        Returns None if the CID does not exist.
+        '''
+        cur = self.cursor()
+        rowid = cur.execute("""
+            SELECT rowid FROM memories WHERE cid = ?
+        """, (cid.buffer,)).fetchone()
+        return rowid and rowid[0]
+    
+    def finalize_memory(self, rowid: int) -> Memory:
+        '''
+        Finalize a memory by setting its CID and returning the memory object.
+        This is used after all edges have been linked to the memory.
+        '''
+        if (memory := self.select_memory_rowid(rowid)) is None:
+            raise ValueError(f"Memory with rowid {rowid} does not exist.")
+        
+        if memory.cid is not None:
+            raise ValueError(f"Memory with rowid {rowid} already has a CID: {memory.cid}")
+        
+        # Build the CID from the memory data
+        edges: dict[str, list[Edge]] = defaultdict(list)
+        for edge in self.backward_edges(rowid):
+            if cid := edge.dst.cid:
+                edges[edge.label].append(Edge(
+                    weight=edge.weight,
+                    target=CIDv1(cid)
+                ))
+            else:
+                raise ValueError(
+                    f"Memory with rowid {rowid} has an edge to a memory without a CID: {edge.dst.rowid}"
+                )
+        
+        memory = build_memory(memory.kind, memory.data, memory.timestamp, edges)
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE memories SET cid = ?
+            WHERE rowid = ?
+        """, (memory.cid.buffer, rowid))
+        return memory
+    
+    def finalize_act(self, rowid: int) -> ACThread:
+        '''Finalize an ACT by setting its CID and returning it.'''
+
+        cur = self.cursor()
+        cur.execute("""
+            SELECT s.cid, m.cid, p.cid
+            FROM acthreads act
+                JOIN sonas s ON s.rowid = act.sona_id
+                JOIN memories m ON m.rowid = act.memory_id
+                LEFT JOIN acthreads p ON p.rowid = act.prev_id
+            WHERE act.rowid = ?
+        """, (rowid,))
+        if (row := cur.fetchone()) is None:
+            raise ValueError(f"ACT with rowid {rowid} does not exist.")
+        
+        s, m, p = row
+
+        act = ACThread(
+            sona=CIDv1(s),
+            memory=CIDv1(m),
+            prev=p and CIDv1(p)
+        )
+
+        cur.execute("""
+            UPDATE acthreads SET cid = ?
+            WHERE rowid = ?
+        """, (act.cid.buffer, rowid))
+
+        return act
+    
     def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory]:
         cur = self.cursor(MemoryRow)
         mem: Optional[MemoryRow] = cur.execute("""
@@ -188,7 +267,7 @@ class Database:
             raise ValueError(f"ACT CID {t.cid} does not match requested CID {cid}")
         return t
 
-    def lookup_ipld(self, cid: CIDv1) -> Optional[FileRow|MemoryRow|ACThreadRow]:
+    def lookup_ipld(self, cid: CIDv1) -> Optional[FileRow|MemoryRow|ACThreadRow|UUID]:
         '''
         Lookup a CID in the database, returning the associated row if it exists.
         '''
@@ -217,29 +296,59 @@ class Database:
         if row := cur.fetchone():
             return ACThreadRow(*row)
         
+        cur.execute("""
+            SELECT uuid FROM uuid_cid
+            WHERE cid = ?
+        """, (c,))
+        if row := cur.fetchone():
+            return UUID(bytes=row[0])
+        
         return None
 
     def find_sona(self, name: str):
         '''Find or create the sona closest to the given name.'''
+
         cur = self.cursor()
-        cur.execute("""
-            SELECT rowid, sona_id, pending
-            FROM sona_aliases
-            WHERE name = ?
-        """, name)
+
+        try:
+            u = str(UUID(name))
+        except ValueError:
+            u = name[5:] if name.startswith("uuid:") else None
+
+        if u:
+            cur.execute("""
+                SELECT rowid, uuid, active_id, pending_id
+                FROM sonas
+                WHERE uuid = ?
+            """, (UUID(u).bytes,))
+        else:
+            cur.execute("""
+                SELECT rowid, uuid, active_id, pending_id
+                FROM sona_aliases
+                    JOIN sonas ON sonas.rowid = sona_aliases.sona_id
+                WHERE name = ?
+            """, (name,))
+        
         if row := cur.fetchone():
             return SonaRow(*row)
 
         e, = nomic_text.embed(name)
         ebs = e.tobytes()
         cur.execute("""
-            SELECT rowid, sona_id, pending
+            SELECT rowid, uuid, active_id, pending_id
             FROM sona_vss
+                JOIN sonas ON sonas.rowid = sona_vss.sona_id
             WHERE embedding MATCH ? AND distance > 0.75
             LIMIT 1 -- vec requires k to be set
         """, (ebs,))
         if row := cur.fetchone():
+            cur.execute("""
+                INSERT INTO sona_aliases (sona_id, name)
+                VALUES (?, ?)
+            """, (row[0], name))
             return SonaRow(*row)
+        
+        # Doesn't exist, create a new one.
         
         u = cast(UUID, uuid7())
 
@@ -255,6 +364,21 @@ class Database:
         """, (rowid, name))
         
         return SonaRow(rowid, u.bytes, None, None)
+
+    def select_act(self, rowid: int) -> Optional[ACThreadRow]:
+        '''Select an act thread by its rowid.'''
+        cur = self.cursor(ACThreadRow)
+        return cur.execute("""
+            SELECT rowid, cid, sona_id, memory_id, prev_id
+            FROM acthreads WHERE rowid = ?
+        """, (rowid,)).fetchone()
+
+    def select_fts_rowid(self, rowid: int) -> list[str]:
+        cur = self.cursor()
+        rows = cur.execute("""
+            SELECT content FROM memory_fts WHERE rowid = ?
+        """, (rowid,))
+        return [content for (content,) in rows]
 
     def get_act_active(self, sona_id: int) -> Optional[ACThreadRow]:
         '''Get the sona's active thread node currently receiving updates.'''
@@ -298,6 +422,17 @@ class Database:
         if row := cur.fetchone():
             return numpy.frombuffer(row[0], dtype=numpy.float32)
         return None
+    
+    def get_active_memory(self, sona_id: int) -> list[MemoryRow]:
+        '''Get the active memory for a sona.'''
+        cur = self.cursor(EdgeRow)
+        return cur.execute("""
+            SELECT m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance
+            FROM sonas s
+            JOIN acthreads act ON act.rowid = s.active_id
+            JOIN memories m ON m.rowid = act.memory_id
+            WHERE s.rowid = ?
+        """, (sona_id,)).fetchall()
 
     def insert_text_embedding(self, memory_id: int, index: str):
         e, = nomic_text.embed(index)
@@ -355,6 +490,47 @@ class Database:
             return rowid
         raise RuntimeError("Failed to insert acthread, it may already exist.")
     
+    def sona_stage_active(self, sona_id: int):
+        '''Stage pending thread as the active thread for a sona.'''
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE sonas SET active_id = pending_id, pending_id = NULL
+            WHERE rowid = ?
+        """, (sona_id,))
+
+    def update_memory_data(self, rowid: int, data: str):
+        '''
+        Insert the data for a memory. This is used for file memories and other
+        large data blobs.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE memories SET data = JSONB(?)
+            WHERE rowid = ?
+        """, (data, rowid))
+
+    def update_sona_active(self, sona_id: int, thread_id: Optional[int]):
+        '''
+        Update the active thread for a sona. This is the thread that is currently
+        receiving updates.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE sonas SET active_id = ?
+            WHERE rowid = ?
+        """, (thread_id, sona_id))
+
+    def update_sona_pending(self, sona_id: int, thread_id: Optional[int]):
+        '''
+        Update the pending thread for a sona. This is the thread that is currently
+        receiving requests.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE sonas SET pending_id = ?
+            WHERE rowid = ?
+        """, (thread_id, sona_id))
+
     def get_last_act(self, sona_id: int) -> Optional[ACThreadRow]:
         '''
         Get the last act thread for a sona.
@@ -440,59 +616,84 @@ class Database:
             WHERE src_id = ? AND dst_id = ?
         """, (src_id, dst_id)).fetchone()
 
-    # Note: Because we're using parameters to build the SQL query, we need to be absolutely sure that they're actually the types they say to avoid SQL injection.
-    @validate_call
     def recall(self,
             sona: Optional[str],
-            prompt: str,
+            prompt: Optional[str],
             timestamp: Optional[float]=None,
             config: Optional[RecallConfig]=None
         ) -> Iterable[tuple[MemoryRow, float]]:
         config = config or RecallConfig()
-        # Be defensive against SQL injection
-        importance = finite(float(config.importance or DEFAULT_IMPORTANCE))
-        recency = finite(float(config.recency or DEFAULT_RECENCY))
-        fts = finite(float(config.fts or DEFAULT_FTS))
-        vss = finite(float(config.vss or DEFAULT_VSS))
-        k = int(config.k or DEFAULT_K)
+        
+        if prompt:
+            e, = nomic_text.embed(prompt)
+        else:
+            config.vss = 0
+            e = numpy.zeros(1536, dtype=numpy.float32)
 
         if sona:
             s, = nomic_text.embed(sona)
         else:
-            s = None
-        e, = nomic_text.embed(prompt)
-        cur = self.cursor()
+            config.sona = 0
+            s = numpy.zeros(1536, dtype=numpy.float32)
+        
+        # Be defensive against SQL injection
+        k = int(config.k or DEFAULT_K)
+
         ### DANGER ZONE ###
         # DO NOT SUFFER A BARE INTERPOLATION HERE - EVERY SINGLE INTERPOLATION
         # ****MUST**** BE WRAPPED IN A PYTHON PRIMITIVE TYPE CONSTRUCTOR
         # *AND* A REPR formatting function
+        cur = self.cursor()
         cur.execute(f"""
             WITH
                 fts AS (
                     SELECT rowid, bm25(memory_fts) AS score
                     FROM memory_fts
-                    WHERE memory_fts MATCH ?
+                    WHERE memory_fts MATCH :prompt
                     LIMIT {int(k)!r}
                 ),
-                vec AS (
+                vss AS (
                     SELECT memory_id, distance
                     FROM vss_nomic_v1_5_index
-                    WHERE embedding MATCH ? AND k = {int(k)}
+                    WHERE embedding MATCH :vss_e
+                    LIMIT {int(k)!r}
+                ),
+                sona_vss AS (
+                    SELECT sona_id, distance
+                    FROM sona_vss
+                    WHERE embedding MATCH :sona_e
+                    LIMIT {int(k)!r}
                 )
             SELECT
                 m.rowid, m.timestamp, m.kind, JSON(m.data), m.importance,
-                IFNULL({float(importance)!r:.4} * m.importance, 0) +
-                IFNULL({float(recency)!r:.4} * POWER(0.995, ? - m.timestamp), 0) +
-                IFNULL({float(fts)!r:.4} *
-                    (fts.score - MIN(fts.score) OVER())
-                    / (MAX(fts.score) OVER() - MIN(fts.score) OVER()), 0) +
-                IFNULL({float(vss)!r:.4} / (1 + vec.distance), 0) AS score
+                (
+                    IFNULL(:w_importance * m.importance, 0) +
+                    IFNULL(:w_recency * POWER(0.995, :timestamp - m.timestamp), 0) +
+                    IFNULL(:w_fts *
+                        (fts.score - MIN(fts.score) OVER())
+                        / (MAX(fts.score) OVER() - MIN(fts.score) OVER()), 0) +
+                    IFNULL(:w_vss / (1 + vss.distance), 0) +
+                    IFNULL(:w_sona / (1 + sona_vss.distance), 0)
+                ) / (:w_importance + :w_recency + :w_fts + :w_vss + :w_sona) AS score
             FROM memories m
-                LEFT JOIN fts ON m.rowid = fts.rowid
-                LEFT JOIN vec ON m.rowid = vec.memory_id
+                LEFT JOIN fts ON fts.rowid = m.rowid
+                LEFT JOIN vss ON vss.memory_id = m.rowid
+                LEFT JOIN (
+                    SELECT DISTINCT sona_id FROM memories WHERE rowid = m.rowid
+                ) AS fm ON fm.sona_id = sona_vss.sona_id
             ORDER BY score DESC
             LIMIT {int(k)!r}
-        """, (prompt, e.tobytes(), timestamp and timestamp))
+        """, {
+            "prompt": prompt,
+            "vss_e": e.tobytes(),
+            "sona_e": s.tobytes(),
+            "timestamp": timestamp,
+            "w_importance": finite(float(config.importance or DEFAULT_IMPORTANCE)),
+            "w_recency": finite(float(config.recency or DEFAULT_RECENCY)),
+            "w_fts": finite(float(config.fts or DEFAULT_FTS)),
+            "w_vss": finite(float(config.vss or DEFAULT_VSS)),
+            "w_sona": finite(float(config.sona or DEFAULT_SONA))
+        })
 
         for row in cur:
             yield MemoryRow(*row[:-1]), row[-1]

@@ -122,11 +122,11 @@ Oh interesting note, when memories are recalled their grounding memories are fou
 
 Ok new lifecycle:
 - Host gets user input
-- Host calls `act_push` with the prompt and a list of included memories
-  - If the ACT is running, this is pushed to the sona's `pending` queue.
-  - If the ACT is not running, this is combined with the `pending` queue and the ACT is started.
+- Host calls `insert` to insert the prompt
+- Host calls `act_push` with a mapping of labels to edges to be added to the pending ACT.
+  - This performs a recall and adds all relevant memories as dependencies of the pending ACT's memory.
 - Host calls `act_next` to get the next prompt
-  - `act_next`, in addition to being the prompt for the LLM, stages the ACT for the next step by constructing an *incomplete* memory (lacking a CID) to be streamed to the server
+  - `act_next`, in addition to being the prompt for the LLM, stages the active ACT for the next step by constructing an *incomplete* memory (lacking a CID) to be streamed to the server
 - Host simulates a response with an LLM using this prompt
   - As part of this, it may stream the response to the server using `act_stream`
   - Even if not streaming, this is still used to finalize the response.
@@ -135,3 +135,12 @@ NOTE: We don't need to mark memories as "ephemeral" or whatever, we automaticall
 
 ## Future scope
 - IPFS integration with file memories, UnixFS seems absurdly fragmented and poorly documented so I don't want to mess with it, but...
+
+## Ironing out terminology
+- **Sona** - A collection of memories relevant to a particular context, such as a person or role.
+- **Memory** - A node in a directed acyclic graph (DAG) representing a single meaningful event. Memories are connected to supporting memories by weighted edges and may belong to one or more sonas.
+- **MemoryDAG** - A directed acyclic graph (DAG) of memories, where each memory is a node and edges represent dependencies between memories.
+- **ACT** - (Autonomous Cognitive Thread) is a process within an agent which "performs" a sona, forming a linear chain of continuations.
+- **ACT Chain** - A linear sequence of ACTs that are linked together, where each ACT is a continuation of the previous one. This allows for a continuous flow of thought and memory recall within sona.
+- **Agent** - The totality of a system which uses a Memoria MCP server, consisting of one or more ACTs.
+- **Self** - The totality of an agent's subjective memories stored in a database and directory of multimodal files.
