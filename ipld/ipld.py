@@ -1,5 +1,4 @@
 from typing import Iterable, Literal, Mapping, cast
-import hashlib
 import json
 import base64
 
@@ -13,8 +12,7 @@ from .cid import CID, CIDv0, CIDv1, Codec
 __all__ = (
     'HashName', 'IPLData',
     'dagjson_marshal', 'dagjson_unmarshal',
-    'dagcbor_marshal', 'dagcbor_unmarshal',
-    'multihash'
+    'dagcbor_marshal', 'dagcbor_unmarshal'
 )
 
 LINK_TAG = 42
@@ -186,15 +184,3 @@ def dagcbor_unmarshal(data: bytes):
                 raise TypeError(f'Unsupported type in DAG-CBOR: {type(data)}')
     
     return transform(cbor2.loads(data))
-
-
-def multihash(data: str|bytes, fn_name: HashName='sha2_256') -> str:
-    """
-    A utility function to make multihashing more convenient
-
-    Returns:
-        A base58 encoded digest of a hash (encoded in ascii)
-    """
-    if isinstance(data, str):
-        data = data.encode('utf-8')
-    return hashlib.new(fn_name, data).digest().decode('base58')

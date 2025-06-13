@@ -1,19 +1,15 @@
 from collections import defaultdict
 from functools import cached_property
 from typing import Annotated, Any, Iterable, Literal, Optional, Union, overload, override
-from cid import CIDv1
 from pydantic import BaseModel, Field, PlainSerializer, TypeAdapter
 
 from graph import IGraph
 import ipld.ipld as ipld
+from ipld.cid import CIDv1, cidhash
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
 type UUIDCID = Annotated[CIDv1, PlainSerializer(lambda u: CIDv1("raw", u.bytes))]
-
 type StopReason = Literal["end", "error", "cancel"]
-
-def build_cid(data) -> CIDv1:
-    return CIDv1("dag-cbor", ipld.multihash(ipld.dagcbor_marshal(data)))
 
 class RecallConfig(BaseModel):
     '''Configuration for how to weight memory recall.'''
@@ -45,9 +41,7 @@ class RecallConfig(BaseModel):
 class IPLDModel(BaseModel):
     @cached_property
     def cid(self):
-        return CIDv1("dag-cbor",
-            ipld.multihash(ipld.dagcbor_marshal(self.model_dump()))
-        )
+        return cidhash(ipld.dagcbor_marshal(self.model_dump()))
 
 class Edge(BaseModel):
     weight: float
@@ -57,7 +51,7 @@ class BaseMemory(IPLDModel):
     timestamp: Optional[float] = None
     edges: dict[str, list[Edge]] = Field(
         default_factory=lambda: defaultdict(list)
-    )  # label: [(edge, target), ...]
+    ) # label: [(edge, target), ...]
     importance: Optional[float] = Field(exclude=True, default=None)
 
 class SelfMemory(BaseMemory):

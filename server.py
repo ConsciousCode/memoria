@@ -1,8 +1,7 @@
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
 import json
-from typing import Annotated, Any, Iterable, Literal, Optional, TypedDict, cast
+from typing import Annotated, Any, Optional, cast
 
 from fastapi import FastAPI, Request
 from mcp.server.fastmcp import Context, FastMCP
@@ -261,7 +260,7 @@ async def main():
         app,
         host="0.0.0.0",
         port=3001,
-        log_level="DEBUG"
+        log_level="debug"
     )
     server = uvicorn.Server(config)
     await server.serve()

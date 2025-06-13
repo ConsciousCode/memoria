@@ -41,7 +41,9 @@ class BaseCodec(Codec):
         while x > 0:
             x, d = divmod(x, len(self.digits))
             res = self.digits[d] + res
-        return res + self.padding[len(res) % len(self.padding):]
+        if self.padding:
+            return res + self.padding[len(res) % len(self.padding):]
+        return res
     
     def decode(self, s: str) -> bytes:
         x = 0

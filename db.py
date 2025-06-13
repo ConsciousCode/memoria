@@ -6,7 +6,7 @@ import sqlite3
 import json
 from uuid import UUID
 
-from cid import CIDv1
+from ipld.cid import CIDv1
 from numpy import ndarray
 import numpy
 import sqlite_vec
