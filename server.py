@@ -254,16 +254,7 @@ def act_next(
     return messages
 
 async def main():
-    import uvicorn
-
-    config = uvicorn.Config(
-        app,
-        host="0.0.0.0",
-        port=3001,
-        log_level="debug"
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
+    await mcp.run()
 
 if __name__ == "__main__":
     import asyncio
