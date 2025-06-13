@@ -1,7 +1,7 @@
 from typing import Literal, Protocol
 
 __all__ = (
-    'Encoding', 'encode', 'get_codec', 'is_encoded', 'decode'
+    'Encoding', 'get_codec', 'is_encoded', 'encode', 'decode'
 )
 
 class Codec(Protocol):
@@ -19,7 +19,7 @@ class Codec(Protocol):
         """
         ...
 
-class IdConv(Codec):
+class IdCodec(Codec):
     code = '\0'
 
     def encode(self, x: bytes) -> str:
@@ -28,7 +28,7 @@ class IdConv(Codec):
     def decode(self, x: str) -> bytes:
         return x.encode('utf-8')
 
-class BaseConv(Codec):
+class BaseCodec(Codec):
     def __init__(self, code: str, digits: str, padding: str = ""):
         assert len(code) == 1, 'code must be a single byte'
         self.code = code
@@ -46,8 +46,7 @@ class BaseConv(Codec):
     def decode(self, s: str) -> bytes:
         x = 0
         for digit in s:
-            try:
-                x = x * len(self.digits) + self.digits.index(digit)
+            try: x = x * len(self.digits) + self.digits.index(digit)
             except ValueError:
                 raise ValueError(f'invalid digit "{digit}"')
         
@@ -79,33 +78,33 @@ _B32 = _b32.upper()
 _b64 = _ABC + _abc + _b10
 
 ENCODINGS: dict[str, Codec] = {
-    'identity': IdConv(),
+    'identity': IdCodec(),
     # Reserved for libp2p peer ids which are base58btc encoded
     '<reserved-1>': ReservedBase('1', '<reserved-1>'),
 
-    'base2': BaseConv('0', '01'),
-    'base8': BaseConv('7', _b10[:8]),
-    'base10': BaseConv('9', _b10),
-    'base16': BaseConv('f', _b16),
-    'base16upper': BaseConv('F', _b16.upper()),
-    'base32hex': BaseConv('v', _x32),
-    'base32hexupper': BaseConv('V', _X32),
-    'base32hexpad': BaseConv('t', _x32, '=' * 8),
-    'base32hexpadupper': BaseConv('T', _X32, '=' * 8),
-    'base32': BaseConv('b', _b32),
-    'base32upper': BaseConv('B', _B32),
-    'base32pad': BaseConv('c', _b32, '=' * 8),
-    'base32padupper': BaseConv('C', _B32, '=' * 8),
-    'base32z': BaseConv('h', 'ybndrfg8ejkmcpqxot1uwisza345h769'),
-    'base36': BaseConv('k', _b10 + _abc),
-    'base36upper': BaseConv('K', _b10 + _ABC),
-    'base45': BaseConv('R', f"{_b10}{_ABC} $%*+-./:"),
-    'base58btc': BaseConv('z', _b10[1:] + _B58 + _b58),
-    'base58flickr': BaseConv('Z', _b10[1:] + _b58 + _B58),
-    'base64': BaseConv('m', f'{_b64}+/'),
-    'base64pad': BaseConv('M', f'{_b64}+/', '=' * 2),
-    'base64url': BaseConv('u', f'{_b64}-_'),
-    'base64urlpad': BaseConv('U', f'{_b64}-_', '=' * 2),
+    'base2': BaseCodec('0', '01'),
+    'base8': BaseCodec('7', _b10[:8]),
+    'base10': BaseCodec('9', _b10),
+    'base16': BaseCodec('f', _b16),
+    'base16upper': BaseCodec('F', _b16.upper()),
+    'base32hex': BaseCodec('v', _x32),
+    'base32hexupper': BaseCodec('V', _X32),
+    'base32hexpad': BaseCodec('t', _x32, '=' * 8),
+    'base32hexpadupper': BaseCodec('T', _X32, '=' * 8),
+    'base32': BaseCodec('b', _b32),
+    'base32upper': BaseCodec('B', _B32),
+    'base32pad': BaseCodec('c', _b32, '=' * 8),
+    'base32padupper': BaseCodec('C', _B32, '=' * 8),
+    'base32z': BaseCodec('h', 'ybndrfg8ejkmcpqxot1uwisza345h769'),
+    'base36': BaseCodec('k', _b10 + _abc),
+    'base36upper': BaseCodec('K', _b10 + _ABC),
+    'base45': BaseCodec('R', f"{_b10}{_ABC} $%*+-./:"),
+    'base58btc': BaseCodec('z', _b10[1:] + _B58 + _b58),
+    'base58flickr': BaseCodec('Z', _b10[1:] + _b58 + _B58),
+    'base64': BaseCodec('m', f'{_b64}+/'),
+    'base64pad': BaseCodec('M', f'{_b64}+/', '=' * 2),
+    'base64url': BaseCodec('u', f'{_b64}-_'),
+    'base64urlpad': BaseCodec('U', f'{_b64}-_', '=' * 2),
 
     # Todo: Requires special logic
     'proquint': ReservedBase('q', 'proquint'),
@@ -129,28 +128,23 @@ type Encoding = Literal[
     'base64urlpad', 'proquint'
 ]
 
+def get_codec(data: str) -> Codec:
+    """Returns the codec used to encode the given data"""
+    try: return ENCODINGS[data[0]]
+    except (IndexError, KeyError):
+        raise ValueError(f'Can not determine encoding for {data}') from None
+
+def is_encoded(data: str) -> bool:
+    """Checks if the given data is encoded or not."""
+    return bool(data and data[0] in CODES)
+
 def encode(encoding: Encoding, data: bytes) -> str:
     """Encodes the given data using the encoding that is specified."""
     try:
         enc = ENCODINGS[encoding]
         return enc.code + enc.encode(data)
     except KeyError:
-        raise ValueError(f'Encoding {encoding} not supported.')
-
-def get_codec(data: str):
-    """Returns the codec used to encode the given data"""
-    try:
-        return ENCODINGS[data[0]]
-    except KeyError:
-        raise ValueError(f'Can not determine encoding for {data}')
-
-def is_encoded(data: str) -> bool:
-    """Checks if the given data is encoded or not."""
-    try:
-        get_codec(data)
-        return True
-    except ValueError:
-        return False
+        raise ValueError(f'Encoding {encoding} not supported.') from None
 
 def decode(data: str) -> bytes:
     """Decode the multibase-encoded data."""

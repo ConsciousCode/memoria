@@ -1,5 +1,5 @@
 from io import BytesIO
-from typing import Literal, Self, overload
+from typing import Literal, Optional, Self, cast, overload
 import hashlib
 
 import base58
@@ -67,60 +67,63 @@ class Multihash:
     __slots__ = ("function", "digest")
     __match_args__ = ("function", "digest")
 
+    function: int
+    digest: bytes
+
     @overload
     def __init__(self, function: int|str, digest: bytes): ...
     @overload
     def __init__(self, buffer: bytes): ...
     
-    # I fucking despise how Python resolves overloads. *args, **kwargs is
-    #  apparently the only way to make this work on the implementation's signature.
     def __init__(self, *args, **kwargs):
-        function = digest = buffer = None
+        # Types of function, digest, and buffer are interlinked, we need to
+        # combine them into a single tuple to match against (parts).
         match args:
-            case (function, digest): pass
-                
-            case (buffer_or_function,):
+            case (int(function)|str(function), bytes(digest)):
+                parts = (function, digest, None)
+
+            case (buffer,):
                 if digest := kwargs.pop("digest", None):
-                    function = buffer_or_function
+                    parts = (cast(int|str, buffer), cast(bytes, digest), None)
                 else:
-                    buffer = buffer_or_function
-            case () if (buffer := kwargs.pop("buffer", None)): pass
+                    parts = (None, None, cast(bytes, buffer))
             case ():
-                function = kwargs.pop("function", None)
-                digest = kwargs.pop("digest", None)
-                if function is None or digest is None:
-                    raise TypeError('Multihash() missing function or digest')
+                if (buffer := kwargs.pop("buffer", None)):
+                    parts = (None, None, cast(bytes, buffer))
+                else:
+                    function = kwargs.pop("function", None)
+                    digest = kwargs.pop("digest", None)
+                    if function is None or digest is None:
+                        raise TypeError('Multihash() missing function or digest')
+                    parts = (cast(int|str, function), cast(bytes, digest), None)
             
             case _:
                 raise TypeError('Multihash() got too many arguments')        
 
         if kwargs:
             raise TypeError('Multihash() got too many arguments')
-        
-        if buffer is not None:
-            bio = BytesIO(buffer)
-            try:
-                function = varint.decode_stream(bio)
+
+        if parts[2] is not None:
+            bio = BytesIO(parts[2])
+            try: function = varint.decode_stream(bio)
             except TypeError:
-                raise ValueError('Invalid varint provided')
+                raise ValueError('Invalid varint provided') from None
 
             if function not in CODE_HASHES:
                 raise ValueError(f'Unsupported hash code {function:02x}')
 
-            try:
-                length = varint.decode_stream(bio)
+            try: length = varint.decode_stream(bio)
             except TypeError:
-                raise ValueError('Invalid length provided')
+                raise ValueError('Invalid length provided') from None
 
-            digest = bio.read()
-
-            if len(digest) != length:
+            if len(digest := bio.read()) != length:
                 raise ValueError(f'Inconsistent multihash length {len(digest)} != {length}')
+        else:
+            function, digest, _ = parts
+            if isinstance(function, str):
+                if (function := HASH_CODES.get(function)) is None:
+                    raise ValueError(f"Unknown hash function: {function}")
         
-        if isinstance(function, str):
-            if (function := HASH_CODES.get(function)) is None:
-                raise ValueError(f"Unknown hash function: {function}")
-
         super().__setattr__('function', function)
         super().__setattr__('digest', digest)
     
