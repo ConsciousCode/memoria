@@ -39,6 +39,9 @@ class IGraph[K, E, V, Node](ABC):
         super().__init__()
         self.adj = {k: self._node(v) for k, v in (keys or {}).items()}
     
+    def __repr__(self):
+        return f"{type(self).__name__}({self.adj!r})"
+    
     def __contains__(self, key: K) -> bool:
         return key in self.adj
     

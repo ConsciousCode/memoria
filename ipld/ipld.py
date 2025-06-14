@@ -4,9 +4,8 @@ import base64
 
 import base58
 import cbor2
-import multibase
-import multicodec
 
+from . import multibase, multicodec
 from .cid import CID, CIDv0, CIDv1, Codec
 
 __all__ = (
@@ -108,13 +107,12 @@ def dagjson_unmarshal(data: str) -> IPLData:
                 
                 if link.startswith('Qm'):
                     raise TypeError('DAG-JSON does not support CIDv0, use CIDv1 instead')
-                elif link.startswith('b'):
+                else:
+                    link = multibase.decode(link)
                     return CIDv1(
                         cast(Codec, multicodec.get_codec(link)),
                         multicodec.remove_prefix(link)
                     )
-                else:
-                    raise ValueError(f'Invalid CID format: {link}')
 
             case dict():
                 return {k: transform(v) for k, v in data.items()}
@@ -146,7 +144,10 @@ def dagcbor_marshal(data: IPLData) -> bytes:
                 return cbor2.CBORTag(LINK_TAG, data.buffer)
             
             case dict():
-                return transform(data)
+                return {
+                    k: transform(v)
+                        for k, v in data.items()
+                }
             
             case _:
                 raise TypeError(f'Unsupported type in DAG-CBOR: {type(data)}')

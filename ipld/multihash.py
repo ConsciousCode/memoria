@@ -178,7 +178,7 @@ class Multihash:
         return self.encode()
     
     def __repr__(self):
-        return f"Multihash(function={CODE_HASHES[self.function]!r}, digest={self.digest.hex()!r})"
+        return f"Multihash({CODE_HASHES[self.function]!r}, digest={self.digest.hex()!r})"
 
     @property
     def function_name(self) -> str:

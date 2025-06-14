@@ -1,10 +1,12 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import ClassVar, Iterable, NamedTuple, Optional, TypedDict, cast
+from typing import Any, Callable, ClassVar, Iterable, NamedTuple, Optional, Protocol, TypedDict, cast
 import sqlite3
 import json
 from uuid import UUID
+
+from pydantic import BaseModel
 
 from ipld.cid import CIDv1
 from numpy import ndarray
@@ -34,8 +36,12 @@ DEFAULT_K = 20
 ## - this allows us to avoid processing columns we don't need
 ## PrimaryKey aliases also give us little semantic type hints for the linter
 
-class FileRow(NamedTuple):
+class Factory(Protocol):
+    factory: Callable
+
+class FileRow(BaseModel):
     type PrimaryKey = int
+
     rowid: PrimaryKey
     cid: bytes
     filename: Optional[str]
@@ -44,8 +50,22 @@ class FileRow(NamedTuple):
     size: int
     content: Optional[bytes]
 
-class MemoryRow(NamedTuple):
+    @classmethod
+    def factory(cls, rowid, cid, filename, mimetype, metadata, size, content) -> 'FileRow':
+        '''Create a FileRow from a raw database row.'''
+        return cls(
+            rowid=rowid,
+            cid=cid,
+            filename=filename,
+            mimetype=mimetype,
+            metadata=metadata,
+            size=size,
+            content=content
+        )
+
+class MemoryRow(BaseModel):
     type PrimaryKey = int
+
     rowid: PrimaryKey
     cid: Optional[bytes] # None when the memory is incomplete
     timestamp: Optional[float]
@@ -56,34 +76,69 @@ class MemoryRow(NamedTuple):
     def to_memory(self):
         '''Convert this row to a Memory object.'''
         return build_memory(self.kind, json.loads(self.data), self.timestamp)
+    
+    @classmethod
+    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'MemoryRow':
+        '''Create a MemoryRow from a raw database row.'''
+        return cls(
+            rowid=rowid,
+            cid=cid,
+            timestamp=timestamp,
+            kind=kind,
+            data=data,
+            importance=importance
+        )
 
-class EdgeRow(NamedTuple):
+class EdgeRow(BaseModel):
     src_id: MemoryRow.PrimaryKey
     dst_id: MemoryRow.PrimaryKey
     label: str
     weight: float
 
-class SonaRow(NamedTuple):
+class SonaRow(BaseModel):
     type PrimaryKey = int
+
     rowid: PrimaryKey
     uuid: bytes
     active_id: Optional['ACThreadRow.PrimaryKey']
     pending_id: Optional['ACThreadRow.PrimaryKey']
 
-class ACThreadRow(NamedTuple):
+    @classmethod
+    def factory(cls, rowid, uuid, active_id, pending_id) -> 'SonaRow':
+        '''Create a SonaRow from a raw database row.'''
+        return cls(
+            rowid=rowid,
+            uuid=uuid,
+            active_id=active_id,
+            pending_id=pending_id
+        )
+
+class ACThreadRow(BaseModel):
     type PrimaryKey = int
+
     rowid: PrimaryKey
     cid: Optional[bytes] # Depends on memory CID and previous CID
     sona_id: SonaRow.PrimaryKey
     memory_id: MemoryRow.PrimaryKey
     prev_id: Optional[int]
 
-class BackwardEdge(NamedTuple):
+    @classmethod
+    def factory(cls, rowid, cid, sona_id, memory_id, prev_id) -> 'ACThreadRow':
+        '''Create an ACThreadRow from a raw database row.'''
+        return cls(
+            rowid=rowid,
+            cid=cid,
+            sona_id=sona_id,
+            memory_id=memory_id,
+            prev_id=prev_id
+        )
+
+class BackwardEdge(BaseModel):
     dst: MemoryRow
     label: str
     weight: float
 
-class ForwardEdge(NamedTuple):
+class ForwardEdge(BaseModel):
     label: str
     weight: float
     src: MemoryRow
@@ -91,7 +146,6 @@ class ForwardEdge(NamedTuple):
 with open("schema.sql", "r") as f:
     SCHEMA = f.read()
 
-@dataclass
 class Database:
     '''
     All SQL queries are contained within this database class. This prevents the
@@ -104,9 +158,10 @@ class Database:
     themselves have a `cid` which depends on those edges.
     '''
 
-    db_path: str = ":memory:"
-    file_path: str = "files"
-    
+    def __init__(self, db_path: str=":memory:", file_path: str="files"):
+        self.db_path = db_path
+        self.file_path = file_path
+
     def __enter__(self):
         conn = self.conn = sqlite3.connect(self.db_path)
         conn.enable_load_extension(True)
@@ -121,10 +176,14 @@ class Database:
         del self.conn
         return False
     
-    def cursor[T](self, factory: Optional[type[T]]=None):
+    def cursor[T](self, factory: Optional[Callable|Factory]=None):
         cur = self.conn.cursor()
         if factory:
-            cur.row_factory = lambda cur, row: row and factory(*row)
+            if f := getattr(factory, 'factory', None):
+                # If factory is a class with a factory method
+                cur.row_factory = lambda cur, row: row and f(*row)
+            else:
+                cur.row_factory = lambda cur, row: row and factory(*row) # type: ignore
         return cur
     
     def commit(self): self.conn.commit()
@@ -139,18 +198,6 @@ class Database:
         '''Index a memory with a text embedding.'''
         self.insert_text_embedding(memory_id, index)
         self.insert_text_fts(memory_id, index)
-    
-    @lru_cache
-    def memory_cid_to_rowid(self, cid: CIDv1) -> Optional[int]:
-        '''
-        Lookup a CID in the database and return the associated rowid.
-        Returns None if the CID does not exist.
-        '''
-        cur = self.cursor()
-        rowid = cur.execute("""
-            SELECT rowid FROM memories WHERE cid = ?
-        """, (cid.buffer,)).fetchone()
-        return rowid and rowid[0]
     
     def finalize_memory(self, rowid: int) -> Memory:
         '''
@@ -179,8 +226,7 @@ class Database:
         memory = build_memory(memory.kind, memory.data, memory.timestamp, edges)
         cur = self.cursor()
         cur.execute("""
-            UPDATE memories SET cid = ?
-            WHERE rowid = ?
+            UPDATE memories SET cid = ? WHERE rowid = ?
         """, (memory.cid.buffer, rowid))
         return memory
     
@@ -215,7 +261,8 @@ class Database:
         return act
     
     def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory]:
-        cur = self.cursor(MemoryRow)
+        '''Lookup an IPLD memory object by CID.'''
+        cur = self.cursor(MemoryRow.factory)
         mem: Optional[MemoryRow] = cur.execute("""
             SELECT cid, timestamp, kind, data, importance
             FROM memories
@@ -245,13 +292,14 @@ class Database:
         return m
     
     def lookup_ipld_act(self, cid: CIDv1) -> Optional[ACThread]:
+        '''Lookup an IPLD act thread by CID.'''
         cur = self.cursor()
         row = cur.execute("""
             SELECT s.cid, m.cid, p.cid
             FROM acthreads act
-            JOIN sonas s ON s.rowid = act.sona_id
-            JOIN memories m ON m.rowid = act.memory_id
-            JOIN acthreads p ON p.rowid = act.prev_id
+                JOIN sonas s ON s.rowid = act.sona_id
+                JOIN memories m ON m.rowid = act.memory_id
+                JOIN acthreads p ON p.rowid = act.prev_id
             WHERE act.cid = ?
         """, (cid,)).fetchone()
         if row is None:
@@ -267,43 +315,16 @@ class Database:
             raise ValueError(f"ACT CID {t.cid} does not match requested CID {cid}")
         return t
 
-    def lookup_ipld(self, cid: CIDv1) -> Optional[FileRow|MemoryRow|ACThreadRow|UUID]:
+    def lookup_ipld(self, cid: CIDv1):
         '''
         Lookup a CID in the database, returning the associated row if it exists.
         '''
-
-        c = cid.buffer
-
-        cur = self.cursor()
-        cur.execute("""
-            SELECT rowid, cid, timestamp, kind, JSON(data), importance
-            FROM memories WHERE cid = ?
-        """, (c,))
-        if row := cur.fetchone():
-            return MemoryRow(*row)
-
-        cur.execute("""
-            SELECT rowid, cid, filename, mimetype, JSON(metadata), size, content
-            FROM files WHERE cid = ?
-        """, (c,))
-        if row := cur.fetchone():
-            return FileRow(*row)
-
-        cur.execute("""
-            SELECT rowid, cid, sona_id, memory_id, prev_id
-            FROM acthreads WHERE cid = ?
-        """, (c,))
-        if row := cur.fetchone():
-            return ACThreadRow(*row)
-        
-        cur.execute("""
-            SELECT uuid FROM uuid_cid
-            WHERE cid = ?
-        """, (c,))
-        if row := cur.fetchone():
-            return UUID(bytes=row[0])
-        
-        return None
+        return (
+            self.lookup_ipld_memory(cid)
+            or self.lookup_ipld_act(cid)
+            #or self.lookup_file(cid)
+            #or self.lookup_sona(cid)
+        )
 
     def find_sona(self, name: str):
         '''Find or create the sona closest to the given name.'''
@@ -330,7 +351,13 @@ class Database:
             """, (name,))
         
         if row := cur.fetchone():
-            return SonaRow(*row)
+            rowid, uuid, active_id, pending_id = row
+            return SonaRow(
+                rowid=rowid,
+                uuid=uuid,
+                active_id=active_id,
+                pending_id=pending_id
+            )
 
         e, = nomic_text.embed(name)
         ebs = e.tobytes()
@@ -338,24 +365,24 @@ class Database:
             SELECT rowid, uuid, active_id, pending_id
             FROM sona_vss
                 JOIN sonas ON sonas.rowid = sona_vss.sona_id
-            WHERE embedding MATCH ? AND distance > 0.75
-            LIMIT 1 -- vec requires k to be set
+            WHERE embedding MATCH ? AND distance > 0.75 AND k = 1
         """, (ebs,))
         if row := cur.fetchone():
             cur.execute("""
                 INSERT INTO sona_aliases (sona_id, name)
                 VALUES (?, ?)
             """, (row[0], name))
-            return SonaRow(*row)
+            return SonaRow.factory(*row)
         
         # Doesn't exist, create a new one.
         
         u = cast(UUID, uuid7())
-
-        cur.execute("INSERT INTO sona (uuid) VALUES (?)", (u.bytes,))
+        cur.execute("INSERT INTO sonas (uuid) VALUES (?)", (u.bytes,))
         if (rowid := cur.lastrowid) is None:
             raise RuntimeError("Failed to insert sona")
 
+        # Don't need to deduplicate because we just created it and already
+        # know the embedding is far from any existing embedding.
         cur.execute("""
             INSERT INTO sona_vss (sona_id, embedding) VALUES (?, ?)
         """, (rowid, ebs))
@@ -363,7 +390,7 @@ class Database:
             INSERT INTO sona_aliases (sona_id, name) VALUES (?, ?)
         """, (rowid, name))
         
-        return SonaRow(rowid, u.bytes, None, None)
+        return SonaRow.factory(rowid, u.bytes, None, None)
 
     def select_act(self, rowid: int) -> Optional[ACThreadRow]:
         '''Select an act thread by its rowid.'''
@@ -386,7 +413,7 @@ class Database:
         return cur.execute("""
             SELECT act.rowid, cid, sona_id, memory_id, prev_id
             FROM sonas s
-            JOIN acthreads act ON s.active_id = acthreads.rowid
+            JOIN acthreads act ON act.rowid = s.active_id
             WHERE s.rowid = ?
         """, (sona_id,)).fetchone()
 
@@ -394,9 +421,9 @@ class Database:
         '''Get the sona's pending thread node which is aggregating requests.'''
         cur = self.cursor(ACThreadRow)
         return cur.execute("""
-            SELECT act.rowid, cid, sona_id, memory_id, last_id
-            FROM sona s
-            JOIN acthreads act ON s.pending_id = act.rowid
+            SELECT act.rowid, cid, sona_id, memory_id, prev_id
+            FROM sonas s
+            JOIN acthreads act ON act.rowid = s.pending_id
             WHERE s.rowid = ?
         """, (sona_id,)).fetchone()
     
@@ -435,8 +462,17 @@ class Database:
         """, (sona_id,)).fetchall()
 
     def insert_text_embedding(self, memory_id: int, index: str):
+        '''Insert a text embedding for a memory.'''
         e, = nomic_text.embed(index)
         cur = self.cursor()
+        # Deduplicate because sqlite-vec can't.
+        cur.execute("""
+            SELECT rowid FROM memory_vss
+            WHERE embedding = ?
+        """, (e,))
+        if cur.fetchone():
+            return
+        # Insert the embedding
         cur.execute("""
             INSERT INTO memory_vss (memory_id, embedding)
             VALUES (?, ?)
@@ -457,19 +493,20 @@ class Database:
             timestamp: Optional[float],
             importance: Optional[float] = None
         ) -> int:
+        c = cid and cid.buffer
         cur = self.cursor()
         cur.execute("""
             INSERT OR IGNORE INTO memories
             (cid, timestamp, kind, data, importance)
             VALUES (?, ?, ?, JSONB(?), ?)
-        """, (cid, timestamp, kind, json.dumps(data), importance))
+        """, (c, timestamp, kind, json.dumps(data), importance))
         
-        if (rowid := cur.lastrowid) is None:
+        if not (rowid := cur.lastrowid):
             # Memory already exists
             rowid, = cur.execute("""
                 SELECT rowid FROM memories WHERE cid = ?
-            """, (cid,)).fetchone()
-
+            """, (c,)).fetchone()
+        
         return rowid
     
     def insert_act(self,
@@ -561,6 +598,7 @@ class Database:
     
     def link_sona(self, sona_id: int, memory_id: int):
         '''Link a memory to a sona.'''
+        print(f"link_sona({sona_id=}, {memory_id=})")
         cur = self.cursor()
         cur.execute("""
             INSERT OR IGNORE INTO sona_memories
@@ -577,7 +615,7 @@ class Database:
         cur = self.cursor()
         cur.execute("""
             SELECT
-                m.rowid, m.uuid, m.timestamp, m.kind, JSON(m.data), m.importance,
+                m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance,
                 e.label, e.weight
             FROM edges e JOIN memories m ON m.rowid = e.dst_id
             WHERE e.src_id = ?
@@ -585,7 +623,11 @@ class Database:
         """, (src_id,))
         
         for row in cur:
-            yield BackwardEdge(MemoryRow(*row[:6]), row[5], row[6])
+            yield BackwardEdge(
+                dst=MemoryRow.factory(*row[:6]),
+                label=row[5],
+                weight=row[6]
+            )
     
     def forward_edges(self, dst_id: int) -> Iterable[ForwardEdge]:
         '''
@@ -595,7 +637,7 @@ class Database:
         cur = self.cursor()
         cur.execute("""
             SELECT
-                m.rowid, m.timestamp, m.kind, JSON(m.data), m.importance,
+                m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance,
                 e.label, e.weight
             FROM edges e JOIN memories m ON m.rowid = e.src_id
             WHERE e.dst_id = ?
@@ -603,7 +645,11 @@ class Database:
         """, (dst_id,))
         
         for row in cur:
-            yield ForwardEdge(row[5], row[6], MemoryRow(*row[:6]))
+            yield ForwardEdge(
+                label=row[6],
+                weight=row[7],
+                src=MemoryRow.factory(*row[:6])
+            )
     
     def edge(self, src_id: int, dst_id: int) -> Optional[tuple[str, float]]:
         '''
@@ -652,35 +698,32 @@ class Database:
                     WHERE memory_fts MATCH :prompt
                     LIMIT {int(k)!r}
                 ),
-                vss AS (
+                mvss AS (
                     SELECT memory_id, distance
-                    FROM vss_nomic_v1_5_index
-                    WHERE embedding MATCH :vss_e
-                    LIMIT {int(k)!r}
+                    FROM memory_vss
+                    WHERE embedding MATCH :vss_e AND k = {int(k)!r}
                 ),
-                sona_vss AS (
+                svss AS (
                     SELECT sona_id, distance
                     FROM sona_vss
-                    WHERE embedding MATCH :sona_e
-                    LIMIT {int(k)!r}
+                    WHERE embedding MATCH :sona_e AND k = {int(k)!r}
                 )
             SELECT
-                m.rowid, m.timestamp, m.kind, JSON(m.data), m.importance,
+                m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance,
                 (
                     IFNULL(:w_importance * m.importance, 0) +
                     IFNULL(:w_recency * POWER(0.995, :timestamp - m.timestamp), 0) +
                     IFNULL(:w_fts *
                         (fts.score - MIN(fts.score) OVER())
                         / (MAX(fts.score) OVER() - MIN(fts.score) OVER()), 0) +
-                    IFNULL(:w_vss / (1 + vss.distance), 0) +
-                    IFNULL(:w_sona / (1 + sona_vss.distance), 0)
+                    IFNULL(:w_vss / (1 + mvss.distance), 0) +
+                    IFNULL(:w_sona / (1 + svss.distance), 0)
                 ) / (:w_importance + :w_recency + :w_fts + :w_vss + :w_sona) AS score
             FROM memories m
+                LEFT JOIN sona_memories sm ON sm.memory_id = m.rowid
                 LEFT JOIN fts ON fts.rowid = m.rowid
-                LEFT JOIN vss ON vss.memory_id = m.rowid
-                LEFT JOIN (
-                    SELECT DISTINCT sona_id FROM memories WHERE rowid = m.rowid
-                ) AS fm ON fm.sona_id = sona_vss.sona_id
+                LEFT JOIN mvss ON mvss.memory_id = m.rowid
+                LEFT JOIN svss ON svss.sona_id = sm.sona_id
             ORDER BY score DESC
             LIMIT {int(k)!r}
         """, {
@@ -688,12 +731,12 @@ class Database:
             "vss_e": e.tobytes(),
             "sona_e": s.tobytes(),
             "timestamp": timestamp,
-            "w_importance": finite(float(config.importance or DEFAULT_IMPORTANCE)),
-            "w_recency": finite(float(config.recency or DEFAULT_RECENCY)),
-            "w_fts": finite(float(config.fts or DEFAULT_FTS)),
-            "w_vss": finite(float(config.vss or DEFAULT_VSS)),
-            "w_sona": finite(float(config.sona or DEFAULT_SONA))
+            "w_importance": finite(config.importance or DEFAULT_IMPORTANCE),
+            "w_recency": finite(config.recency or DEFAULT_RECENCY),
+            "w_fts": finite(config.fts or DEFAULT_FTS),
+            "w_vss": finite(config.vss or DEFAULT_VSS),
+            "w_sona": finite(config.sona or DEFAULT_SONA)
         })
 
         for row in cur:
-            yield MemoryRow(*row[:-1]), row[-1]
+            yield MemoryRow.factory(*row[:-1]), row[-1]

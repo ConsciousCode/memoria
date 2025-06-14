@@ -90,18 +90,15 @@ class LeastT:
 Least = LeastT.__new__(LeastT)
 
 def ifnone[*Ts](*args: *Ts): # type: ignore
-    '''
-    Return the first non-None argument, or None if all are None.
-    '''
+    '''Return the first non-None argument, or None if all are None.'''
     for arg in args:
         if arg is not None:
             return arg
     return None
 
-def finite(f: float) -> float:
-    '''
-    Return a finite float, or 0.0 if the input is NaN or infinite.
-    '''
+def finite(f) -> float:
+    '''Return a finite float, or 0.0 if the input is NaN or infinite.'''
+    f = float(f)
     if f != f or f == float('inf') or f == float('-inf'):
         return 0.0
     return f

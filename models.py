@@ -8,7 +8,9 @@ import ipld.ipld as ipld
 from ipld.cid import CIDv1, cidhash
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
-type UUIDCID = Annotated[CIDv1, PlainSerializer(lambda u: CIDv1("raw", u.bytes))]
+type UUIDCID = Annotated[CIDv1,
+    PlainSerializer(lambda u: cidhash(u.bytes, codec='raw'))
+]
 type StopReason = Literal["end", "error", "cancel"]
 
 class RecallConfig(BaseModel):
@@ -39,11 +41,13 @@ class RecallConfig(BaseModel):
     ]=None
 
 class IPLDModel(BaseModel):
+    '''Base model for IPLD objects.'''
     @cached_property
     def cid(self):
         return cidhash(ipld.dagcbor_marshal(self.model_dump()))
 
 class Edge(BaseModel):
+    '''Edge from one memory to another.'''
     weight: float
     target: CIDv1
 
@@ -112,6 +116,7 @@ def build_memory(kind: Literal['file'], data: FileMemory.Data, timestamp: Option
 def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float], edges: Optional[dict[str, list[Edge]]]=None) -> Memory: ...
 
 def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float]=None, edges: Optional[dict[str, list[Edge]]]=None) -> Memory:
+    '''Build a memory object from the given data.'''
     args = {
         "data": data,
         "timestamp": timestamp
@@ -127,24 +132,19 @@ def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float]=
 def memory_document(memory: Memory) -> str:
     '''Construct a document for FTS from a memory.'''
     match memory.kind:
-        case "self":
-            return "".join(part.content for part in memory.data.parts)
-        case "other":
-            return memory.data.content
-        case "text":
-            return memory.data
-        case "file":
-            return memory.data.content
-        case _:
-            raise ValueError(f"Unknown memory kind: {memory.kind}")
+        case "self": return "".join(part.content for part in memory.data.parts)
+        case "other": return memory.data.content
+        case "text": return memory.data
+        case "file": return memory.data.content
+        case _: raise ValueError(f"Unknown memory kind: {memory.kind}")
 
 def model_dump(obj: Any) -> Any:
-    try:
-        return obj.model_dump()
+    try: return obj.model_dump()
     except AttributeError:
         return obj
 
 class ACThread(IPLDModel):
+    '''A thread of memories in the agent's context.'''
     sona: UUIDCID
     memory: CIDv1
     prev: Optional[CIDv1] = None
@@ -155,6 +155,7 @@ class DAGEdge(BaseModel):
     weight: float
 
 class MemoryDAG(IGraph[CIDv1, DAGEdge, Memory, Memory]):
+    '''IPLD data model for memories implementing the IGraph interface.'''
     @override
     def _node(self, value: Memory) -> Memory:
         return value

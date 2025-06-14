@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 import json
 from typing import Annotated, Any, Optional, cast
+import asyncio
 
 from fastapi import FastAPI, Request
 from mcp.server.fastmcp import Context, FastMCP
@@ -25,7 +26,8 @@ async def lifespan(server: FastMCP):
 app = FastAPI()
 mcp = FastMCP("memoria",
     """Coordinates a "sona" representing a cohesive identity and memory.""",
-    lifespan=lifespan
+    lifespan=lifespan,
+    #log_level="DEBUG"
 )
 ipfs = FastAPI()
 
@@ -78,10 +80,10 @@ def insert(
             Optional[float],
             Field(description="Initial importance of the memory [0-1] biasing how easily it's recalled.")
         ] = None
-    ) -> str:
+    ):
     '''Insert a new memory into the sona.'''
     ctx, memoria = mcp_context()
-    return str(memoria.insert(memory, sona, index, importance))
+    return memoria.insert(memory, sona, index, importance)
 
 @mcp.tool()
 def act_push(
@@ -96,8 +98,9 @@ def act_push(
     ):
     '''Insert a new memory into the sona, formatted for an ACT (Autonomous Cognitive Thread).'''
     ctx, memoria = mcp_context()
-    if not memoria.act_push(sona, prompts):
-        raise HTTPException(404, detail=f"Sona '{sona}' not found or prompt memory not found.")
+    if u := memoria.act_push(sona, prompts):
+        return u
+    return {"error": "Sona not found or prompt memory not found."}, 404
 
 @mcp.tool()
 def act_stream(
@@ -118,6 +121,10 @@ def act_stream(
             Field(description="Reason for stopping the stream, if applicable.")
         ] = None,
     ):
+    '''
+    Stream tokens from the LLM to the sona to be committed to memory in case
+    the LLM is interrupted or the session ends unexpectedly.
+    '''
     ctx, memoria = mcp_context()
     return memoria.act_stream(sona, delta, model, stop_reason)
 
@@ -254,17 +261,22 @@ def act_next(
     return messages
 
 async def main():
-    import uvicorn
-
-    config = uvicorn.Config(
-        app,
-        host="0.0.0.0",
-        port=3001,
-        log_level="debug"
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
+    async with asyncio.TaskGroup() as tg:
+        tasks = [
+            tg.create_task(task) for task in [
+                mcp.run_sse_async(),
+                #mcp.run_stdio_async()
+            ]
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            import traceback
+            import sys
+            traceback.print_exc()
+            print("Server stopped by user.", file=sys.stderr, flush=True)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())

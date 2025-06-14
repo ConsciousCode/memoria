@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS uuid_cid (
 CREATE TABLE IF NOT EXISTS sona_aliases (
     sona_id INTEGER REFERENCES sonas(rowid) ON DELETE CASCADE,
     name TEXT NOT NULL,
+    
     PRIMARY KEY (sona_id, name)
 );
 
@@ -79,7 +80,9 @@ CREATE TABLE IF NOT EXISTS sona_aliases (
 **/
 CREATE TABLE IF NOT EXISTS sona_memories (
     sona_id INTEGER REFERENCES sonas(rowid) ON DELETE CASCADE,
-    memory_id INTEGER REFERENCES memories(id) ON DELETE CASCADE,
+    memory_id INTEGER REFERENCES memories(rowid) ON DELETE CASCADE,
+
+    PRIMARY KEY (sona_id, memory_id)
 );
 
 /**
@@ -91,7 +94,7 @@ CREATE TABLE IF NOT EXISTS acthreads (
     rowid INTEGER PRIMARY KEY,
     cid BLOB UNIQUE, -- ACT CID depends on memory CID which may be NULL for staged memories
     sona_id INTEGER REFERENCES sonas(rowid) ON DELETE CASCADE,
-    memory_id INTEGER REFERENCES memories(id) ON DELETE CASCADE,
+    memory_id INTEGER REFERENCES memories(rowid) ON DELETE CASCADE,
     prev_id INTEGER REFERENCES acthreads(rowid) ON DELETE CASCADE
 );
 
@@ -109,11 +112,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content);
  * rowid and memory_id separately.
 **/
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_vss USING vec0 (
-    rowid INTEGER PRIMARY KEY,
     memory_id INTEGER NOT NULL REFERENCES memories(rowid) ON DELETE CASCADE,
-    embedding FLOAT[1536] NOT NULL,
-
-    UNIQUE(memory_id, embedding)
+    embedding FLOAT[1536]
 );
 
 /**
@@ -121,5 +121,5 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_vss USING vec0 (
 **/
 CREATE VIRTUAL TABLE IF NOT EXISTS sona_vss USING vec0(
     sona_id INTEGER PRIMARY KEY REFERENCES sonas(rowid) ON DELETE CASCADE,
-    embedding FLOAT[1536] NOT NULL
+    embedding FLOAT[1536]
 );

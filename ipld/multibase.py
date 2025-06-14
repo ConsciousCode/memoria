@@ -132,9 +132,9 @@ type Encoding = Literal[
 
 def get_codec(data: str) -> Codec:
     """Returns the codec used to encode the given data"""
-    try: return ENCODINGS[data[0]]
+    try: return CODES[data[0]]
     except (IndexError, KeyError):
-        raise ValueError(f'Can not determine encoding for {data}') from None
+        raise ValueError(f'Cannot determine encoding for {data}') from None
 
 def is_encoded(data: str) -> bool:
     """Checks if the given data is encoded or not."""
