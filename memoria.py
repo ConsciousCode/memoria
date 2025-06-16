@@ -65,7 +65,7 @@ class Memoria:
                     if row.active_id else None
             )
     
-    def build_subgraph(self, edges: list[Edge], budget: float=20) -> MemoryDAG:
+    def build_subgraph(self, edges: list[Edge[CIDv1]], budget: float=20) -> MemoryDAG:
         '''
         Build a subgraph of memories.
         
@@ -95,7 +95,7 @@ class Memoria:
 
             b = 0
             for edge in self.db.backward_edges(mr.rowid):
-                dst, weight = edge.dst, edge.weight
+                dst, weight = edge.target, edge.weight
                 assert dst.cid # Incomplete memories must not be referenced
                 dstcid = CIDv1(dst.cid)
                 if dstcid in g:
@@ -111,7 +111,7 @@ class Memoria:
             
             b = 0
             for edge in self.db.forward_edges(mr.rowid):
-                weight, src = edge.weight, edge.src
+                weight, src = edge.weight, edge.target
                 if not src.cid:
                     continue
                 dstcid = CIDv1(src.cid)
@@ -136,7 +136,7 @@ class Memoria:
         for energy, src_id, srccid in todo_list(bw):
             b = 0
             for edge in self.db.backward_edges(src_id):
-                dst, weight = edge.dst, edge.weight
+                dst, weight = edge.target, edge.weight
                 b += weight
                 if b >= energy:
                     break
@@ -156,7 +156,7 @@ class Memoria:
         for energy, dst_id, dstcid in todo_list(fw):
             b = 0
             for edge in self.db.forward_edges(dst_id):
-                weight, src = edge.weight, edge.src
+                weight, src = edge.weight, edge.target
                 b += (imp := src.importance or 0)
                 if b >= energy:
                     break
@@ -173,7 +173,7 @@ class Memoria:
 
     def act_push(self,
             sona: UUID|str,
-            prompts: list[Edge]
+            prompts: list[Edge[CIDv1]]
         ) -> Optional[UUID]:
         '''
         Push prompts to the sona for processing. Return the receiving
@@ -247,9 +247,9 @@ class Memoria:
         
         # We used the incomplete memory's edges to store prompts, only now
         #  do we actually run recall on them.
-        edges: list[Edge] = []
+        edges: list[Edge[CIDv1]] = []
         for e in self.db.backward_edges(memory_id):
-            prompt = memory_document(e.dst.to_memory())
+            prompt = memory_document(e.target.to_memory())
             for row, score in self.db.recall(sona, prompt, timestamp, config):
                 if cid := row.cid:
                     edges.append(Edge(
@@ -318,7 +318,7 @@ class Memoria:
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
         try:
-            edges: list[Edge] = []
+            edges: list[Edge[CIDv1]] = []
             for row, score in self.db.recall(sona, prompt, timestamp, config):
                 if cid := row.cid:
                     edges.append(Edge(

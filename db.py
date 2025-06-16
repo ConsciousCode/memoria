@@ -129,14 +129,6 @@ class ACThreadRow(BaseModel):
             prev_id=prev_id
         )
 
-class BackwardEdge(BaseModel):
-    dst: MemoryRow
-    weight: float
-
-class ForwardEdge(BaseModel):
-    weight: float
-    src: MemoryRow
-
 with open("schema.sql", "r") as f:
     SCHEMA = f.read()
 
@@ -170,14 +162,10 @@ class Database:
         del self.conn
         return False
     
-    def cursor[T](self, factory: Optional[Callable|Factory]=None):
+    def cursor[T](self, factory: Optional[Callable]=None):
         cur = self.conn.cursor()
         if factory:
-            if f := getattr(factory, 'factory', None):
-                # If factory is a class with a factory method
-                cur.row_factory = lambda cur, row: row and f(*row)
-            else:
-                cur.row_factory = lambda cur, row: row and factory(*row) # type: ignore
+            cur.row_factory = lambda cur, row: row and factory(*row) # type: ignore
         return cur
     
     def commit(self): self.conn.commit()
@@ -207,11 +195,11 @@ class Database:
         # Build the CID from the memory data
         edges: dict[CIDv1, float] = {}
         for edge in self.backward_edges(rowid):
-            if cid := edge.dst.cid:
+            if cid := edge.target.cid:
                 edges[CIDv1(cid)] = edge.weight
             else:
                 raise ValueError(
-                    f"Memory with rowid {rowid} has an edge to a memory without a CID: {edge.dst.rowid}"
+                    f"Memory with rowid {rowid} has an edge to a memory without a CID: {edge.target.rowid}"
                 )
         
         memory = build_memory(memory.kind, memory.data, memory.timestamp, edges)
@@ -481,11 +469,11 @@ class Database:
         kind, data, timestamp, prev = row
         edges: dict[CIDv1, float] = {}
         for edge in self.backward_edges(rowid):
-            if cid := edge.dst.cid:
+            if cid := edge.target.cid:
                 edges[CIDv1(cid)] = edge.weight
             else:
                 raise ValueError(
-                    f"Memory with rowid {rowid} has an edge to an incomplete memory: {edge.dst.rowid}"
+                    f"Memory with rowid {rowid} has an edge to an incomplete memory: {edge.target.rowid}"
                 )
 
         return IncompleteACThread(
@@ -634,7 +622,7 @@ class Database:
             ORDER BY rowid DESC LIMIT 1
         """, (sona_id,)).fetchone()
 
-    def link_memory_edges(self, rowid: int, edges: list[Edge]):
+    def link_memory_edges(self, rowid: int, edges: list[Edge[CIDv1]]):
         '''
         Link the edges of a memory to the database. This is used when inserting
         a memory with edges that are already in the database.
@@ -660,7 +648,7 @@ class Database:
     
     # dst <- src
 
-    def backward_edges(self, src_id: int) -> Iterable[BackwardEdge]:
+    def backward_edges(self, src_id: int) -> Iterable[Edge[MemoryRow]]:
         '''
         Get all edges leading to the given memory, returning the source id
         and weight of the edge.
@@ -676,12 +664,12 @@ class Database:
         """, (src_id,))
         
         for row in cur:
-            yield BackwardEdge(
-                dst=MemoryRow.factory(*row[:6]),
+            yield Edge(
+                target=MemoryRow.factory(*row[:6]),
                 weight=row[6]
             )
     
-    def forward_edges(self, dst_id: int) -> Iterable[ForwardEdge]:
+    def forward_edges(self, dst_id: int) -> Iterable[Edge[MemoryRow]]:
         '''
         Get all edges leading from the given memory, returning the destination id
         and weight of the edge.
@@ -697,9 +685,9 @@ class Database:
         """, (dst_id,))
         
         for row in cur:
-            yield ForwardEdge(
+            yield Edge(
                 weight=row[6],
-                src=MemoryRow.factory(*row[:6])
+                target=MemoryRow.factory(*row[:6])
             )
 
     def recall(self,

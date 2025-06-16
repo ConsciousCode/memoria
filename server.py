@@ -129,7 +129,7 @@ def act_push(
             Field(description="Sona to push the memory to.")
         ],
         memories: Annotated[
-            list[Edge],
+            list[Edge[CIDv1]],
             Field(description="Additional memories to include in the ACT, keyed by label.")
         ]
     ):

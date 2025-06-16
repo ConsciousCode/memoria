@@ -5,7 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, PlainSerializer, TypeAdapter
 
 from graph import IGraph
-import ipld.ipld as ipld
+from ipld import ipld
 from ipld.cid import CIDv1, cidhash
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
@@ -47,20 +47,20 @@ class IPLDModel(BaseModel):
     def cid(self):
         return cidhash(ipld.dagcbor_marshal(self.model_dump()))
 
-class Edge(BaseModel):
+class Edge[T](BaseModel):
     '''Edge from one memory to another.'''
-    target: CIDv1
+    target: T
     weight: float
 
 class BaseMemory(IPLDModel):
     timestamp: Optional[float] = None
-    edges: list[Edge] = Field(
+    edges: list[Edge[CIDv1]] = Field(
         default_factory=list,
         description="Edges to other memories."
     )
     importance: Optional[float] = Field(exclude=True, default=None)
 
-    def edge(self, target: CIDv1) -> Optional[Edge]:
+    def edge(self, target: CIDv1) -> Optional[Edge[CIDv1]]:
         '''Get the edge to the target memory, if it exists.'''
         
         for edge in self.edges:
