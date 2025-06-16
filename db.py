@@ -1,7 +1,4 @@
-from collections import defaultdict
-from dataclasses import dataclass
-from functools import lru_cache
-from typing import Any, Callable, ClassVar, Iterable, NamedTuple, Optional, Protocol, TypedDict, cast
+from typing import Callable, Iterable, Optional, Protocol, cast
 import sqlite3
 import json
 from uuid import UUID
@@ -15,8 +12,8 @@ import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
-from models import ACThread, Edge, FileMemory, IncompleteACThread, Memory, MemoryDataAdapter, MemoryKind, OtherMemory, RecallConfig, SelfMemory, TextMemory, build_memory
-from util import classproperty, finite, json_t
+from models import ACThread, Edge, IncompleteACThread, Memory, MemoryDataAdapter, MemoryKind, RecallConfig, build_memory
+from util import finite, json_t
 
 nomic_text = TextEmbedding(
     model_name="nomic-ai/nomic-embed-text-v1.5",

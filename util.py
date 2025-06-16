@@ -1,5 +1,5 @@
 import json
-from typing import Callable, Iterable, Mapping, Optional, Protocol, Self, Sequence, TypeVar, overload
+from typing import Callable, Iterable, Mapping, Protocol, Self, Sequence, overload
 import re
 from functools import wraps
 from heapq import heappop

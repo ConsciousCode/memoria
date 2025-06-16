@@ -1,5 +1,5 @@
 from io import BytesIO
-from typing import Literal, Optional, Self, cast, overload
+from typing import Literal, Self, cast, overload
 import hashlib
 
 import base58

@@ -1,6 +1,5 @@
-from collections import defaultdict
 from functools import cached_property
-from typing import Annotated, Any, Iterable, Literal, Optional, Union, overload, override
+from typing import Annotated, Iterable, Literal, Optional, overload, override
 from uuid import UUID
 
 from pydantic import BaseModel, Field, PlainSerializer, TypeAdapter

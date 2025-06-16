@@ -2,17 +2,16 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 import inspect
 import json
-from typing import Annotated, Any, Iterable, Literal, Optional, Text, cast
+from typing import Annotated, Iterable, Literal, Optional
 import asyncio
 from uuid import UUID
 
 from fastapi import FastAPI, Request
 from mcp import SamplingMessage
-from mcp.types import BlobResourceContents, ModelPreferences, PromptMessage, TextContent, TextResourceContents
+from mcp.types import ModelPreferences, PromptMessage, TextContent
 from fastmcp import Context, FastMCP
 from fastmcp.prompts.prompt import Message
-from mcp.types import EmbeddedResource
-from pydantic import AnyUrl, BaseModel, Field
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException
 
 from ipld.cid import CIDv1
