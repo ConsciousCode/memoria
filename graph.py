@@ -48,6 +48,9 @@ class IGraph[K, E, V, Node](ABC):
     def __bool__(self) -> bool:
         return bool(self.adj)
     
+    def __len__(self) -> int:
+        return len(self.adj)
+    
     def __setitem__(self, key: K, value: V):
         '''Set the value of a node.'''
         if key in self.adj:

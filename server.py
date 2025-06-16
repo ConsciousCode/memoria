@@ -1,22 +1,25 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
+import inspect
 import json
-from typing import Annotated, Any, Optional, cast
+from typing import Annotated, Any, Iterable, Literal, Optional, Text, cast
 import asyncio
+from uuid import UUID
 
 from fastapi import FastAPI, Request
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.prompts.base import AssistantMessage, Message, UserMessage
-from mcp.server.session import ServerSession
-from mcp.types import BlobResourceContents, EmbeddedResource
-from pydantic import AnyUrl, Field
+from mcp import SamplingMessage
+from mcp.types import BlobResourceContents, ModelPreferences, PromptMessage, TextContent, TextResourceContents
+from fastmcp import Context, FastMCP
+from fastmcp.prompts.prompt import Message
+from mcp.types import EmbeddedResource
+from pydantic import AnyUrl, BaseModel, Field
 from starlette.exceptions import HTTPException
 
 from ipld.cid import CIDv1
 
 from db import Edge
 from memoria import Database, Memoria
-from models import Memory, MemoryDAG, RecallConfig, StopReason
+from models import Memory, MemoryDAG, RecallConfig, SelfMemory, StopReason
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
@@ -29,43 +32,74 @@ mcp = FastMCP("memoria",
     lifespan=lifespan,
     #log_level="DEBUG"
 )
-ipfs = FastAPI()
 
 app.mount("/mcp", mcp.sse_app())
+
+def mcp_context(ctx: Context) -> Memoria:
+    '''Get memoria from the FastAPI context.'''
+    return ctx.request_context.lifespan_context
+
+## IPFS trustless gateway
+
+ipfs = FastAPI()
 app.mount("/ipfs", ipfs)
 
-def mcp_context() -> tuple[Context[ServerSession, Memoria], Memoria]:
-    '''Get the current request context from the FastAPI request.'''
-    ctx = cast(Context[ServerSession, Memoria], mcp.get_context())
-    return ctx, ctx.request_context.lifespan_context
-
 @ipfs.get("/bafkqaaa")
-def get_ipfs_empty(request: Request):
+def get_ipfs_empty():
     '''Empty block for PING'''
-    # Return empty body? What format? Probably depends on car/ipld format parameter.
-    return
+    return b''
 
 @ipfs.get("/{path:path}")
 def get_ipfs(path: str, request: Request):
     pass
 
-@mcp.resource("memory://{cid}")
-def memory_resource(cid: str):
-    '''Memory resource handler.'''
+## MCP
+
+@mcp.resource("ipfs://{cid}")
+def ipfs_resource(ctx: Context, cid: CIDv1):
+    '''IPFS resource handler.'''
     try:
-        ctx = mcp.get_context()
-        memoria = cast(Memoria, ctx.request_context.lifespan_context)
-        if (m := memoria.lookup_memory(CIDv1(cid))) is None:
+        memoria = mcp_context(ctx)
+        if (m := memoria.lookup_memory(cid)) is None:
             return {"error": "Memory not found"}, 404
         
-        return m
+        if m.kind != "file":
+            return {"error": "Memory is not a file"}, 400
+        
+        return m.data.content
     except Exception as e:
         raise HTTPException(500, detail=str(e))
 
-@mcp.tool()
-def insert(
+@mcp.resource("memoria://sona/{uuid}")
+def sona_resource(ctx: Context, uuid: UUID):
+    '''Sona resource handler.'''
+    try:
+        if m := mcp_context(ctx).find_sona(uuid):
+            return m
+        return {"error": "Sona not found"}, 404
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+@mcp.resource("memoria://memory/{cid}")
+def memory_resource(ctx: Context, cid: str):
+    '''Memory resource handler.'''
+    try:
+        if m := mcp_context(ctx).lookup_memory(CIDv1(cid)):
+            return m
+        return {"error": "Memory not found"}, 404
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+@mcp.tool(
+    annotations=dict(
+        idempotentHint=True,
+        openWorldHint=False
+    )
+)
+def insert_memory(
+        ctx: Context,
         sona: Annotated[
-            Optional[str],
+            Optional[UUID|str],
             Field(description="Sona to push the memory to.")
         ],
         memory: Annotated[
@@ -82,30 +116,41 @@ def insert(
         ] = None
     ):
     '''Insert a new memory into the sona.'''
-    ctx, memoria = mcp_context()
-    return memoria.insert(memory, sona, index, importance)
+    return mcp_context(ctx).insert(memory, sona, index, importance)
 
-@mcp.tool()
+@mcp.tool(
+    annotations=dict(
+        openWorldHint=False
+    )
+)
 def act_push(
+        ctx: Context,
         sona: Annotated[
-            str,
+            UUID|str,
             Field(description="Sona to push the memory to.")
         ],
-        prompts: Annotated[
-            dict[str, list[Edge]],
+        memories: Annotated[
+            list[Edge],
             Field(description="Additional memories to include in the ACT, keyed by label.")
         ]
     ):
-    '''Insert a new memory into the sona, formatted for an ACT (Autonomous Cognitive Thread).'''
-    ctx, memoria = mcp_context()
-    if u := memoria.act_push(sona, prompts):
+    '''
+    Insert a new memory into the sona, formatted for an ACT
+    (Autonomous Cognitive Thread).
+    '''
+    if u := mcp_context(ctx).act_push(sona, memories):
         return u
     return {"error": "Sona not found or prompt memory not found."}, 404
 
-@mcp.tool()
+@mcp.tool(
+    annotations=dict(
+        openWorldHint=False
+    )
+)
 def act_stream(
+        ctx: Context,
         sona: Annotated[
-            str,
+            UUID|str,
             Field(description="Sona to push the memory to.")
         ],
         delta: Annotated[
@@ -125,11 +170,17 @@ def act_stream(
     Stream tokens from the LLM to the sona to be committed to memory in case
     the LLM is interrupted or the session ends unexpectedly.
     '''
-    ctx, memoria = mcp_context()
+    memoria = mcp_context(ctx)
     return memoria.act_stream(sona, delta, model, stop_reason)
 
-@mcp.tool()
+@mcp.tool(
+    annotations=dict(
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
 def recall(
+        ctx: Context,
         sona: Annotated[
             Optional[str],
             Field(description="Sona to focus the recall on.")
@@ -146,79 +197,113 @@ def recall(
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
         ] = RecallConfig(),
-        include: Annotated[
-            Optional[list[str]],
-            Field(description="List of memory CIDv1 to include as part of the recall. Example: the previous message in a chat log.")
+        memories: Annotated[
+            Optional[list[CIDv1]],
+            Field(description="List of memories to include as part of the recall. Example: the previous message in a chat log.")
         ] = None
-    ) -> dict[str, Memory]:
+    ):
     '''
     Recall memories related to the prompt, including relevant included memories
     and their dependencies.
     '''
-    ctx, memoria = mcp_context()
+    memoria = mcp_context(ctx)
     return {
-        str(cid): mem
+        cid: mem
             for cid, mem in memoria.recall(
                 sona,
                 prompt,
                 timestamp,
                 config,
-                {"include": [
-                    Edge(weight=1.0, target=CIDv1(cid))
-                        for cid in include
-                ]} if include else None
+                memories or []
             ).items()
     }
 
-def memory_to_message(ref: Optional[int], refs: dict[CIDv1, int], memory: Memory) -> Message:
-    '''Render memory for the context.'''
+class ConvoMessage(BaseModel):
+    role: Literal['user', 'assistant']
+    content: str
 
-    p: dict[str, Any] = {
-        label: [r for e in edges if (r := refs.get(e.target))]
-            for label, edges in memory.edges.items()
-                if edges
-    }
-    # Not included:
-    # - importance - do not expose to the agent never ever
-    if ref: p["id"] = ref
+def build_tags(tags: list[str], timestamp: Optional[datetime]) -> str:
+    if timestamp:
+        tags.append(timestamp.replace(microsecond=0).isoformat())
+    return f"[{'\t'.join(tags)}]"
+
+def memory_to_message(ref: int, refs: list[int], memory: Memory, final: bool=False) -> ConvoMessage:
+    '''Render memory for the context.'''
+    
+    tags = []
+    if final:
+        tags.append("final")
+    tags.append(
+        f"ref:{ref}" +
+        (f" -> {','.join(map(str, refs))}" if refs else "")
+    )
+
     if memory.timestamp:
-        p['datetime'] = (datetime
-            .fromtimestamp(memory.timestamp)
-            .replace(microsecond=0)
-            .isoformat()
-        )
+        ts = datetime.fromtimestamp(memory.timestamp)
+    else:
+        ts = None
     
     match memory.kind:
         case "self":
-            return AssistantMessage(json.dumps({
-                **memory.data.model_dump(),
-                **p
-            }))
-        case "text" if isinstance(memory.data, str):
-            return AssistantMessage(json.dumps({
-                "text": memory.data,
-                **p
-            }))
+            if name := memory.data.name:
+                tags.append(f"name:{name}")
+            if sr := memory.data.stop_reason:
+                if sr != "finish":
+                    tags.append(f"stop_reason:{sr}")
+            return ConvoMessage(
+                role="assistant",
+                content=build_tags(tags, ts) +
+                    ''.join(p.content for p in memory.data.parts),
+            )
+        case "text":
+            tags.append("kind:raw_text")
+            return ConvoMessage(
+                role="user",
+                content=build_tags(tags, ts) + memory.data
+            )
         case "other":
-            return UserMessage(json.dumps({
-                **memory.data.model_dump(),
-                **p
-            }))
+            if name := memory.data.name:
+                tags.append(f"name:{name}")
+            return ConvoMessage(
+                role="user",
+                content=build_tags(tags, ts) + memory.data.content
+            )
+            '''
         case "file":
-            return AssistantMessage(EmbeddedResource(
-                type="resource",
-                resource=BlobResourceContents(
-                    uri=AnyUrl(f"memory://{memory.cid}"),
-                    mimeType=memory.data.mimeType or "application/octet-stream",
-                    blob=memory.data.content
-                )
-            ))
+            return ConvoMessage(
+                EmbeddedResource(
+                    type="resource",
+                    resource=BlobResourceContents(
+                        uri=AnyUrl(f"memory://{memory.cid}"),
+                        mimeType=memory.data.mimeType or
+                            "application/octet-stream",
+                        blob=memory.data.content
+                    )
+                ),
+                role="user"
+            )
+        '''
         
         case _:
             raise ValueError(f"Unknown memory kind: {memory.kind}")
 
+def dag_to_convo(g: MemoryDAG, include_final=False) -> Iterable[tuple[int, CIDv1, ConvoMessage]]:
+    '''Convert a memory DAG to a conversation.'''
+    refs: dict[CIDv1, int] = {}
+
+    for cid in g.invert().toposort(key=lambda v: v.timestamp):
+        # We need ids for each memory so their edges can be annotated later
+        ref = refs[cid] = len(refs) + 1
+        yield ref, cid, memory_to_message(
+            ref,
+            [refs[dst] for dst, _ in g.edges(cid)],
+            g[cid],
+            final=include_final and (ref == len(g))
+        )
+
 @mcp.prompt()
 def act_next(
+        ctx: Context,
         sona: Annotated[
             str,
             Field(description="Sona to process, either a name or UUID.")
@@ -231,10 +316,9 @@ def act_next(
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
         ] = RecallConfig()
-    ) -> Optional[list[Message]]:
+    ) -> Optional[list[PromptMessage]]:
     '''Get the prompt for the next step of an ACT (Autonomous Cognitive Thread).'''
-    ctx, memoria = mcp_context()
-
+    memoria = mcp_context(ctx)
     g = memoria.act_next(
         sona,
         timestamp or datetime.now().timestamp(),
@@ -243,22 +327,244 @@ def act_next(
     if g is None:
         return None
 
-    # Serialize the memory graph with localized references and edges.
-    gv = g.invert()
-    refs: dict[CIDv1, int] = {}
-    messages: list[Message] = []
+    return [
+        Message(
+            role=m.role,
+            content=m.content
+        ) for _, _, m in dag_to_convo(g, include_final=True)
+    ]
 
-    for cid in gv.toposort(key=lambda v: v.timestamp):
-        memory = gv[cid]
-        # Only include ids if they have references
-        if gv.edges(cid):
-            ref = refs[cid] = len(refs)
-        else:
-            ref = None
-        
-        messages.append(memory_to_message(ref, refs, memory))
+async def annotate_edges(
+        ctx: Context,
+        messages: list[str|SamplingMessage]
+    ) -> dict[int, float]:
+    '''Use sampling with a faster model to annotate which memories are connected and by how much.'''
+    result = await ctx.sample(
+        messages,
+        system_prompt=inspect.cleandoc("""
+            This task is edge annotation. Given the conversational memory up to the [final] tag and the agent's response, which memories were relevant to that response? Irrelevant memories are ignored. Memories which contributed are ranked 1-10:
+            1. Trivial
+            2. Minor
+            3. Somewhat relevant
+            4. Relevant
+            5. Very relevant
+            6. Highly relevant
+            7. Crucial
+            8. Critical
+            9. Essential
+            10. Absolutely essential
+
+            The process answers with only a JSON object mapping memory indices to their relevance score, e.g. {"2": 10, "8": 5}. The indices are the same as in the conversation, marked with ref:(index).
+        """),
+        temperature=0,
+        max_tokens=len(str(len(messages))) * 3,
+        model_preferences=ModelPreferences(
+            costPriority=0,
+            speedPriority=1,
+            intelligencePriority=0.2
+        )
+    )
+    if not isinstance(result, TextContent):
+        raise ValueError(
+            f"Edge annotation response must be text, got {type(result)}: {result}"
+        )
     
-    return messages
+    try:
+        edges = json.loads(result.text)
+        if not isinstance(edges, dict):
+            raise ValueError(f"Edge annotation response must be a JSON object, got {type(edges)}: {edges}")
+        return {
+            int(k): v/10 for k, v in edges.items()
+        }
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Edge annotation response is not valid JSON: {e}") from e
+
+@mcp.tool(
+    annotations=dict(
+        openWorldHint=False,
+    )
+)
+async def chat(
+        ctx: Context,
+        sona: Annotated[
+            Optional[str],
+            Field(description="Sona to focus the chat on.")
+        ],
+        message: Annotated[
+            Optional[str],
+            Field(description="Prompt for the chat. If `null`, use only the included memories.")
+        ],
+        timestamp: Annotated[
+            Optional[datetime|float],
+            Field(description="Timestamp to use for the chat, if available. If `null`, uses the current time.")
+        ] = None,
+        config: Annotated[
+            RecallConfig,
+            Field(description="Configuration for how to weight memory recall.")
+        ] = RecallConfig(),
+        memories: Annotated[
+            Optional[set[CIDv1]],
+            Field(description="Memories to include as part of the chat. Example: the previous message in a chat log. These are the minimum set of included memories, but more will be recalled.")
+        ] = None,
+        temperature: Annotated[
+            Optional[float],
+            Field(description="Sampling temperature for the response. If `null`, uses the default value.")
+        ] = None,
+        max_tokens: Annotated[
+            Optional[int],
+            Field(description="Maximum number of tokens to generate in the response. If `null`, uses the default value.")
+        ] = None,
+        model_preferences: Annotated[
+            Optional[ModelPreferences | str | list[str]],
+            Field(description="List of preferred models to use for the response. If `null`, uses the default model.")
+        ] = None
+    ):
+    '''
+    Single-turn conversation returning the response. This is committed to memory.
+    '''
+    if isinstance(timestamp, datetime):
+        ts = timestamp.timestamp()
+        dt = timestamp
+    else:
+        ts = timestamp
+        dt = datetime.fromtimestamp(timestamp) if timestamp else None
+
+    memoria = mcp_context(ctx)
+    g = memoria.recall(
+        sona, message, ts, config, list(memories or ())
+    )
+
+    refs: dict[int, CIDv1] = {}
+    messages = []
+    for ref, cid, m in dag_to_convo(g):
+        refs[ref] = cid
+        messages.append(
+            SamplingMessage(
+                role=m.role,
+                content=TextContent(type="text", text=m.content)
+            )
+        )
+    if message:
+        messages.append(
+            build_tags(
+                ["final", f"ref:{len(refs) + 1}"],
+                timestamp=dt
+            ) + message
+        )
+
+    result = await ctx.sample(
+        messages,
+        system_prompt="I'm talking to a user. The Memoria system will replay my memories with metadata annotations, then I can respond in plaintext after the memory with the [final] tag.",
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model_preferences=model_preferences
+    )
+    if not isinstance(result, TextContent):
+        raise ValueError(
+            f"Chat response must be text, got {type(result)}: {result}"
+        )
+    
+    messages.append(result.text)
+    edges = await annotate_edges(ctx, messages)
+
+    memoria.insert(
+        SelfMemory(
+            timestamp=ts,
+            kind="self",
+            data=SelfMemory.Data(
+                parts=[SelfMemory.Data.Part(content=result.text)]
+            ),
+            edges=[
+                Edge(target=refs[ref], weight=weight)
+                    for ref, weight in edges.items()
+            ]
+        ),
+        sona=sona,
+        index=result.text,
+        ### Importance? By what measure? Need to sample that too
+    )
+
+    return result
+
+@mcp.tool(
+    annotations=dict(
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+async def query(
+        ctx: Context,
+        sona: Annotated[
+            Optional[str],
+            Field(description="Sona to focus the chat on.")
+        ],
+        message: Annotated[
+            Optional[str],
+            Field(description="Prompt for the chat. If `null`, use only the included memories.")
+        ],
+        timestamp: Annotated[
+            Optional[datetime|float],
+            Field(description="Timestamp to use for the chat, if available. If `null`, uses the current time.")
+        ] = None,
+        config: Annotated[
+            RecallConfig,
+            Field(description="Configuration for how to weight memory recall.")
+        ] = RecallConfig(),
+        memories: Annotated[
+            Optional[set[CIDv1]],
+            Field(description="Memories to include as part of the chat. Example: the previous message in a chat log. These are the minimum set of included memories, but more will be recalled.")
+        ] = None,
+        temperature: Annotated[
+            Optional[float],
+            Field(description="Sampling temperature for the response. If `null`, uses the default value.")
+        ] = None,
+        max_tokens: Annotated[
+            Optional[int],
+            Field(description="Maximum number of tokens to generate in the response. If `null`, uses the default value.")
+        ] = None,
+        model_preferences: Annotated[
+            Optional[ModelPreferences | str | list[str]],
+            Field(description="List of preferred models to use for the response. If `null`, uses the default model.")
+        ] = None
+    ):
+    '''Single-turn conversation returning the response.'''
+    if isinstance(timestamp, datetime):
+        ts = timestamp.timestamp()
+        dt = timestamp
+    else:
+        ts = timestamp
+        dt = datetime.fromtimestamp(timestamp) if timestamp else None
+
+    memoria = mcp_context(ctx)
+    g = memoria.recall(
+        sona, message, ts, config, list(memories or ())
+    )
+
+    refs: dict[int, CIDv1] = {}
+    messages = []
+    for ref, cid, m in dag_to_convo(g):
+        refs[ref] = cid
+        messages.append(
+            SamplingMessage(
+                role=m.role,
+                content=TextContent(type="text", text=m.content)
+            )
+        )
+    if message:
+        messages.append(
+            build_tags(
+                ["final", f"ref:{len(refs) + 1}"],
+                timestamp=dt
+            ) + message
+        )
+
+    return await ctx.sample(
+        messages,
+        system_prompt="I'm talking to a user. The Memoria system will replay my memories with metadata annotations, then I can respond in plaintext after the memory with the [final] tag. This is being run as a query so I won't remember it.",
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model_preferences=model_preferences
+    )
 
 async def main():
     async with asyncio.TaskGroup() as tg:

@@ -1,13 +1,15 @@
 from collections import defaultdict
 from datetime import datetime
-from typing import Iterable, Optional
+from typing import Iterable, Optional, reveal_type
 from uuid import UUID
+
+from pydantic import BaseModel
 
 from ipld.cid import CIDv1
 
 from db import Database, MemoryRow
-from models import DAGEdge, Edge, Memory, MemoryDataAdapter, MemoryDAG, RecallConfig, SelfMemory, StopReason, build_memory, memory_document, model_dump
-from util import todo_list
+from models import Edge, IncompleteACThread, Memory, MemoryDataAdapter, MemoryDAG, RecallConfig, SelfMemory, Sona, StopReason, build_memory, memory_document
+from util import todo_list, model_dump
 
 class Memoria:
     '''
@@ -24,38 +26,49 @@ class Memoria:
 
     def insert(self,
             memory: Memory,
-            sona: Optional[str] = None,
+            sona: Optional[UUID|str] = None,
             index: Optional[str] = None,
             importance: Optional[float] = None
-        ) -> CIDv1:
+        ) -> Optional[CIDv1]:
         '''
         Append a memory to the sona file.
         '''
+        md = memory.data
         rowid = self.db.insert_memory(
             memory.cid,
             memory.kind,
-            model_dump(memory.data),
+            md if isinstance(md, str) else md.model_dump(),
             memory.timestamp,
             importance
         )
         
-        self.db.link_memory_edges(rowid, memory.edges or {})
+        self.db.link_memory_edges(rowid, memory.edges or [])
         
         if index:
             self.db.insert_text_embedding(rowid, index)
             self.db.insert_text_fts(rowid, index)
         
         if sona:
-            sona_row = self.db.find_sona(sona)
-            self.db.link_sona(sona_row.rowid, rowid)
+            if sona_row := self.db.find_sona(sona):
+                self.db.link_sona(sona_row.rowid, rowid)
+            else:
+                return None
         
         self.db.commit()
         return memory.cid
     
-    def find_sona(self, sona: str):
-        return self.db.find_sona(sona)
+    def find_sona(self, sona: UUID|str) -> Optional[Sona]:
+        if row := self.db.find_sona(sona):
+            return Sona(
+                uuid=UUID(bytes=row.uuid),
+                aliases=self.db.select_sona_aliases(row.rowid),
+                pending=self.db.get_incomplete_act(row.pending_id)
+                    if row.pending_id else None,
+                active=self.db.get_incomplete_act(row.active_id)
+                    if row.active_id else None
+            )
     
-    def build_subgraph(self, edges: dict[str, list[Edge]], budget: float=20) -> MemoryDAG:
+    def build_subgraph(self, edges: list[Edge], budget: float=20) -> MemoryDAG:
         '''
         Build a subgraph of memories.
         
@@ -69,62 +82,55 @@ class Memoria:
         bw: list[tuple[float, int, CIDv1]] = [] # [(score, rowid, cid)]
         fw: list[tuple[float, int, CIDv1]] = []
         
-        for label, es in edges.items():
-            for e in es:
-                score = e.weight
-                print("Score", score)
-                if score <= 0:
-                    break
-                
-                origcid = e.target
-                if (mr := self.db.select_memory_cid(origcid)) is None:
+        for e in edges:
+            score = e.weight
+            print("Score", score)
+            if score <= 0:
+                break
+            
+            origcid = e.target
+            if (mr := self.db.select_memory_cid(origcid)) is None:
+                continue
+
+            g.insert(origcid, mr.to_memory())
+
+            energy = score*budget
+
+            b = 0
+            for edge in self.db.backward_edges(mr.rowid):
+                dst, weight = edge.dst, edge.weight
+                assert dst.cid # Incomplete memories must not be referenced
+                dstcid = CIDv1(dst.cid)
+                if dstcid in g:
+                    if not g.has_edge(origcid, dstcid):
+                        g.add_edge(origcid, dstcid, weight)
                     continue
 
-                g.insert(origcid, mr.to_memory())
-
-                energy = score*budget
-
-                b = 0
-                for edge in self.db.backward_edges(mr.rowid):
-                    dst, label, weight = edge.dst, edge.label, edge.weight
-                    assert dst.cid # Incomplete memories must not be referenced
-                    dstcid = CIDv1(dst.cid)
-                    if dstcid in g:
-                        if not g.has_edge(origcid, dstcid):
-                            g.add_edge(origcid, dstcid, DAGEdge(
-                                label=label,
-                                weight=weight
-                            ))
-                        continue
-
-                    b += weight
-                    if b >= energy:
-                        break
-                    
-                    bw.append((energy*weight, dst.rowid, CIDv1(dst.cid)))
+                b += weight
+                if b >= energy:
+                    break
                 
-                b = 0
-                for edge in self.db.forward_edges(mr.rowid):
-                    label, weight, src = edge.label, edge.weight, edge.src
-                    if not src.cid:
-                        continue
-                    dstcid = CIDv1(src.cid)
-                    if dstcid in g:
-                        if not g.has_edge(dstcid, origcid):
-                            g.add_edge(dstcid, origcid, DAGEdge(
-                                label=label,
-                                weight=weight
-                            ))
-                        continue
+                bw.append((energy*weight, dst.rowid, CIDv1(dst.cid)))
+            
+            b = 0
+            for edge in self.db.forward_edges(mr.rowid):
+                weight, src = edge.weight, edge.src
+                if not src.cid:
+                    continue
+                dstcid = CIDv1(src.cid)
+                if dstcid in g:
+                    if not g.has_edge(dstcid, origcid):
+                        g.add_edge(dstcid, origcid, weight)
+                    continue
 
-                    if not src.importance:
-                        break
-                    
-                    b += src.importance
-                    if b >= energy:
-                        break
-                    
-                    fw.append((energy*src.importance, src.rowid, CIDv1(src.cid)))
+                if not src.importance:
+                    break
+                
+                b += src.importance
+                if b >= energy:
+                    break
+                
+                fw.append((energy*src.importance, src.rowid, CIDv1(src.cid)))
         
         # Note: These feel so similar, maybe there's a way to reduce boilerplate?
 
@@ -133,7 +139,7 @@ class Memoria:
         for energy, src_id, srccid in todo_list(bw):
             b = 0
             for edge in self.db.backward_edges(src_id):
-                dst, label, weight = edge.dst, edge.label, edge.weight
+                dst, weight = edge.dst, edge.weight
                 b += weight
                 if b >= energy:
                     break
@@ -142,10 +148,7 @@ class Memoria:
                 dstcid = CIDv1(dst.cid)
 
                 g.insert(srccid, dst.to_memory())
-                g.add_edge(srccid, dstcid, DAGEdge(
-                    label=label,
-                    weight=weight
-                ))
+                g.add_edge(srccid, dstcid, weight)
 
                 bw.append((energy*weight, dst.rowid, dstcid))
         
@@ -156,7 +159,7 @@ class Memoria:
         for energy, dst_id, dstcid in todo_list(fw):
             b = 0
             for edge in self.db.forward_edges(dst_id):
-                label, weight, src = edge.label, edge.weight, edge.src
+                weight, src = edge.weight, edge.src
                 b += (imp := src.importance or 0)
                 if b >= energy:
                     break
@@ -165,18 +168,15 @@ class Memoria:
                 srccid = CIDv1(src.cid)
 
                 g.insert(srccid, src.to_memory())
-                g.add_edge(srccid, dstcid, DAGEdge(
-                    label=label,
-                    weight=weight
-                ))
+                g.add_edge(srccid, dstcid, weight)
 
                 fw.append((energy*imp, dst_id, dstcid))
         print(g)
         return g
 
     def act_push(self,
-            sona: str,
-            prompts: dict[str, list[Edge]] # label: [edge]
+            sona: UUID|str,
+            prompts: list[Edge]
         ) -> Optional[UUID]:
         '''
         Push prompts to the sona for processing. Return the receiving
@@ -184,7 +184,9 @@ class Memoria:
         '''
         try:
             # Find or create the sona
-            sona_row = self.db.find_sona(sona)
+            if (sona_row := self.db.find_sona(sona)) is None:
+                # No such sona (UUID)
+                return None
             
             # Figure out where it's going
             
@@ -236,7 +238,9 @@ class Memoria:
         pending thread.
         '''
         # Find or stage the active thread
-        sona_row = self.db.find_sona(sona)
+        if (sona_row := self.db.find_sona(sona)) is None:
+            return None
+        
         if act := self.db.get_act_active(sona_row.rowid):
             memory_id = act.memory_id
         else: # No active thread, check for pending
@@ -246,12 +250,12 @@ class Memoria:
         
         # We used the incomplete memory's edges to store prompts, only now
         #  do we actually run recall on them.
-        edges: dict[str, list[Edge]] = defaultdict(list)
+        edges: list[Edge] = []
         for e in self.db.backward_edges(memory_id):
             prompt = memory_document(e.dst.to_memory())
             for row, score in self.db.recall(sona, prompt, timestamp, config):
                 if cid := row.cid:
-                    edges[e.label].append(Edge(
+                    edges.append(Edge(
                         target=CIDv1(cid),
                         weight=e.weight*score
                     ))
@@ -259,7 +263,7 @@ class Memoria:
         return self.build_subgraph(edges)
 
     def act_stream(self,
-            sona: str,
+            sona: UUID|str,
             delta: Optional[str],
             model: Optional[str]=None,
             stop_reason: Optional[StopReason] = None
@@ -310,24 +314,20 @@ class Memoria:
 
     def recall(self,
             sona: Optional[str],
-            prompt: str,
+            prompt: Optional[str],
             timestamp: Optional[float]=None,
             config: Optional[RecallConfig]=None,
-            include: Optional[dict[str, list[Edge]]]=None
+            include: Optional[list[CIDv1]]=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
         try:
-            edges: dict[str, list[Edge]] = defaultdict(list, {
-                label: es.copy()
-                    for label, es in (include or {}).items()
-            })
+            edges: list[Edge] = []
             for row, score in self.db.recall(sona, prompt, timestamp, config):
                 if cid := row.cid:
-                    edges[""].append(Edge(
+                    edges.append(Edge(
                         weight=score,
                         target=CIDv1(cid)
                     ))
-            print(edges)
             return self.build_subgraph(edges)
         except Exception:
             import traceback

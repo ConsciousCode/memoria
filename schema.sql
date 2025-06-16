@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE TABLE IF NOT EXISTS edges (
     src_id INTEGER REFERENCES memories(rowid) ON DELETE CASCADE,
     dst_id INTEGER REFERENCES memories(rowid) ON DELETE CASCADE,
-    label TEXT NOT NULL,
     weight REAL NOT NULL DEFAULT 1.0,
 
     PRIMARY KEY (src_id, label)

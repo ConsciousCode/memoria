@@ -15,7 +15,7 @@ import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
-from models import ACThread, Edge, FileMemory, Memory, MemoryKind, OtherMemory, RecallConfig, SelfMemory, TextMemory, build_memory
+from models import ACThread, Edge, FileMemory, IncompleteACThread, Memory, MemoryDataAdapter, MemoryKind, OtherMemory, RecallConfig, SelfMemory, TextMemory, build_memory
 from util import classproperty, finite, json_t
 
 nomic_text = TextEmbedding(
@@ -92,7 +92,6 @@ class MemoryRow(BaseModel):
 class EdgeRow(BaseModel):
     src_id: MemoryRow.PrimaryKey
     dst_id: MemoryRow.PrimaryKey
-    label: str
     weight: float
 
 class SonaRow(BaseModel):
@@ -135,11 +134,9 @@ class ACThreadRow(BaseModel):
 
 class BackwardEdge(BaseModel):
     dst: MemoryRow
-    label: str
     weight: float
 
 class ForwardEdge(BaseModel):
-    label: str
     weight: float
     src: MemoryRow
 
@@ -211,13 +208,10 @@ class Database:
             raise ValueError(f"Memory with rowid {rowid} already has a CID: {memory.cid}")
         
         # Build the CID from the memory data
-        edges: dict[str, list[Edge]] = defaultdict(list)
+        edges: dict[CIDv1, float] = {}
         for edge in self.backward_edges(rowid):
             if cid := edge.dst.cid:
-                edges[edge.label].append(Edge(
-                    weight=edge.weight,
-                    target=CIDv1(cid)
-                ))
+                edges[CIDv1(cid)] = edge.weight
             else:
                 raise ValueError(
                     f"Memory with rowid {rowid} has an edge to a memory without a CID: {edge.dst.rowid}"
@@ -261,7 +255,7 @@ class Database:
         return act
     
     def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory]:
-        '''Lookup an IPLD memory object by CID.'''
+        '''Lookup an IPLD memory object by CID, returning its IPLD model.'''
         cur = self.cursor(MemoryRow.factory)
         mem: Optional[MemoryRow] = cur.execute("""
             SELECT cid, timestamp, kind, data, importance
@@ -273,19 +267,16 @@ class Database:
         
         cur = self.cursor(EdgeRow)
         cur.execute("""
-            SELECT src_id, dst_id, label, weight
+            SELECT dst.cid, weight
             FROM edges
+                JOIN memories dst ON dst.rowid = edges.dst_id
             WHERE src_id = ?
         """, (mem.rowid,))
 
-        edges: dict[str, list[Edge]] = defaultdict(list)
-        for edge in cur:
-            edges[edge.label].append(Edge(
-                weight=edge.weight,
-                target=CIDv1(edge.dst_id)
-            ))
-        
-        m = build_memory(mem.kind, mem.data, mem.timestamp, edges)
+        m = build_memory(mem.kind, mem.data, mem.timestamp, {
+            CIDv1(dst): weight
+                for dst, weight in cur
+        })
         if m.cid != cid:
             raise ValueError(f"Memory CID {m.cid} does not match requested CID {cid}")
         
@@ -294,7 +285,7 @@ class Database:
     def lookup_ipld_act(self, cid: CIDv1) -> Optional[ACThread]:
         '''Lookup an IPLD act thread by CID.'''
         cur = self.cursor()
-        row = cur.execute("""
+        row = cur.execute("""pmem.rowid
             SELECT s.cid, m.cid, p.cid
             FROM acthreads act
                 JOIN sonas s ON s.rowid = act.sona_id
@@ -326,29 +317,35 @@ class Database:
             #or self.lookup_sona(cid)
         )
 
-    def find_sona(self, name: str):
+    def find_sona(self, name: UUID|str):
         '''Find or create the sona closest to the given name.'''
 
         cur = self.cursor()
 
-        try:
-            u = str(UUID(name))
-        except ValueError:
-            u = name[5:] if name.startswith("uuid:") else None
-
-        if u:
+        if isinstance(name, UUID):
             cur.execute("""
                 SELECT rowid, uuid, active_id, pending_id
                 FROM sonas
                 WHERE uuid = ?
-            """, (UUID(u).bytes,))
-        else:
-            cur.execute("""
-                SELECT rowid, uuid, active_id, pending_id
-                FROM sona_aliases
-                    JOIN sonas ON sonas.rowid = sona_aliases.sona_id
-                WHERE name = ?
-            """, (name,))
+            """, (name.bytes,))
+
+            if row := cur.fetchone():
+                rowid, uuid, active_id, pending_id = row
+                return SonaRow(
+                    rowid=rowid,
+                    uuid=uuid,
+                    active_id=active_id,
+                    pending_id=pending_id
+                )
+            else:
+                return None
+        
+        cur.execute("""
+            SELECT rowid, uuid, active_id, pending_id
+            FROM sona_aliases
+                JOIN sonas ON sonas.rowid = sona_aliases.sona_id
+            WHERE name = ?
+        """, (name,))
         
         if row := cur.fetchone():
             rowid, uuid, active_id, pending_id = row
@@ -391,6 +388,14 @@ class Database:
         """, (rowid, name))
         
         return SonaRow.factory(rowid, u.bytes, None, None)
+
+    def select_sona_aliases(self, rowid: int) -> list[str]:
+        '''Select all aliases for a sona by its rowid.'''
+        cur = self.cursor()
+        rows = cur.execute("""
+            SELECT name FROM sona_aliases WHERE sona_id = ?
+        """, (rowid,))
+        return [name for (name,) in rows]
 
     def select_act(self, rowid: int) -> Optional[ACThreadRow]:
         '''Select an act thread by its rowid.'''
@@ -440,6 +445,58 @@ class Database:
             SELECT rowid, cid, timestamp, kind, JSON(data), importance
             FROM memories WHERE cid = ?
         """, (cid.buffer,)).fetchone()
+
+    def ipld_memory_rowid(self, rowid: int) -> Optional[Memory]:
+        '''
+        Build a Memory object from a memory rowid. This will also fetch the
+        edges for the memory.
+        '''
+        if (memory := self.select_memory_rowid(rowid)) is None:
+            return None
+        
+        cur = self.cursor()
+        cur.execute("""
+            SELECT dst.cid, weight
+            FROM edges
+                JOIN memories dst ON dst.rowid = edges.dst_id
+            WHERE src_id = ?
+        """, (rowid,))
+        
+        return build_memory(memory.kind, memory.data, memory.timestamp, {
+            CIDv1(cid): weight
+                for cid, weight in cur
+        })
+
+    def get_incomplete_act(self, rowid: int) -> Optional[IncompleteACThread]:
+        '''Get the act thread for a sona and memory.'''
+        cur = self.cursor()
+        row = cur.execute("""
+            SELECT m.kind, m.data, m.timestamp, a2.cid
+            FROM acthreads a1
+                LEFT JOIN acthreads a2 ON a2.rowid = a1.prev_id
+                LEFT JOIN memories m ON m.rowid = a1.memory_id
+            WHERE sona_id = ? AND memory_id = ?
+        """, (rowid,)).fetchone()
+
+        if row is None:
+            return None
+        
+        kind, data, timestamp, prev = row
+        edges: dict[CIDv1, float] = {}
+        for edge in self.backward_edges(rowid):
+            if cid := edge.dst.cid:
+                edges[CIDv1(cid)] = edge.weight
+            else:
+                raise ValueError(
+                    f"Memory with rowid {rowid} has an edge to an incomplete memory: {edge.dst.rowid}"
+                )
+
+        return IncompleteACThread(
+            memory=build_memory(
+                kind, MemoryDataAdapter.validate_json(data), timestamp, edges
+            ),
+            prev=CIDv1(prev)
+        )
 
     def select_embedding(self, memory_id: int) -> Optional[ndarray]:
         cur = self.cursor()
@@ -580,20 +637,19 @@ class Database:
             ORDER BY rowid DESC LIMIT 1
         """, (sona_id,)).fetchone()
 
-    def link_memory_edges(self, rowid: int, edges: dict[str, list[Edge]]):
+    def link_memory_edges(self, rowid: int, edges: list[Edge]):
         '''
         Link the edges of a memory to the database. This is used when inserting
         a memory with edges that are already in the database.
         '''
         cur = self.cursor()
         cur.executemany("""
-            INSERT OR IGNORE INTO edges (src_id, dst_id, label, weight)
-            SELECT ?, rowid, ?, ?
+            INSERT OR IGNORE INTO edges (src_id, dst_id, weight)
+            SELECT ?, rowid, ?
             FROM memories m WHERE cid = ?
         """, (
-            (rowid, label, e.weight, e.target.buffer)
-                for label, dsts in edges.items()
-                    for e in dsts
+            (rowid, e.weight, e.target.buffer)
+                for e in edges
         ))
     
     def link_sona(self, sona_id: int, memory_id: int):
@@ -610,13 +666,13 @@ class Database:
     def backward_edges(self, src_id: int) -> Iterable[BackwardEdge]:
         '''
         Get all edges leading to the given memory, returning the source id
-        and the label and weight of the edge.
+        and weight of the edge.
         '''
         cur = self.cursor()
         cur.execute("""
             SELECT
                 m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance,
-                e.label, e.weight
+                e.weight
             FROM edges e JOIN memories m ON m.rowid = e.dst_id
             WHERE e.src_id = ?
             ORDER BY e.weight DESC
@@ -625,20 +681,19 @@ class Database:
         for row in cur:
             yield BackwardEdge(
                 dst=MemoryRow.factory(*row[:6]),
-                label=row[5],
                 weight=row[6]
             )
     
     def forward_edges(self, dst_id: int) -> Iterable[ForwardEdge]:
         '''
         Get all edges leading from the given memory, returning the destination id
-        and the label and weight of the edge.
+        and weight of the edge.
         '''
         cur = self.cursor()
         cur.execute("""
             SELECT
                 m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance,
-                e.label, e.weight
+                e.weight
             FROM edges e JOIN memories m ON m.rowid = e.src_id
             WHERE e.dst_id = ?
             ORDER BY m.importance DESC
@@ -646,21 +701,9 @@ class Database:
         
         for row in cur:
             yield ForwardEdge(
-                label=row[6],
-                weight=row[7],
+                weight=row[6],
                 src=MemoryRow.factory(*row[:6])
             )
-    
-    def edge(self, src_id: int, dst_id: int) -> Optional[tuple[str, float]]:
-        '''
-        Get the edge label and weight between two memories.
-        Returns None if no edge exists.
-        '''
-        cur = self.cursor()
-        return cur.execute("""
-            SELECT label, weight FROM edges
-            WHERE src_id = ? AND dst_id = ?
-        """, (src_id, dst_id)).fetchone()
 
     def recall(self,
             sona: Optional[str],

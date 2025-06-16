@@ -1,6 +1,8 @@
 from collections import defaultdict
 from functools import cached_property
 from typing import Annotated, Any, Iterable, Literal, Optional, Union, overload, override
+from uuid import UUID
+
 from pydantic import BaseModel, Field, PlainSerializer, TypeAdapter
 
 from graph import IGraph
@@ -48,15 +50,41 @@ class IPLDModel(BaseModel):
 
 class Edge(BaseModel):
     '''Edge from one memory to another.'''
-    weight: float
     target: CIDv1
+    weight: float
 
 class BaseMemory(IPLDModel):
     timestamp: Optional[float] = None
-    edges: dict[str, list[Edge]] = Field(
-        default_factory=lambda: defaultdict(list)
-    ) # label: [(edge, target), ...]
+    edges: list[Edge] = Field(
+        default_factory=list,
+        description="Edges to other memories."
+    )
     importance: Optional[float] = Field(exclude=True, default=None)
+
+    def edge(self, target: CIDv1) -> Optional[Edge]:
+        '''Get the edge to the target memory, if it exists.'''
+        
+        for edge in self.edges:
+            if edge.target == target:
+                return edge
+        return None
+    
+    def insert_edge(self, target: CIDv1, weight: float):
+        '''Insert an edge to the target memory with the given weight.'''
+        if self.edge(target) is not None:
+            raise ValueError(f"Edge to {target} already exists")
+        
+        self.edges.append(Edge(
+            target=target,
+            weight=weight
+        ))
+    
+    @cached_property
+    @override
+    def cid(self) -> CIDv1:
+        # Edges must be sorted by target CID to ensure deterministic ordering
+        self.edges.sort(key=lambda e: e.target)
+        return super().cid
 
 class SelfMemory(BaseMemory):
     class Data(BaseModel):
@@ -98,30 +126,32 @@ class FileMemory(BaseMemory):
     data: Data
 
 type Memory = Annotated[
-    Union[SelfMemory, OtherMemory, TextMemory, FileMemory],
+    SelfMemory | OtherMemory | TextMemory | FileMemory,
     Field(discriminator="kind")
 ]
 type MemoryData = SelfMemory.Data | OtherMemory.Data | TextMemory.Data | FileMemory.Data
 MemoryDataAdapter = TypeAdapter[MemoryData](MemoryData)
 
 @overload
-def build_memory(kind: Literal['self'], data: SelfMemory.Data, timestamp: Optional[float], edges: Optional[dict[str, list[Edge]]]=None) -> SelfMemory: ...
+def build_memory(kind: Literal['self'], data: SelfMemory.Data, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> SelfMemory: ...
 @overload
-def build_memory(kind: Literal['other'], data: OtherMemory.Data, timestamp: Optional[float], edges: Optional[dict[str, list[Edge]]]=None) -> OtherMemory: ...
+def build_memory(kind: Literal['other'], data: OtherMemory.Data, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> OtherMemory: ...
 @overload
-def build_memory(kind: Literal['text'], data: TextMemory.Data, timestamp: Optional[float], edges: Optional[dict[str, list[Edge]]]=None) -> TextMemory: ...
+def build_memory(kind: Literal['text'], data: TextMemory.Data, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> TextMemory: ...
 @overload
-def build_memory(kind: Literal['file'], data: FileMemory.Data, timestamp: Optional[float], edges: Optional[dict[str, list[Edge]]]=None) -> FileMemory: ...
+def build_memory(kind: Literal['file'], data: FileMemory.Data, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> FileMemory: ...
 @overload
-def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float], edges: Optional[dict[str, list[Edge]]]=None) -> Memory: ...
+def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> Memory: ...
 
-def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float]=None, edges: Optional[dict[str, list[Edge]]]=None) -> Memory:
+def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float]=None, edges: Optional[dict[CIDv1, float]]=None) -> Memory:
     '''Build a memory object from the given data.'''
     args = {
         "data": data,
         "timestamp": timestamp
     }
-    if edges: args['edges'] = edges
+    if edges: args['edges'] = [
+        Edge(target=k, weight=v) for k, v in edges.items()
+    ]
     match kind:
         case "self": return SelfMemory(**args)
         case "other": return OtherMemory(**args)
@@ -138,10 +168,30 @@ def memory_document(memory: Memory) -> str:
         case "file": return memory.data.content
         case _: raise ValueError(f"Unknown memory kind: {memory.kind}")
 
-def model_dump(obj: Any) -> Any:
-    try: return obj.model_dump()
-    except AttributeError:
-        return obj
+class IncompleteACThread(IPLDModel):
+    '''A thread of memories in the agent's context.'''
+    memory: Memory # Memory is incomplete so it can't be referenced by CID
+    prev: Optional[CIDv1] = None
+
+class Sona(BaseModel):
+    '''
+    Sona model for returning from memory queries. It is not immutable and
+    is thus referred to by UUID rather than CID.
+    '''
+    uuid: UUID = Field(
+        description="Unique identifier for the Sona."
+    )
+    aliases: list[str] = Field(
+        description="List of aliases for the Sona."
+    )
+    active: Optional[IncompleteACThread] = Field(
+        default=None,
+        description="Active thread for the Sona, if any."
+    )
+    pending: Optional[IncompleteACThread] = Field(
+        default=None,
+        description="Pending thread for the Sona, if any."
+    )
 
 class ACThread(IPLDModel):
     '''A thread of memories in the agent's context.'''
@@ -149,12 +199,7 @@ class ACThread(IPLDModel):
     memory: CIDv1
     prev: Optional[CIDv1] = None
 
-class DAGEdge(BaseModel):
-    '''Edge for use in graph operations.'''
-    label: str
-    weight: float
-
-class MemoryDAG(IGraph[CIDv1, DAGEdge, Memory, Memory]):
+class MemoryDAG(IGraph[CIDv1, float, Memory, Memory]):
     '''IPLD data model for memories implementing the IGraph interface.'''
     @override
     def _node(self, value: Memory) -> Memory:
@@ -174,24 +219,23 @@ class MemoryDAG(IGraph[CIDv1, DAGEdge, Memory, Memory]):
         return node
     
     @override
-    def _edges(self, node: Memory) -> Iterable[tuple[CIDv1, DAGEdge]]:
-        for label, edges in node.edges.items():
-            for edge in edges:
-                yield edge.target, DAGEdge(label=label, weight=edge.weight)
+    def _edges(self, node: Memory) -> Iterable[tuple[CIDv1, float]]:
+        for edge in node.edges:
+            yield edge.target, edge.weight
         return node.edges
 
     @override
-    def _add_edge(self, src: Memory, dst: CIDv1, edge: DAGEdge):
-        src.edges[edge.label].append(Edge(
-            weight=edge.weight,
-            target=dst
+    def _add_edge(self, src: Memory, dst: CIDv1, edge: float):
+        src.edges.append(Edge(
+            target=dst,
+            weight=edge
         ))
     
     @override
-    def _pop_edge(self, src: Memory, dst: CIDv1) -> Optional[DAGEdge]:
-        for label, edges in src.edges.items():
-            for i, edge in enumerate(edges):
-                if edge.target == dst:
-                    del edges[i]
-                    return DAGEdge(label=label, weight=edge.weight)
+    def _pop_edge(self, src: Memory, dst: CIDv1) -> Optional[float]:
+        edges = src.edges
+        for i, edge in enumerate(edges):
+            if edge.target == dst:
+                del edges[i]
+                return edge.weight
         return None

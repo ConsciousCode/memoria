@@ -137,6 +137,11 @@ class CID:
             self.multihash == other.multihash
         )
     
+    def __lt__(self, other: Any) -> bool:
+        if not isinstance(other, CID):
+            return NotImplemented
+        return self.buffer < other.buffer
+    
     def __hash__(self):
         return hash(self.buffer)
     
@@ -256,14 +261,18 @@ class CIDv0(CID):
 
     CODEC = 'dag-pb'
 
-    def __new__(cls, data: str|bytes, /) -> 'CIDv0':
-        self = super().__new__(cls, data)
-        if isinstance(self, CIDv0):
-            return self
+    def __new__(cls, data: 'str|bytes|Multihash|CIDv0', /) -> 'CIDv0':
+        if isinstance(data, Multihash):
+            return super().__new__(cls, 0, "dag-pb", data.buffer)
+        else:
+            self = super().__new__(cls, data)
+            if isinstance(self, CIDv0):
+                return self
         raise TypeError(f"Expected CIDv0, got {type(self).__name__}")
     
-    def __init__(self, data: str|bytes|Multihash, /):
+    def __init__(self, data: 'str|bytes|Multihash|CIDv0', /):
         match data:
+            case CIDv0(): return
             case Multihash():
                 if data.function != 'base58btc':
                     raise ValueError(f'CIDv0 requires base58btc multihash, got {data.function}')
@@ -274,9 +283,9 @@ class CIDv0(CID):
             case str(): super().__init__(base58.b58decode(data))
             case _:
                 raise TypeError(f"CIDv0 expected str, bytes, or Multihash, got {type(data).__name__}")
-    
+
     def __repr__(self):
-        return f"CIDv0({self.encode()!r})"
+        return f"CIDv0({self.multihash!r})"
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -333,7 +342,7 @@ class CIDv1(CID):
     """ CID version 1 object """
 
     @overload
-    def __new__(cls, data: str|bytes, /) -> Self: ...
+    def __new__(cls, data: 'str|bytes|CIDv1', /) -> Self: ...
     @overload
     def __new__(cls, /, codec: Codec, multihash: str|bytes) -> Self: ...
 
@@ -344,15 +353,18 @@ class CIDv1(CID):
         raise TypeError(f"Expected CIDv1, got CIDv0")
 
     @overload
-    def __init__(self, data: str|bytes, /): ...
+    def __init__(self, data: 'str|bytes|CIDv1', /): ...
     @overload
-    def __init__(self, codec: Codec, multihash: str|bytes): ...
+    def __init__(self, codec: Codec, multihash: str|bytes|Multihash): ...
     
-    def __init__(self, codec: str|bytes, multihash: Optional[str|bytes] = None):
+    def __init__(self, codec: 'str|bytes|CIDv1', multihash: Optional[str|bytes|Multihash] = None):
         """
         :param codec: codec for the CID
         :param multihash: multihash for the CID, if not provided, it is cidexpected that `codec` is a multibase encoded string
         """
+        if isinstance(codec, CIDv1):
+            return
+
         if multihash is None:
             # "codec" is actually the entire CID
             if isinstance(codec, str):
@@ -366,10 +378,9 @@ class CIDv1(CID):
             if isinstance(multihash, str):
                 multihash = multibase.decode(multihash)
             super().__init__(CID.build(1, cast(Codec, codec), multihash))
-            #multicodec.add_prefix(codec, multihash))
 
     def __repr__(self):
-        return f"CIDv1({multibase.encode('base32', self.buffer)!r})"
+        return f"CIDv1({self.codec!r}, {self.multihash!r})"
 
     @classmethod    
     def __get_pydantic_core_schema__(
@@ -441,7 +452,7 @@ class CIDv1(CID):
     @override
     def multihash(self):
         """Multihash for the CID, without multibase prefix."""
-        return Multihash(multicodec.remove_prefix(self.buffer))
+        return Multihash(multicodec.remove_prefix(self.buffer[1:]))
 
     @override
     def encode(self, encoding: multibase.Encoding='base32') -> str:

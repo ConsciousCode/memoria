@@ -1,8 +1,10 @@
 import json
-from typing import Callable, Iterable, Mapping, Optional, Protocol, Self, Sequence, TypeVar
+from typing import Callable, Iterable, Mapping, Optional, Protocol, Self, Sequence, TypeVar, overload
 import re
 from functools import wraps
 from heapq import heappop
+
+from pydantic import BaseModel
 
 from ipld.cid import CID
 
@@ -10,6 +12,16 @@ class JSONStructure(Protocol):
     def __json__(self) -> "json_t": ...
 
 type json_t = JSONStructure|Mapping[str, json_t]|Sequence[json_t]|str|int|float|bool|None
+
+@overload
+def model_dump(obj: BaseModel) -> json_t: ...
+@overload
+def model_dump[T](obj: T) -> T: ...
+
+def model_dump(obj):
+    try: return obj.model_dump()
+    except AttributeError:
+        return obj
 
 def _fattr(x: json_t) -> str:
     if isinstance(x, str) and re.match(r"""[\s'"=</>&;]""", x):
