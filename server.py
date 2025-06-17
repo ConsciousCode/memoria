@@ -3,36 +3,39 @@ from datetime import datetime
 import inspect
 import json
 from typing import Annotated, Iterable, Literal, Optional
-import asyncio
 from uuid import UUID
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
+from fastmcp.exceptions import ResourceError, ToolError
 from mcp import SamplingMessage
 from mcp.types import ModelPreferences, PromptMessage, TextContent
 from fastmcp import Context, FastMCP
 from fastmcp.prompts.prompt import Message
 from pydantic import BaseModel, Field
-from starlette.exceptions import HTTPException
 
+from ipld import dagcbor_marshal
 from ipld.cid import CIDv1
 
 from db import Edge
 from memoria import Database, Memoria
-from models import Memory, MemoryDAG, RecallConfig, SelfMemory, StopReason
+from models import Memory, MemoryDAG, OtherMemory, RecallConfig, SelfMemory, StopReason
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
+    global gmemoria
     with Database("private/memoria.db", "files") as db:
-        yield Memoria(db)
+        yield (gmemoria := Memoria(db))
 
-app = FastAPI()
 mcp = FastMCP("memoria",
     """Coordinates a "sona" representing a cohesive identity and memory.""",
     lifespan=lifespan,
     #log_level="DEBUG"
 )
-
-app.mount("/mcp", mcp.sse_app())
+mcp_app = mcp.http_app()
+app = FastAPI(lifespan=mcp_app.lifespan)
+ipfs = FastAPI()
+app.mount("/ipfs", ipfs)
+app.mount("", mcp_app)
 
 def mcp_context(ctx: Context) -> Memoria:
     '''Get memoria from the FastAPI context.'''
@@ -40,54 +43,51 @@ def mcp_context(ctx: Context) -> Memoria:
 
 ## IPFS trustless gateway
 
-ipfs = FastAPI()
-app.mount("/ipfs", ipfs)
-
 @ipfs.get("/bafkqaaa")
 def get_ipfs_empty():
     '''Empty block for PING'''
-    return b''
+    return Response()
 
 @ipfs.get("/{path:path}")
 def get_ipfs(path: str, request: Request):
-    pass
+    cid = CIDv1(path)
+    if ob := gmemoria.lookup_memory(cid):
+        return dagcbor_marshal(ob)
+    if ob := gmemoria.lookup_act(cid):
+        return dagcbor_marshal(ob)
+    # ipfs_api.lookup(cid) # TODO
+    return Response(
+        status_code=404,
+        content=f"Memory or ACT not found for CID {cid}"
+    )
 
 ## MCP
 
 @mcp.resource("ipfs://{cid}")
 def ipfs_resource(ctx: Context, cid: CIDv1):
     '''IPFS resource handler.'''
-    try:
-        memoria = mcp_context(ctx)
-        if (m := memoria.lookup_memory(cid)) is None:
-            return {"error": "Memory not found"}, 404
-        
-        if m.kind != "file":
-            return {"error": "Memory is not a file"}, 400
-        
-        return m.data.content
-    except Exception as e:
-        raise HTTPException(500, detail=str(e))
+    memoria = mcp_context(ctx)
+    if (m := memoria.lookup_memory(cid)) is None:
+        raise ResourceError("Memory not found")
+    
+    if m.kind != "file":
+        raise ResourceError("Memory is not a file")
+    
+    return m.data.content
 
 @mcp.resource("memoria://sona/{uuid}")
 def sona_resource(ctx: Context, uuid: UUID):
     '''Sona resource handler.'''
-    try:
-        if m := mcp_context(ctx).find_sona(uuid):
-            return m
-        return {"error": "Sona not found"}, 404
-    except Exception as e:
-        raise HTTPException(500, detail=str(e))
+    if m := mcp_context(ctx).find_sona(uuid):
+        return m
+    raise ResourceError("Sona not found")
 
 @mcp.resource("memoria://memory/{cid}")
 def memory_resource(ctx: Context, cid: str):
     '''Memory resource handler.'''
-    try:
-        if m := mcp_context(ctx).lookup_memory(CIDv1(cid)):
-            return m
-        return {"error": "Memory not found"}, 404
-    except Exception as e:
-        raise HTTPException(500, detail=str(e))
+    if m := mcp_context(ctx).lookup_memory(CIDv1(cid)):
+        return m
+    raise ResourceError("Memory not found")
 
 @mcp.tool(
     annotations=dict(
@@ -108,14 +108,10 @@ def insert_memory(
         index: Annotated[
             Optional[str],
             Field(description="Plaintext indexing field for the memory if available.")
-        ] = None,
-        importance: Annotated[
-            Optional[float],
-            Field(description="Initial importance of the memory [0-1] biasing how easily it's recalled.")
         ] = None
     ):
     '''Insert a new memory into the sona.'''
-    return mcp_context(ctx).insert(memory, sona, index, importance)
+    return mcp_context(ctx).insert(memory, sona, index)
 
 @mcp.tool(
     annotations=dict(
@@ -139,7 +135,7 @@ def act_push(
     '''
     if u := mcp_context(ctx).act_push(sona, memories):
         return u
-    return {"error": "Sona not found or prompt memory not found."}, 404
+    raise ToolError("Sona not found or prompt memory not found.")
 
 @mcp.tool(
     annotations=dict(
@@ -205,10 +201,9 @@ def recall(
     Recall memories related to the prompt, including relevant included memories
     and their dependencies.
     '''
-    memoria = mcp_context(ctx)
     return {
         cid: mem
-            for cid, mem in memoria.recall(
+            for cid, mem in mcp_context(ctx).recall(
                 sona,
                 prompt,
                 timestamp,
@@ -224,7 +219,7 @@ class ConvoMessage(BaseModel):
 def build_tags(tags: list[str], timestamp: Optional[datetime]) -> str:
     if timestamp:
         tags.append(timestamp.replace(microsecond=0).isoformat())
-    return f"[{'\t'.join(tags)}]"
+    return f"[{'\t'.join(tags)}]\t"
 
 def memory_to_message(ref: int, refs: list[int], memory: Memory, final: bool=False) -> ConvoMessage:
     '''Render memory for the context.'''
@@ -336,24 +331,30 @@ def act_next(
 async def annotate_edges(
         ctx: Context,
         messages: list[str|SamplingMessage]
-    ) -> dict[int, float]:
+    ) -> tuple[dict[int, float], dict[str, float]]:
     '''Use sampling with a faster model to annotate which memories are connected and by how much.'''
     result = await ctx.sample(
         messages,
         system_prompt=inspect.cleandoc("""
-            This task is edge annotation. Given the conversational memory up to the [final] tag and the agent's response, which memories were relevant to that response? Irrelevant memories are ignored. Memories which contributed are ranked 1-10:
-            1. Trivial
-            2. Minor
-            3. Somewhat relevant
-            4. Relevant
-            5. Very relevant
-            6. Highly relevant
-            7. Crucial
-            8. Critical
-            9. Essential
-            10. Absolutely essential
+            This task is annotation.
+            
+            Given the conversational memory up to the [final] tag and the agent's response, which memories were relevant to that response? Irrelevant memories are ignored. Memories which contributed are ranked 1-10 with 1 being a trivial reference and 10 meaning the response would not be possible without it.
 
-            The process answers with only a JSON object mapping memory indices to their relevance score, e.g. {"2": 10, "8": 5}. The indices are the same as in the conversation, marked with ref:(index).
+            Additionally, the response itself is annotated for structurally recognizable importance with limited broader context. The dimensions of importance are novelty, emotional intensity, future relevance, saliency, and personal relevance. These are scored 0-10.
+
+            The process answers with only a JSON object following this schema:
+            {
+                "relevance": {
+                    [index]: score
+                },
+                "importance": {
+                    "novelty": score,
+                    "intensity": score,
+                    "future": score,
+                    "personal": score
+                }
+            }
+            "relevance" maps memory indices (quoted, to be JSON-compliant) to their relevance score, e.g. {"2": 10, "8": 5}. The indices are the same as in the conversation, marked with ref:(index). "importance" scores the importance of the agent's response. 
         """),
         temperature=0,
         max_tokens=len(str(len(messages))) * 3,
@@ -367,13 +368,21 @@ async def annotate_edges(
         raise ValueError(
             f"Edge annotation response must be text, got {type(result)}: {result}"
         )
-    
+    print("Annotation", result.text)
     try:
-        edges = json.loads(result.text)
-        if not isinstance(edges, dict):
-            raise ValueError(f"Edge annotation response must be a JSON object, got {type(edges)}: {edges}")
+        result = json.loads(result.text)
+        if not isinstance(result, dict):
+            raise ValueError(f"Edge annotation response must be a JSON object, got {type(result)}: {result}")
+        
+        importance = result.get("importance", {})
         return {
-            int(k): v/10 for k, v in edges.items()
+            int(k): v
+                for k, v in result.get("relevance", {}).items()
+        }, {
+            "novelty": importance.get("novelty", 0)/10,
+            "intensity": importance.get("intensity", 0)/10,
+            "future": importance.get("future", 0)/10,
+            "personal": importance.get("personal", 0)/10
         }
     except json.JSONDecodeError as e:
         raise ValueError(f"Edge annotation response is not valid JSON: {e}") from e
@@ -443,13 +452,15 @@ async def chat(
                 content=TextContent(type="text", text=m.content)
             )
         )
+    lastref = len(refs) + 1
     if message:
         messages.append(
             build_tags(
-                ["final", f"ref:{len(refs) + 1}"],
+                ["final", f"ref:{lastref}"],
                 timestamp=dt
             ) + message
         )
+    print("First", messages)
 
     result = await ctx.sample(
         messages,
@@ -462,25 +473,41 @@ async def chat(
         raise ValueError(
             f"Chat response must be text, got {type(result)}: {result}"
         )
+    print("Result", result)
     
     messages.append(result.text)
-    edges = await annotate_edges(ctx, messages)
+    rel, imp = await annotate_edges(ctx, messages)
+    importance = sum(x**2 for x in imp.values()) / sum(imp.values()) / 10
 
+    # Now that there's no risk of interruption, insert the message
+    if message:
+        refs[lastref] = memoria.insert(
+            OtherMemory(
+                timestamp=ts,
+                data=OtherMemory.Data(
+                    content=message
+                ),
+                importance=importance*rel.get(lastref, 0),
+            ),
+            sona,
+            index=message
+        )
+
+    # Insert the response
     memoria.insert(
         SelfMemory(
-            timestamp=ts,
-            kind="self",
+            timestamp=datetime.now().timestamp(),
             data=SelfMemory.Data(
                 parts=[SelfMemory.Data.Part(content=result.text)]
             ),
             edges=[
                 Edge(target=refs[ref], weight=weight)
-                    for ref, weight in edges.items()
-            ]
+                    for ref, weight in rel.items()
+            ],
+            importance=importance
         ),
         sona=sona,
-        index=result.text,
-        ### Importance? By what measure? Need to sample that too
+        index=result.text
     )
 
     return result
@@ -565,23 +592,16 @@ async def query(
         model_preferences=model_preferences
     )
 
-async def main():
-    async with asyncio.TaskGroup() as tg:
-        tasks = [
-            tg.create_task(task) for task in [
-                mcp.run_sse_async(),
-                #mcp.run_stdio_async()
-            ]
-        ]
-        try:
-            await asyncio.gather(*tasks)
-        except BaseException:
-            for task in tasks:
-                task.cancel()
-            import traceback
-            import sys
-            traceback.print_exc()
-            print("Server stopped by user.", file=sys.stderr, flush=True)
+def main():
+    import uvicorn
+    
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=8000
+    )
+    server = uvicorn.Server(config)
+    server.run()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

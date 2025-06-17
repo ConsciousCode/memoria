@@ -1,11 +1,11 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, overload
 from uuid import UUID
 
 from ipld.cid import CIDv1
 
-from db import Database
-from models import Edge, Memory, MemoryDAG, RecallConfig, SelfMemory, Sona, StopReason, memory_document
+from db import Database, SonaRow
+from models import ACThread, Edge, Memory, MemoryDAG, RecallConfig, SelfMemory, Sona, StopReason, memory_document
 from util import todo_list
 
 class Memoria:
@@ -20,50 +20,55 @@ class Memoria:
     
     def lookup_memory(self, cid: CIDv1) -> Optional[Memory]:
         return self.db.lookup_ipld_memory(cid)
+    
+    def lookup_act(self, cid: CIDv1) -> Optional[ACThread]:
+        return self.db.lookup_ipld_act(cid)
 
     def insert(self,
             memory: Memory,
             sona: Optional[UUID|str] = None,
-            index: Optional[str] = None,
-            importance: Optional[float] = None
-        ) -> Optional[CIDv1]:
-        '''
-        Append a memory to the sona file.
-        '''
-        md = memory.data
-        rowid = self.db.insert_memory(
-            memory.cid,
-            memory.kind,
-            md if isinstance(md, str) else md.model_dump(),
-            memory.timestamp,
-            importance
-        )
-        
-        self.db.link_memory_edges(rowid, memory.edges or [])
-        
-        if index:
-            self.db.insert_text_embedding(rowid, index)
-            self.db.insert_text_fts(rowid, index)
-        
-        if sona:
-            if sona_row := self.db.find_sona(sona):
-                self.db.link_sona(sona_row.rowid, rowid)
-            else:
-                return None
-        
-        self.db.commit()
-        return memory.cid
-    
-    def find_sona(self, sona: UUID|str) -> Optional[Sona]:
-        if row := self.db.find_sona(sona):
-            return Sona(
-                uuid=UUID(bytes=row.uuid),
-                aliases=self.db.select_sona_aliases(row.rowid),
-                pending=self.db.get_incomplete_act(row.pending_id)
-                    if row.pending_id else None,
-                active=self.db.get_incomplete_act(row.active_id)
-                    if row.active_id else None
+            index: Optional[str] = None
+        ) -> CIDv1:
+        '''Append a memory to the sona file.'''
+        with self.db.transaction() as db:
+            md = memory.data
+            rowid = db.insert_memory(
+                memory.cid,
+                memory.kind,
+                md if isinstance(md, str) else md.model_dump(),
+                memory.timestamp,
+                memory.importance
             )
+            
+            db.link_memory_edges(rowid, memory.edges or [])
+            
+            if index:
+                db.insert_text_embedding(rowid, index)
+                db.insert_text_fts(rowid, index)
+            
+            if sona:
+                if sona_row := db.find_sona(sona):
+                    db.link_sona(sona_row.rowid, rowid)
+            
+            return memory.cid
+    
+    @overload
+    def find_sona(self, sona: UUID) -> Optional[Sona]: ...
+    @overload
+    def find_sona(self, sona: str) -> Sona: ...
+
+    def find_sona(self, sona: UUID|str) -> Optional[Sona]:
+        with self.db.transaction() as db:
+            if row := db.find_sona(sona):
+                return Sona(
+                    uuid=UUID(bytes=row.uuid),
+                    aliases=self.db.select_sona_aliases(row.rowid),
+                    pending=self.db.get_incomplete_act(row.pending_id)
+                        if row.pending_id else None,
+                    active=self.db.get_incomplete_act(row.active_id)
+                        if row.active_id else None
+                )
+            return None
     
     def build_subgraph(self, edges: list[Edge[CIDv1]], budget: float=20) -> MemoryDAG:
         '''
@@ -81,7 +86,6 @@ class Memoria:
         
         for e in edges:
             score = e.weight
-            print("Score", score)
             if score <= 0:
                 break
             
@@ -168,7 +172,7 @@ class Memoria:
                 g.add_edge(srccid, dstcid, weight)
 
                 fw.append((energy*imp, dst_id, dstcid))
-        print(g)
+        
         return g
 
     def act_push(self,
@@ -179,26 +183,26 @@ class Memoria:
         Push prompts to the sona for processing. Return the receiving
         sona's UUID.
         '''
-        try:
+        with self.db.transaction() as db:
             # Find or create the sona
-            if (sona_row := self.db.find_sona(sona)) is None:
+            if (sona_row := db.find_sona(sona)) is None:
                 # No such sona (UUID)
                 return None
             
             # Figure out where it's going
             
-            if pending_thread := self.db.get_act_pending(sona_row.rowid):
+            if pending_thread := db.get_act_pending(sona_row.rowid):
                 # Pending thread already exists, add to its context
                 response_id = pending_thread.memory_id
             else:
                 # No pending thread, we need to create one
                 prev_thread = ( # Previous thread to link to
-                    self.db.get_act_active(sona_row.rowid) or
-                    self.db.get_last_act(sona_row.rowid)
+                    db.get_act_active(sona_row.rowid) or
+                    db.get_last_act(sona_row.rowid)
                 )
 
                 # Create the incomplete memory to receive the response
-                response_id = self.db.insert_memory(
+                response_id = db.insert_memory(
                     cid=None,
                     kind="self",
                     data=None,
@@ -206,8 +210,8 @@ class Memoria:
                 )
 
                 # Create a new pending thread
-                self.db.update_sona_pending(sona_row.rowid,
-                    self.db.insert_act(
+                db.update_sona_pending(sona_row.rowid,
+                    db.insert_act(
                         cid=None,
                         sona_id=sona_row.rowid,
                         memory_id=response_id,
@@ -215,13 +219,9 @@ class Memoria:
                     )
                 )
             
-            self.db.link_memory_edges(response_id, prompts)
+            db.link_memory_edges(response_id, prompts)
 
             return UUID(bytes=sona_row.uuid)
-        except Exception:
-            import traceback
-            traceback.print_exc()
-            raise
     
     def act_next(self,
             sona: str,
@@ -234,30 +234,31 @@ class Memoria:
         Returns the rowid of the pending thread or None if there is no
         pending thread.
         '''
-        # Find or stage the active thread
-        if (sona_row := self.db.find_sona(sona)) is None:
-            return None
-        
-        if act := self.db.get_act_active(sona_row.rowid):
-            memory_id = act.memory_id
-        else: # No active thread, check for pending
-            if (memory_id := sona_row.pending_id) is None:
-                return None # No threads at all
-            self.db.sona_stage_active(sona_row.rowid)
-        
-        # We used the incomplete memory's edges to store prompts, only now
-        #  do we actually run recall on them.
-        edges: list[Edge[CIDv1]] = []
-        for e in self.db.backward_edges(memory_id):
-            prompt = memory_document(e.target.to_memory())
-            for row, score in self.db.recall(sona, prompt, timestamp, config):
-                if cid := row.cid:
-                    edges.append(Edge(
-                        target=CIDv1(cid),
-                        weight=e.weight*score
-                    ))
-        
-        return self.build_subgraph(edges)
+        with self.db.transaction() as db:
+            # Find or stage the active thread
+            if (sona_row := db.find_sona(sona)) is None:
+                return None
+            
+            if act := db.get_act_active(sona_row.rowid):
+                memory_id = act.memory_id
+            else: # No active thread, check for pending
+                if (memory_id := sona_row.pending_id) is None:
+                    return None # No threads at all
+                db.sona_stage_active(sona_row.rowid)
+            
+            # We used the incomplete memory's edges to store prompts, only now
+            #  do we actually run recall on them.
+            edges: list[Edge[CIDv1]] = []
+            for e in db.backward_edges(memory_id):
+                prompt = memory_document(e.target.to_memory())
+                for row, score in db.recall(sona, prompt, timestamp, config):
+                    if cid := row.cid:
+                        edges.append(Edge(
+                            target=CIDv1(cid),
+                            weight=e.weight*score
+                        ))
+            
+            return self.build_subgraph(edges)
 
     def act_stream(self,
             sona: UUID|str,
@@ -270,44 +271,44 @@ class Memoria:
         
         Returns a failure reason.
         '''
-        
-        if (sona_row := self.db.find_sona(sona)) is None:
-            return "sona not found"
-        
-        if (thread := self.db.get_act_active(sona_row.rowid)) is None:
-            # No active thread, check for pending
-            if (thread := self.db.get_act_pending(sona_row.rowid)) is None:
-                return "no active or pending thread"
+        with self.db.transaction() as db:
+            if (sona_row := db.find_sona(sona)) is None:
+                return "sona not found"
             
-            # Move pending to active as long as we're not ending immediately
-            if stop_reason is None:
-                self.db.sona_stage_active(sona_row.rowid)
-        
-        # Update the memory data
-        if (memory := self.db.select_memory_rowid(thread.memory_id)) is None:
-            return "thread memory not found"
-        
-        if memory.kind != "self":
-            return "thread memory is not a self memory"
-        
-        data = SelfMemory.Data.model_validate_json(memory.data)
-        last = data.parts[-1] if data.parts else None
-        if last and (model is None or last.model == model):
-            last.content += delta or ""
-        else:
-            data.parts.append(SelfMemory.Data.Part(
-                content=delta or "",
-                model=model
-            ))
-        
-        # Commit the updates
-        if stop_reason:
-            data.stop_reason = stop_reason
-            self.db.update_sona_active(sona_row.rowid, None)
-            self.db.finalize_memory(memory.rowid)
-            self.db.finalize_act(thread.rowid)
-        
-        self.db.update_memory_data(memory.rowid, data.model_dump_json())
+            if (thread := db.get_act_active(sona_row.rowid)) is None:
+                # No active thread, check for pending
+                if (thread := db.get_act_pending(sona_row.rowid)) is None:
+                    return "no active or pending thread"
+                
+                # Move pending to active as long as we're not ending immediately
+                if stop_reason is None:
+                    db.sona_stage_active(sona_row.rowid)
+            
+            # Update the memory data
+            if (memory := db.select_memory_rowid(thread.memory_id)) is None:
+                return "thread memory not found"
+            
+            if memory.kind != "self":
+                return "thread memory is not a self memory"
+            
+            data = SelfMemory.Data.model_validate_json(memory.data)
+            last = data.parts[-1] if data.parts else None
+            if last and (model is None or last.model == model):
+                last.content += delta or ""
+            else:
+                data.parts.append(SelfMemory.Data.Part(
+                    content=delta or "",
+                    model=model
+                ))
+            
+            # Commit the updates
+            if stop_reason:
+                data.stop_reason = stop_reason
+                db.update_sona_active(sona_row.rowid, None)
+                db.finalize_memory(memory.rowid)
+                db.finalize_act(thread.rowid)
+            
+            db.update_memory_data(memory.rowid, data.model_dump_json())
 
     def recall(self,
             sona: Optional[str],
@@ -317,16 +318,11 @@ class Memoria:
             include: Optional[list[CIDv1]]=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
-        try:
-            edges: list[Edge[CIDv1]] = []
-            for row, score in self.db.recall(sona, prompt, timestamp, config):
-                if cid := row.cid:
-                    edges.append(Edge(
-                        weight=score,
-                        target=CIDv1(cid)
-                    ))
-            return self.build_subgraph(edges)
-        except Exception:
-            import traceback
-            traceback.print_exc()
-            raise
+        edges: list[Edge[CIDv1]] = []
+        for row, score in self.db.recall(sona, prompt, timestamp, config):
+            if cid := row.cid:
+                edges.append(Edge(
+                    weight=score,
+                    target=CIDv1(cid)
+                ))
+        return self.build_subgraph(edges)

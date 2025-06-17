@@ -1,4 +1,5 @@
-from typing import Callable, Iterable, Optional, Protocol, cast
+from contextlib import contextmanager
+from typing import Callable, Iterable, Optional, Protocol, cast, overload
 import sqlite3
 import json
 from uuid import UUID
@@ -129,8 +130,11 @@ class ACThreadRow(BaseModel):
             prev_id=prev_id
         )
 
-with open("schema.sql", "r") as f:
-    SCHEMA = f.read()
+class CancelTransaction(Exception):
+    '''
+    Exception to raise to cancel a transaction. This will cause the transaction
+    to be rolled back and the database to be closed.
+    '''
 
 class Database:
     '''
@@ -142,6 +146,11 @@ class Database:
     must be used correctly to ensure that the database remains consistent. For
     instance, memories are inserted separately from their edges, but memories
     themselves have a `cid` which depends on those edges.
+
+    By default the Database only supports read operations to provide interface-
+    level safety wrt mutations outside of transactions. Write operations are
+    only exposed through the `DatabaseRW` subclass provided in the`transaction`
+    context manager.
     '''
 
     def __init__(self, db_path: str=":memory:", file_path: str="files"):
@@ -153,7 +162,8 @@ class Database:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
-        self.cursor().executescript(SCHEMA)
+        with open("schema.sql", "r") as f:
+            self.cursor().executescript(f.read())
         return self
     
     def __exit__(self, exc_type, exc_value, traceback):
@@ -162,82 +172,33 @@ class Database:
         del self.conn
         return False
     
-    def cursor[T](self, factory: Optional[Callable]=None):
+    def cursor[T](self, factory: Optional[Factory|Callable]=None):
         cur = self.conn.cursor()
         if factory:
-            cur.row_factory = lambda cur, row: row and factory(*row) # type: ignore
+            if f := getattr(factory, "factory", None):
+                cur.row_factory = lambda cur, row: row and f(*row)
+            else:
+                cur.row_factory = lambda cur, row: row and factory(*row) # type: ignore
         return cur
     
     def commit(self): self.conn.commit()
     def rollback(self): self.conn.rollback()
     def close(self): self.conn.close()
     
-    def file_lookup(self, mh: str, ext: str):
-        fn, x, yz, rest = mh[:2], mh[2], mh[3:5], mh[5:]
-        return f"{self.file_path}/{fn}/{x}/{yz}/{rest}{ext}"
-    
-    def index(self, memory_id: int, index: str):
-        '''Index a memory with a text embedding.'''
-        self.insert_text_embedding(memory_id, index)
-        self.insert_text_fts(memory_id, index)
-    
-    def finalize_memory(self, rowid: int) -> Memory:
+    @contextmanager
+    def transaction(self):
         '''
-        Finalize a memory by setting its CID and returning the memory object.
-        This is used after all edges have been linked to the memory.
+        Context manager for a transaction. This will automatically commit or
+        rollback the transaction depending on whether an exception was raised.
         '''
-        if (memory := self.select_memory_rowid(rowid)) is None:
-            raise ValueError(f"Memory with rowid {rowid} does not exist.")
-        
-        if memory.cid is not None:
-            raise ValueError(f"Memory with rowid {rowid} already has a CID: {memory.cid}")
-        
-        # Build the CID from the memory data
-        edges: dict[CIDv1, float] = {}
-        for edge in self.backward_edges(rowid):
-            if cid := edge.target.cid:
-                edges[CIDv1(cid)] = edge.weight
-            else:
-                raise ValueError(
-                    f"Memory with rowid {rowid} has an edge to a memory without a CID: {edge.target.rowid}"
-                )
-        
-        memory = build_memory(memory.kind, memory.data, memory.timestamp, edges)
-        cur = self.cursor()
-        cur.execute("""
-            UPDATE memories SET cid = ? WHERE rowid = ?
-        """, (memory.cid.buffer, rowid))
-        return memory
-    
-    def finalize_act(self, rowid: int) -> ACThread:
-        '''Finalize an ACT by setting its CID and returning it.'''
-
-        cur = self.cursor()
-        cur.execute("""
-            SELECT s.cid, m.cid, p.cid
-            FROM acthreads act
-                JOIN sonas s ON s.rowid = act.sona_id
-                JOIN memories m ON m.rowid = act.memory_id
-                LEFT JOIN acthreads p ON p.rowid = act.prev_id
-            WHERE act.rowid = ?
-        """, (rowid,))
-        if (row := cur.fetchone()) is None:
-            raise ValueError(f"ACT with rowid {rowid} does not exist.")
-        
-        s, m, p = row
-
-        act = ACThread(
-            sona=CIDv1(s),
-            memory=CIDv1(m),
-            prev=p and CIDv1(p)
-        )
-
-        cur.execute("""
-            UPDATE acthreads SET cid = ?
-            WHERE rowid = ?
-        """, (act.cid.buffer, rowid))
-
-        return act
+        try:
+            yield DatabaseRW._construct(self)
+            self.commit()
+        except CancelTransaction:
+            self.rollback()
+        except:
+            self.rollback()
+            raise
     
     def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory]:
         '''Lookup an IPLD memory object by CID, returning its IPLD model.'''
@@ -270,7 +231,7 @@ class Database:
     def lookup_ipld_act(self, cid: CIDv1) -> Optional[ACThread]:
         '''Lookup an IPLD act thread by CID.'''
         cur = self.cursor()
-        row = cur.execute("""pmem.rowid
+        row = cur.execute("""
             SELECT s.cid, m.cid, p.cid
             FROM acthreads act
                 JOIN sonas s ON s.rowid = act.sona_id
@@ -301,78 +262,6 @@ class Database:
             #or self.lookup_file(cid)
             #or self.lookup_sona(cid)
         )
-
-    def find_sona(self, name: UUID|str):
-        '''Find or create the sona closest to the given name.'''
-
-        cur = self.cursor()
-
-        if isinstance(name, UUID):
-            cur.execute("""
-                SELECT rowid, uuid, active_id, pending_id
-                FROM sonas
-                WHERE uuid = ?
-            """, (name.bytes,))
-
-            if row := cur.fetchone():
-                rowid, uuid, active_id, pending_id = row
-                return SonaRow(
-                    rowid=rowid,
-                    uuid=uuid,
-                    active_id=active_id,
-                    pending_id=pending_id
-                )
-            else:
-                return None
-        
-        cur.execute("""
-            SELECT rowid, uuid, active_id, pending_id
-            FROM sona_aliases
-                JOIN sonas ON sonas.rowid = sona_aliases.sona_id
-            WHERE name = ?
-        """, (name,))
-        
-        if row := cur.fetchone():
-            rowid, uuid, active_id, pending_id = row
-            return SonaRow(
-                rowid=rowid,
-                uuid=uuid,
-                active_id=active_id,
-                pending_id=pending_id
-            )
-
-        e, = nomic_text.embed(name)
-        ebs = e.tobytes()
-        cur.execute("""
-            SELECT rowid, uuid, active_id, pending_id
-            FROM sona_vss
-                JOIN sonas ON sonas.rowid = sona_vss.sona_id
-            WHERE embedding MATCH ? AND distance > 0.75 AND k = 1
-        """, (ebs,))
-        if row := cur.fetchone():
-            cur.execute("""
-                INSERT INTO sona_aliases (sona_id, name)
-                VALUES (?, ?)
-            """, (row[0], name))
-            return SonaRow.factory(*row)
-        
-        # Doesn't exist, create a new one.
-        
-        u = cast(UUID, uuid7())
-        cur.execute("INSERT INTO sonas (uuid) VALUES (?)", (u.bytes,))
-        if (rowid := cur.lastrowid) is None:
-            raise RuntimeError("Failed to insert sona")
-
-        # Don't need to deduplicate because we just created it and already
-        # know the embedding is far from any existing embedding.
-        cur.execute("""
-            INSERT INTO sona_vss (sona_id, embedding) VALUES (?, ?)
-        """, (rowid, ebs))
-        cur.execute("""
-            INSERT INTO sona_aliases (sona_id, name) VALUES (?, ?)
-        """, (rowid, name))
-        
-        return SonaRow.factory(rowid, u.bytes, None, None)
 
     def select_sona_aliases(self, rowid: int) -> list[str]:
         '''Select all aliases for a sona by its rowid.'''
@@ -502,114 +391,7 @@ class Database:
             JOIN memories m ON m.rowid = act.memory_id
             WHERE s.rowid = ?
         """, (sona_id,)).fetchall()
-
-    def insert_text_embedding(self, memory_id: int, index: str):
-        '''Insert a text embedding for a memory.'''
-        e, = nomic_text.embed(index)
-        cur = self.cursor()
-        # Deduplicate because sqlite-vec can't.
-        cur.execute("""
-            SELECT rowid FROM memory_vss
-            WHERE embedding = ?
-        """, (e,))
-        if cur.fetchone():
-            return
-        # Insert the embedding
-        cur.execute("""
-            INSERT INTO memory_vss (memory_id, embedding)
-            VALUES (?, ?)
-        """, (memory_id, e.tobytes()))
-
-    def insert_text_fts(self, memory_id: int, index: str):
-        '''Index a memory by inserting it into the full-text search index.'''
-        cur = self.cursor()
-        cur.execute("""
-            INSERT INTO memory_fts (rowid, content)
-            VALUES (?, ?)
-        """, (memory_id, index))
-
-    def insert_memory(self,
-            cid: Optional[CIDv1],
-            kind: MemoryKind,
-            data: json_t,
-            timestamp: Optional[float],
-            importance: Optional[float] = None
-        ) -> int:
-        c = cid and cid.buffer
-        cur = self.cursor()
-        cur.execute("""
-            INSERT OR IGNORE INTO memories
-            (cid, timestamp, kind, data, importance)
-            VALUES (?, ?, ?, JSONB(?), ?)
-        """, (c, timestamp, kind, json.dumps(data), importance))
-        
-        if not (rowid := cur.lastrowid):
-            # Memory already exists
-            rowid, = cur.execute("""
-                SELECT rowid FROM memories WHERE cid = ?
-            """, (c,)).fetchone()
-        
-        return rowid
     
-    def insert_act(self,
-            cid: Optional[CIDv1],
-            sona_id: int,
-            memory_id: int,
-            prev_id: Optional[int]
-        ) -> int:
-        '''Insert an acthread for a sona.'''
-        cur = self.cursor()
-        cur.execute("""
-            INSERT OR IGNORE INTO acthreads
-            (cid, sona_id, memory_id, prev_id)
-            VALUES (?, ?, ?, ?)
-        """, (cid and cid.buffer, sona_id, memory_id, prev_id))
-        
-        if rowid := cur.lastrowid:
-            return rowid
-        raise RuntimeError("Failed to insert acthread, it may already exist.")
-    
-    def sona_stage_active(self, sona_id: int):
-        '''Stage pending thread as the active thread for a sona.'''
-        cur = self.cursor()
-        cur.execute("""
-            UPDATE sonas SET active_id = pending_id, pending_id = NULL
-            WHERE rowid = ?
-        """, (sona_id,))
-
-    def update_memory_data(self, rowid: int, data: str):
-        '''
-        Insert the data for a memory. This is used for file memories and other
-        large data blobs.
-        '''
-        cur = self.cursor()
-        cur.execute("""
-            UPDATE memories SET data = JSONB(?)
-            WHERE rowid = ?
-        """, (data, rowid))
-
-    def update_sona_active(self, sona_id: int, thread_id: Optional[int]):
-        '''
-        Update the active thread for a sona. This is the thread that is currently
-        receiving updates.
-        '''
-        cur = self.cursor()
-        cur.execute("""
-            UPDATE sonas SET active_id = ?
-            WHERE rowid = ?
-        """, (thread_id, sona_id))
-
-    def update_sona_pending(self, sona_id: int, thread_id: Optional[int]):
-        '''
-        Update the pending thread for a sona. This is the thread that is currently
-        receiving requests.
-        '''
-        cur = self.cursor()
-        cur.execute("""
-            UPDATE sonas SET pending_id = ?
-            WHERE rowid = ?
-        """, (thread_id, sona_id))
-
     def get_last_act(self, sona_id: int) -> Optional[ACThreadRow]:
         '''
         Get the last act thread for a sona.
@@ -621,32 +403,6 @@ class Database:
             WHERE sona_id = ?
             ORDER BY rowid DESC LIMIT 1
         """, (sona_id,)).fetchone()
-
-    def link_memory_edges(self, rowid: int, edges: list[Edge[CIDv1]]):
-        '''
-        Link the edges of a memory to the database. This is used when inserting
-        a memory with edges that are already in the database.
-        '''
-        cur = self.cursor()
-        cur.executemany("""
-            INSERT OR IGNORE INTO edges (src_id, dst_id, weight)
-            SELECT ?, rowid, ?
-            FROM memories m WHERE cid = ?
-        """, (
-            (rowid, e.weight, e.target.buffer)
-                for e in edges
-        ))
-    
-    def link_sona(self, sona_id: int, memory_id: int):
-        '''Link a memory to a sona.'''
-        print(f"link_sona({sona_id=}, {memory_id=})")
-        cur = self.cursor()
-        cur.execute("""
-            INSERT OR IGNORE INTO sona_memories
-            (sona_id, memory_id) VALUES (?, ?)
-        """, (sona_id, memory_id))
-    
-    # dst <- src
 
     def backward_edges(self, src_id: int) -> Iterable[Edge[MemoryRow]]:
         '''
@@ -755,7 +511,7 @@ class Database:
             ORDER BY score DESC
             LIMIT {int(k)!r}
         """, {
-            "prompt": prompt,
+            "prompt": prompt and f'"{prompt.replace('"', '""')}"',
             "vss_e": e.tobytes(),
             "sona_e": s.tobytes(),
             "timestamp": timestamp,
@@ -768,3 +524,286 @@ class Database:
 
         for row in cur:
             yield MemoryRow.factory(*row[:-1]), row[-1]
+
+class DatabaseRW(Database):
+    '''Provides mutating operations for the database.'''
+
+    @classmethod
+    def _construct(cls, db: Database):
+        self = DatabaseRW.__new__(DatabaseRW)
+        self.__dict__ = db.__dict__
+        return self
+
+    def file_lookup(self, mh: str, ext: str):
+        fn, x, yz, rest = mh[:2], mh[2], mh[3:5], mh[5:]
+        return f"{self.file_path}/{fn}/{x}/{yz}/{rest}{ext}"
+    
+    def index(self, memory_id: int, index: str):
+        '''Index a memory with a text embedding.'''
+        self.insert_text_embedding(memory_id, index)
+        self.insert_text_fts(memory_id, index)
+    
+    def finalize_memory(self, rowid: int) -> Memory:
+        '''
+        Finalize a memory by setting its CID and returning the memory object.
+        This is used after all edges have been linked to the memory.
+        '''
+        if (memory := self.select_memory_rowid(rowid)) is None:
+            raise ValueError(f"Memory with rowid {rowid} does not exist.")
+        
+        if memory.cid is not None:
+            raise ValueError(f"Memory with rowid {rowid} already has a CID: {memory.cid}")
+        
+        # Build the CID from the memory data
+        edges: dict[CIDv1, float] = {}
+        for edge in self.backward_edges(rowid):
+            if cid := edge.target.cid:
+                edges[CIDv1(cid)] = edge.weight
+            else:
+                raise ValueError(
+                    f"Memory with rowid {rowid} has an edge to a memory without a CID: {edge.target.rowid}"
+                )
+        
+        memory = build_memory(memory.kind, memory.data, memory.timestamp, edges)
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE memories SET cid = ? WHERE rowid = ?
+        """, (memory.cid.buffer, rowid))
+        return memory
+    
+    def finalize_act(self, rowid: int) -> ACThread:
+        '''Finalize an ACT by setting its CID and returning it.'''
+
+        cur = self.cursor()
+        cur.execute("""
+            SELECT s.cid, m.cid, p.cid
+            FROM acthreads act
+                JOIN sonas s ON s.rowid = act.sona_id
+                JOIN memories m ON m.rowid = act.memory_id
+                LEFT JOIN acthreads p ON p.rowid = act.prev_id
+            WHERE act.rowid = ?
+        """, (rowid,))
+        if (row := cur.fetchone()) is None:
+            raise ValueError(f"ACT with rowid {rowid} does not exist.")
+        
+        s, m, p = row
+
+        act = ACThread(
+            sona=CIDv1(s),
+            memory=CIDv1(m),
+            prev=p and CIDv1(p)
+        )
+
+        cur.execute("""
+            UPDATE acthreads SET cid = ?
+            WHERE rowid = ?
+        """, (act.cid.buffer, rowid))
+
+        return act
+
+    @overload
+    def find_sona(self, name: UUID) -> Optional[SonaRow]: ...
+    @overload
+    def find_sona(self, name: str) -> SonaRow: ...
+
+    def find_sona(self, name: UUID|str):
+        '''Find or create the sona closest to the given name.'''
+
+        cur = self.cursor()
+
+        if isinstance(name, UUID):
+            cur.execute("""
+                SELECT rowid, uuid, active_id, pending_id
+                FROM sonas
+                WHERE uuid = ?
+            """, (name.bytes,))
+
+            if row := cur.fetchone():
+                rowid, uuid, active_id, pending_id = row
+                return SonaRow(
+                    rowid=rowid,
+                    uuid=uuid,
+                    active_id=active_id,
+                    pending_id=pending_id
+                )
+            else:
+                return None
+        
+        cur.execute("""
+            SELECT rowid, uuid, active_id, pending_id
+            FROM sona_aliases
+                JOIN sonas ON sonas.rowid = sona_aliases.sona_id
+            WHERE name = ?
+        """, (name,))
+        
+        if row := cur.fetchone():
+            rowid, uuid, active_id, pending_id = row
+            return SonaRow(
+                rowid=rowid,
+                uuid=uuid,
+                active_id=active_id,
+                pending_id=pending_id
+            )
+
+        e, = nomic_text.embed(name)
+        ebs = e.tobytes()
+        cur.execute("""
+            SELECT rowid, uuid, active_id, pending_id
+            FROM sona_vss
+                JOIN sonas ON sonas.rowid = sona_vss.sona_id
+            WHERE embedding MATCH ? AND distance > 0.75 AND k = 1
+        """, (ebs,))
+        if row := cur.fetchone():
+            cur.execute("""
+                INSERT INTO sona_aliases (sona_id, name)
+                VALUES (?, ?)
+            """, (row[0], name))
+            return SonaRow.factory(*row)
+        
+        # Doesn't exist, create a new one.
+        
+        u = cast(UUID, uuid7())
+        cur.execute("INSERT INTO sonas (uuid) VALUES (?)", (u.bytes,))
+        if (rowid := cur.lastrowid) is None:
+            raise RuntimeError("Failed to insert sona")
+
+        # Don't need to deduplicate because we just created it and already
+        # know the embedding is far from any existing embedding.
+        cur.execute("""
+            INSERT INTO sona_vss (sona_id, embedding) VALUES (?, ?)
+        """, (rowid, ebs))
+        cur.execute("""
+            INSERT INTO sona_aliases (sona_id, name) VALUES (?, ?)
+        """, (rowid, name))
+        
+        return SonaRow.factory(rowid, u.bytes, None, None)
+
+    def insert_text_embedding(self, memory_id: int, index: str):
+        '''Insert a text embedding for a memory.'''
+        e, = nomic_text.embed(index)
+        cur = self.cursor()
+        # Deduplicate because sqlite-vec can't.
+        cur.execute("""
+            SELECT rowid FROM memory_vss
+            WHERE embedding = ?
+        """, (e,))
+        if cur.fetchone():
+            return
+        # Insert the embedding
+        cur.execute("""
+            INSERT INTO memory_vss (memory_id, embedding)
+            VALUES (?, ?)
+        """, (memory_id, e.tobytes()))
+
+    def insert_text_fts(self, memory_id: int, index: str):
+        '''Index a memory by inserting it into the full-text search index.'''
+        cur = self.cursor()
+        cur.execute("""
+            INSERT INTO memory_fts (rowid, content)
+            VALUES (?, ?)
+        """, (memory_id, index))
+
+    def insert_memory(self,
+            cid: Optional[CIDv1],
+            kind: MemoryKind,
+            data: json_t,
+            timestamp: Optional[float],
+            importance: Optional[float] = None
+        ) -> int:
+        c = cid and cid.buffer
+        cur = self.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO memories
+            (cid, timestamp, kind, data, importance)
+            VALUES (?, ?, ?, JSONB(?), ?)
+        """, (c, timestamp, kind, json.dumps(data), importance))
+        
+        if not (rowid := cur.lastrowid):
+            # Memory already exists
+            rowid, = cur.execute("""
+                SELECT rowid FROM memories WHERE cid = ?
+            """, (c,)).fetchone()
+        
+        return rowid
+    
+    def insert_act(self,
+            cid: Optional[CIDv1],
+            sona_id: int,
+            memory_id: int,
+            prev_id: Optional[int]
+        ) -> int:
+        '''Insert an acthread for a sona.'''
+        cur = self.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO acthreads
+            (cid, sona_id, memory_id, prev_id)
+            VALUES (?, ?, ?, ?)
+        """, (cid and cid.buffer, sona_id, memory_id, prev_id))
+        
+        if rowid := cur.lastrowid:
+            return rowid
+        raise RuntimeError("Failed to insert acthread, it may already exist.")
+    
+    def sona_stage_active(self, sona_id: int):
+        '''Stage pending thread as the active thread for a sona.'''
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE sonas SET active_id = pending_id, pending_id = NULL
+            WHERE rowid = ?
+        """, (sona_id,))
+
+    def update_memory_data(self, rowid: int, data: str):
+        '''
+        Insert the data for a memory. This is used for file memories and other
+        large data blobs.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE memories SET data = JSONB(?)
+            WHERE rowid = ?
+        """, (data, rowid))
+
+    def update_sona_active(self, sona_id: int, thread_id: Optional[int]):
+        '''
+        Update the active thread for a sona. This is the thread that is currently
+        receiving updates.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE sonas SET active_id = ?
+            WHERE rowid = ?
+        """, (thread_id, sona_id))
+
+    def update_sona_pending(self, sona_id: int, thread_id: Optional[int]):
+        '''
+        Update the pending thread for a sona. This is the thread that is currently
+        receiving requests.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE sonas SET pending_id = ?
+            WHERE rowid = ?
+        """, (thread_id, sona_id))
+
+    def link_memory_edges(self, rowid: int, edges: list[Edge[CIDv1]]):
+        '''
+        Link the edges of a memory to the database. This is used when inserting
+        a memory with edges that are already in the database.
+        '''
+        cur = self.cursor()
+        cur.executemany("""
+            INSERT OR IGNORE INTO edges (src_id, dst_id, weight)
+            SELECT ?, rowid, ?
+            FROM memories m WHERE cid = ?
+        """, (
+            (rowid, e.weight, e.target.buffer)
+                for e in edges
+        ))
+    
+    def link_sona(self, sona_id: int, memory_id: int):
+        '''Link a memory to a sona.'''
+        cur = self.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO sona_memories
+            (sona_id, memory_id) VALUES (?, ?)
+        """, (sona_id, memory_id))
