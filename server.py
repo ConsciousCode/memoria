@@ -13,7 +13,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.prompts.prompt import Message
 from pydantic import BaseModel, Field
 
-from ipld import dagcbor_marshal
+from ipld import dagcbor
 from ipld.cid import CIDv1
 
 from db import Edge
@@ -52,9 +52,9 @@ def get_ipfs_empty():
 def get_ipfs(path: str, request: Request):
     cid = CIDv1(path)
     if ob := gmemoria.lookup_memory(cid):
-        return dagcbor_marshal(ob)
+        return dagcbor.marshal(ob)
     if ob := gmemoria.lookup_act(cid):
-        return dagcbor_marshal(ob)
+        return dagcbor.marshal(ob)
     # ipfs_api.lookup(cid) # TODO
     return Response(
         status_code=404,
@@ -357,7 +357,7 @@ async def annotate_edges(
             "relevance" maps memory indices (quoted, to be JSON-compliant) to their relevance score, e.g. {"2": 10, "8": 5}. The indices are the same as in the conversation, marked with ref:(index). "importance" scores the importance of the agent's response. 
         """),
         temperature=0,
-        max_tokens=len(str(len(messages))) * 3,
+        max_tokens=None,
         model_preferences=ModelPreferences(
             costPriority=0,
             speedPriority=1,
@@ -368,7 +368,7 @@ async def annotate_edges(
         raise ValueError(
             f"Edge annotation response must be text, got {type(result)}: {result}"
         )
-    print("Annotation", result.text)
+    print("Annotation", repr(result.text))
     try:
         result = json.loads(result.text)
         if not isinstance(result, dict):

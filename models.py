@@ -5,7 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, PlainSerializer, TypeAdapter
 
 from graph import IGraph
-from ipld import ipld
+from ipld import dagcbor
 from ipld.cid import CIDv1, cidhash
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
@@ -45,7 +45,7 @@ class IPLDModel(BaseModel):
     '''Base model for IPLD objects.'''
     @cached_property
     def cid(self):
-        return cidhash(ipld.dagcbor_marshal(self.model_dump()))
+        return cidhash(dagcbor.marshal(self.model_dump()))
 
 class Edge[T](BaseModel):
     '''Edge from one memory to another.'''

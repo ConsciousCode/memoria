@@ -133,6 +133,19 @@ Ok new lifecycle:
 
 NOTE: We don't need to mark memories as "ephemeral" or whatever, we automatically know that a memory ought to be GC'd because it's not referenced by anything AND it references nothing itself.
 
+## Python chat client example
+
+Using fastmcp.Client for the same flow:
+
+```bash
+export OPENAI_API_KEY=your_openai_api_key
+python3 examples/python_chat.py
+```
+
+```py
+# see examples/python_chat.py for the full script
+```
+
 ## Future scope
 - IPFS integration with file memories, UnixFS seems absurdly fragmented and poorly documented so I don't want to mess with it, but...
 
