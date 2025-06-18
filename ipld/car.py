@@ -6,7 +6,7 @@ import varint
 
 from .multihash import multihash
 from .cid import CIDv1
-from .ipld import dagcbor_marshal
+from . import dagcbor
 
 __all__ = (
     'carv1_iter', 'carv2_iter', 'carv1', 'carv2',
@@ -48,7 +48,7 @@ class CARv1Indexer(ABC):
     
     def carv1_header(self) -> Iterable[bytes]:
         """Return the CARv1 header as bytes."""
-        header = dagcbor_marshal({"version": 1, "roots": self.roots})
+        header = dagcbor.marshal({"version": 1, "roots": self.roots})
         yield from _car_block(_build_cid(header), header)
     
     def carv1(self) -> Iterable[bytes]:

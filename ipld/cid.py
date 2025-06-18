@@ -1,13 +1,11 @@
 from typing import Any, Literal, Optional, Self, cast, overload, override
 
-import base58
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import core_schema
 
 from .multihash import Multihash, multihash
-from . import multibase
-from . import multicodec
+from . import multibase, multicodec
 
 __all__ = (
     'Version', 'Codec',
@@ -113,7 +111,7 @@ class CID:
         """CID multihash"""
         raise NotImplementedError("multihash")
     
-    def encode(self, encoding: multibase.Encoding="identity") -> str:
+    def encode(self, encoding: multibase.Encoding="base32") -> str:
         """Encoded representation of the CID."""
         raise NotImplementedError("encode")
     
@@ -204,7 +202,7 @@ class CID:
             if multibase.is_encoded(raw):
                 raw = multibase.decode(raw)
             else:
-                raw = base58.b58decode(raw)
+                raw = multibase.base58.decode(raw)
         
         # if the bytestream is a CID
         version, data = raw[0], raw[1:]
@@ -235,7 +233,7 @@ class CID:
 
         if version == 0 and codec == CIDv0.CODEC:
             if isinstance(multihash, str):
-                multihash = base58.b58decode(multihash)
+                multihash = multibase.base58.decode(multihash)
             return multihash
         
         if isinstance(multihash, str):
@@ -276,7 +274,7 @@ class CIDv0(CID):
                 super().__init__(data.buffer)
             
             case bytes(): super().__init__(data)
-            case str(): super().__init__(base58.b58decode(data))
+            case str(): super().__init__(multibase.base58.decode(data))
             case _:
                 raise TypeError(f"CIDv0 expected str, bytes, or Multihash, got {type(data).__name__}")
 
@@ -328,7 +326,7 @@ class CIDv0(CID):
         """Encode with base58."""
         if encoding != "base58btc":
             raise ValueError('CIDv0 does not support encoding, use CIDv1 instead')
-        return base58.b58encode(self.buffer).decode('utf-8')
+        return multibase.base58.encode(self.buffer)
 
     def v1(self):
         """Get an equivalent :py:class:`cid.CIDv1` object."""

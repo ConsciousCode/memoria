@@ -1,5 +1,10 @@
 from . import varint, multihash
 
+__all__ = (
+    'extract_prefix', 'get_prefix', 'add_prefix', 'remove_prefix',
+    'get_codec', 'is_codec'
+)
+
 CODECS = {
     # serialization
     'protobuf': 0x50,

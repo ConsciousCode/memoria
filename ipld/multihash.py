@@ -2,12 +2,9 @@ from io import BytesIO
 from typing import Literal, Self, cast, overload
 import hashlib
 
-import base58
-from . import varint
+from . import varint, multibase
 
-__all__ = (
-    'Multihash', 'multihash'
-)
+__all__ = ('Multihash', 'multihash')
 
 HASH_CODES: dict[str, int] = {
     'id': 0,
@@ -154,7 +151,7 @@ class Multihash:
         :param b58_string: Base58 encoded multihash string
         :return: Multihash object
         """
-        return cls(base58.b58decode(b58_string))
+        return cls(multibase.base58.decode(b58_string))
 
     @staticmethod
     def validate(multihash: bytes) -> bool:
@@ -214,7 +211,7 @@ class Multihash:
         """
         match codec:
             case 'hex': return self.buffer.hex()
-            case 'b58': return base58.b58encode(self.buffer).decode()
+            case 'b58': return multibase.base58.encode(self.buffer)
             case _:
                 raise ValueError(f"Unsupported codec: {codec}")
 

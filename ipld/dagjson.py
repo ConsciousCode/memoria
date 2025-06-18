@@ -1,47 +1,38 @@
-import base64
-import base58
 import json
 
 from . import multibase
 from .cid import CID, CIDv0, CIDv1
 from .ipld import _encodec, _decodec, IPLData
 
+__all__ = ("marshal", "unmarshal")
+
 @_encodec("DAG-JSON")
-def _dagjson_transform(data):
+def _dagjson_encode(data):
     match data:
         case bytes():
-            return {"/": {"bytes": base64.b64encode(data).decode('utf-8')}}
+            return {"/": {"bytes": multibase.base64.encode(data)}}
         case CIDv0():
-            return {"/": base58.b58encode(data.buffer).decode('utf-8')}
+            return {"/": multibase.base58.encode(data.buffer)}
         case CIDv1():
             return {"/": multibase.encode('base32', data.buffer)}
-        case {"/": {"bytes": bs}}:
-            if isinstance(bs, str):
-                return base64.b64decode(bs.encode('utf-8'))
-            raise TypeError(
-                '{"/": {"bytes": ...}} expected str, got ' + type(bs).__name__
-            )
-        
-        case {"/": link}:
-            if isinstance(link, str):
-                return CID(link)
+        case {"/": _}:
             raise TypeError("DAG-JSON doesn't support '/' keys")
 
 @_decodec("DAG-JSON")
 def _dagjson_decode(data: IPLData) -> IPLData:
     match data:
         case {"/": {"bytes": bs}}:
-            if isinstance(bs, bytes):
-                return base64.b64decode(bs)
+            if isinstance(bs, str):
+                return multibase.base64.decode(bs)
             raise TypeError(
-                '{"/": {"bytes": ...}} Expected bytes, got ' + str(type(bs))
+                '{"/": {"bytes": ...}} Expected bytes, got ' + type(bs).__name__
             )
         
         case {"/": link}:
             if isinstance(link, str):
                 return CID(link)
             raise TypeError(
-                '{"/": ...} Expected string for CID, got ' + str(type(link))
+                '{"/": ...} Expected string for CID, got ' + type(link).__name__
             )
 
 def marshal(data: IPLData) -> str:
@@ -54,7 +45,7 @@ def marshal(data: IPLData) -> str:
     Returns:
         The data in DAG-JSON format.
     """
-    return json.dumps(_dagjson_transform(data), sort_keys=True)
+    return json.dumps(_dagjson_encode(data), sort_keys=True)
 
 def unmarshal(data: str) -> IPLData:
     """

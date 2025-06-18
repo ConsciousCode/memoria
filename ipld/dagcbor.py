@@ -3,6 +3,10 @@ import cbor2
 from .cid import CID
 from .ipld import _encodec, _decodec, IPLData
 
+__all__ = (
+    "marshal", "unmarshal"
+)
+
 LINK_TAG = 42
 '''DAG-CBOR tag for links.'''
 
@@ -19,8 +23,6 @@ def _dagcbor_decode(data) -> IPLData:
             if data.tag == LINK_TAG:
                 return CID(data.value)
             raise ValueError(f'DAG-CBOR forbids all tags except {LINK_TAG} (CID). Got {data.tag}')
-        case _:
-            return data
 
 def marshal(data: IPLData) -> bytes:
     """
