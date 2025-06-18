@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 import inspect
 import json
+import re
 from typing import Annotated, Iterable, Literal, Optional
 from uuid import UUID
 
@@ -18,7 +19,7 @@ from ipld.cid import CIDv1
 
 from db import Edge
 from memoria import Database, Memoria
-from models import Memory, MemoryDAG, OtherMemory, RecallConfig, SelfMemory, StopReason
+from models import Chatlog, Memory, MemoryDAG, OtherMemory, RecallConfig, SelfMemory, StopReason
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
@@ -281,14 +282,14 @@ def memory_to_message(ref: int, refs: list[int], memory: Memory, final: bool=Fal
         case _:
             raise ValueError(f"Unknown memory kind: {memory.kind}")
 
-def dag_to_convo(g: MemoryDAG, include_final=False) -> Iterable[tuple[int, CIDv1, ConvoMessage]]:
+def dag_to_convo(g: MemoryDAG, include_final=False) -> Iterable[tuple[int, Memory, ConvoMessage]]:
     '''Convert a memory DAG to a conversation.'''
     refs: dict[CIDv1, int] = {}
-
+    
     for cid in g.invert().toposort(key=lambda v: v.timestamp):
         # We need ids for each memory so their edges can be annotated later
         ref = refs[cid] = len(refs) + 1
-        yield ref, cid, memory_to_message(
+        yield ref, g[cid], memory_to_message(
             ref,
             [refs[dst] for dst, _ in g.edges(cid)],
             g[cid],
@@ -328,6 +329,12 @@ def act_next(
         ) for _, _, m in dag_to_convo(g, include_final=True)
     ]
 
+def parse_edge_ref(k: str):
+    # Some models are stupid cunts which can't follow instructions.
+    if m := re.search(r"\d+", k):
+        k = m[0]
+    return int(k)
+
 async def annotate_edges(
         ctx: Context,
         messages: list[str|SamplingMessage]
@@ -354,7 +361,7 @@ async def annotate_edges(
                     "personal": score
                 }
             }
-            "relevance" maps memory indices (quoted, to be JSON-compliant) to their relevance score, e.g. {"2": 10, "8": 5}. The indices are the same as in the conversation, marked with ref:(index). "importance" scores the importance of the agent's response. 
+            "relevance" maps memory indices (quoted, to be JSON-compliant) to their relevance score, e.g. {"2": 10, "8": 5}. The indices are the same as in the conversation, marked with ref:(index). Only use the index in the key, not the tag. "importance" scores the importance of the agent's response. 
         """),
         temperature=0,
         max_tokens=None,
@@ -376,7 +383,7 @@ async def annotate_edges(
         
         importance = result.get("importance", {})
         return {
-            int(k): v
+            parse_edge_ref(k): v
                 for k, v in result.get("relevance", {}).items()
         }, {
             "novelty": importance.get("novelty", 0)/10,
@@ -443,39 +450,43 @@ async def chat(
     )
 
     refs: dict[int, CIDv1] = {}
-    messages = []
-    for ref, cid, m in dag_to_convo(g):
-        refs[ref] = cid
+    chatlog: list[Memory] = []
+    messages: list[str|SamplingMessage] = []
+    
+    for ref, memory, m in dag_to_convo(g, include_final=not message):
+        refs[ref] = memory.cid
+        chatlog.append(memory)
         messages.append(
             SamplingMessage(
                 role=m.role,
                 content=TextContent(type="text", text=m.content)
             )
         )
+    
     lastref = len(refs) + 1
     if message:
         messages.append(
-            build_tags(
-                ["final", f"ref:{lastref}"],
-                timestamp=dt
-            ) + message
+            build_tags([f"final:{lastref}"], timestamp=dt) + message
         )
-    print("First", messages)
 
-    result = await ctx.sample(
+    response = await ctx.sample(
         messages,
-        system_prompt="I'm talking to a user. The Memoria system will replay my memories with metadata annotations, then I can respond in plaintext after the memory with the [final] tag.",
+        system_prompt="I'm talking to a user. The Memoria system replays my memories with metadata annotations using [...]\t prefixes, ending with [final] for the last replayed message. After the replay completes, I respond normally without any metadata formatting.",
         temperature=temperature,
         max_tokens=max_tokens,
         model_preferences=model_preferences
     )
-    if not isinstance(result, TextContent):
+    if not isinstance(response, TextContent):
         raise ValueError(
-            f"Chat response must be text, got {type(result)}: {result}"
+            f"Chat response must be text, got {type(response)}: {response}"
         )
-    print("Result", result)
     
-    messages.append(result.text)
+    messages.append(
+        SamplingMessage(
+            role="assistant",
+            content=TextContent(type="text", text=response.text)
+        )
+    )
     rel, imp = await annotate_edges(ctx, messages)
     importance = sum(x**2 for x in imp.values()) / sum(imp.values()) / 10
 
@@ -494,23 +505,20 @@ async def chat(
         )
 
     # Insert the response
-    memoria.insert(
-        SelfMemory(
-            timestamp=datetime.now().timestamp(),
-            data=SelfMemory.Data(
-                parts=[SelfMemory.Data.Part(content=result.text)]
-            ),
-            edges=[
-                Edge(target=refs[ref], weight=weight)
-                    for ref, weight in rel.items()
-            ],
-            importance=importance
+    resmem = SelfMemory(
+        timestamp=datetime.now().timestamp(),
+        data=SelfMemory.Data(
+            parts=[SelfMemory.Data.Part(content=response.text)]
         ),
-        sona=sona,
-        index=result.text
+        edges=[
+            Edge(target=target, weight=weight)
+                for ref, weight in rel.items()
+                    if (target := refs.get(ref))
+        ],
+        importance=importance
     )
-
-    return result
+    memoria.insert(resmem, sona, response.text)
+    return Chatlog(chatlog=chatlog, response=resmem)
 
 @mcp.tool(
     annotations=dict(
@@ -566,35 +574,45 @@ async def query(
         sona, message, ts, config, list(memories or ())
     )
 
-    refs: dict[int, CIDv1] = {}
-    messages = []
-    for ref, cid, m in dag_to_convo(g):
-        refs[ref] = cid
+    # Because this isn't committed to memory, we don't actually need
+    # to annotate edges, and thus don't need localized references.
+
+    chatlog: list[Memory] = []
+    messages: list[str|SamplingMessage] = []
+    for cid in g.invert().toposort(key=lambda v: v.timestamp):
+        m = g[cid]
+        chatlog.append(m := g[cid])
         messages.append(
             SamplingMessage(
-                role=m.role,
-                content=TextContent(type="text", text=m.content)
+                role="assistant" if m.kind == "self" else "user",
+                content=TextContent(type="text", text=m.document())
             )
         )
+    
     if message:
-        messages.append(
-            build_tags(
-                ["final", f"ref:{len(refs) + 1}"],
-                timestamp=dt
-            ) + message
-        )
+        messages.append(build_tags([], dt) + message)
 
-    return await ctx.sample(
+    response = await ctx.sample(
         messages,
-        system_prompt="I'm talking to a user. The Memoria system will replay my memories with metadata annotations, then I can respond in plaintext after the memory with the [final] tag. This is being run as a query so I won't remember it.",
+        system_prompt="I'm talking to a user. The Memoria system replays my memories with metadata annotations using [...]\t prefixes, ending with [final] for the last replayed message. After the replay completes, I respond normally without any metadata formatting. This is being run as a query so I won't remember it.",
         temperature=temperature,
         max_tokens=max_tokens,
         model_preferences=model_preferences
     )
+    assert isinstance(response, TextContent)
+
+    return Chatlog(
+        chatlog=chatlog,
+        response=SelfMemory(
+            timestamp=datetime.now().timestamp(),
+            data=SelfMemory.Data(
+                parts=[SelfMemory.Data.Part(content=response.text)]
+            )
+        )
+    )
 
 def main():
     import uvicorn
-    
     config = uvicorn.Config(
         app,
         host="0.0.0.0",

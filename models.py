@@ -98,6 +98,9 @@ class SelfMemory(BaseMemory):
     kind: Literal["self"] = "self"
     data: Data
 
+    def document(self):
+        return "".join(part.content for part in self.data.parts)
+
 class OtherMemory(BaseMemory):
     class Data(BaseModel):
         name: Optional[str] = None
@@ -106,10 +109,16 @@ class OtherMemory(BaseMemory):
     kind: Literal["other"] = "other"
     data: Data
 
+    def document(self):
+        return self.data.content
+
 class TextMemory(BaseMemory):
     type Data = str
     kind: Literal["text"] = "text"
     data: Data
+
+    def document(self):
+        return self.data
 
 class FileMemory(BaseMemory):
     class Data(BaseModel):
@@ -123,6 +132,9 @@ class FileMemory(BaseMemory):
 
     kind: Literal["file"] = "file"
     data: Data
+    
+    def document(self):
+        return self.data.content
 
 type Memory = Annotated[
     SelfMemory | OtherMemory | TextMemory | FileMemory,
@@ -158,14 +170,9 @@ def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float]=
         case "file": return FileMemory(**args)
         case _: raise ValueError(f"Unknown memory kind: {kind}")
 
-def memory_document(memory: Memory) -> str:
-    '''Construct a document for FTS from a memory.'''
-    match memory.kind:
-        case "self": return "".join(part.content for part in memory.data.parts)
-        case "other": return memory.data.content
-        case "text": return memory.data
-        case "file": return memory.data.content
-        case _: raise ValueError(f"Unknown memory kind: {memory.kind}")
+class Chatlog(BaseModel):
+    chatlog: list[Memory]
+    response: Memory
 
 class IncompleteACThread(IPLDModel):
     '''A thread of memories in the agent's context.'''

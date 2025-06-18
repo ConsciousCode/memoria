@@ -698,8 +698,9 @@ class DatabaseRW(Database):
     def insert_text_fts(self, memory_id: int, index: str):
         '''Index a memory by inserting it into the full-text search index.'''
         cur = self.cursor()
+        # Ignore duplicate memory_id
         cur.execute("""
-            INSERT INTO memory_fts (rowid, content)
+            INSERT OR IGNORE INTO memory_fts (rowid, content)
             VALUES (?, ?)
         """, (memory_id, index))
 

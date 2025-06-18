@@ -1,6 +1,4 @@
-import varint
-
-from .multihash import HASH_CODES
+from . import varint, multihash
 
 CODECS = {
     # serialization
@@ -18,7 +16,7 @@ CODECS = {
     'multibase': 0x33,
 
     # multihash
-    **HASH_CODES,
+    **multihash.HASH_CODES,
 
     # multiaddr
     'ip4': 0x04,

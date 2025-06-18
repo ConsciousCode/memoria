@@ -96,8 +96,14 @@ class LeastT:
     def __init__(self):
         raise NotImplementedError("LeastT cannot be instantiated directly")
     
-    def __lt__(self, other: object, /) -> bool:
+    def __lt__(self, other: object, /):
         return True
+    
+    def __gt__(self, other: object, /):
+        return False
+    
+    def __eq__(self, other: object, /):
+        return isinstance(other, LeastT)
 
 Least = LeastT.__new__(LeastT)
 

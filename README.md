@@ -139,11 +139,7 @@ Using fastmcp.Client for the same flow:
 
 ```bash
 export OPENAI_API_KEY=your_openai_api_key
-python3 examples/python_chat.py
-```
-
-```py
-# see examples/python_chat.py for the full script
+python3 cli.py
 ```
 
 ## Future scope

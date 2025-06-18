@@ -3,7 +3,7 @@ from typing import Literal, Self, cast, overload
 import hashlib
 
 import base58
-import varint
+from . import varint
 
 __all__ = (
     'Multihash', 'multihash'
@@ -71,7 +71,7 @@ class Multihash:
     digest: bytes
 
     @overload
-    def __init__(self, function: int|str, digest: bytes): ...
+    def __init__(self, function: int|str, digest: str|bytes): ...
     @overload
     def __init__(self, buffer: bytes): ...
     
@@ -124,6 +124,15 @@ class Multihash:
                 if (function := HASH_CODES.get(function)) is None:
                     raise ValueError(f"Unknown hash function: {function}")
         
+        if isinstance(digest, str):
+            digest = bytes.fromhex(digest)
+
+        if not isinstance(function, int):
+            raise TypeError(f"Expected function to be int, got {type(function).__name__}")
+        
+        if not isinstance(digest, bytes):
+            raise TypeError(f"Expected digest to be bytes, got {type(digest).__name__}")
+
         super().__setattr__('function', function)
         super().__setattr__('digest', digest)
     

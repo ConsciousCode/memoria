@@ -61,7 +61,7 @@ class IGraph[K, E, V, Node](ABC):
     def __getitem__(self, key: K) -> V:
         '''Get the value of a node.'''
         if key not in self.adj:
-            raise KeyError(f"Node {key} not found")
+            raise KeyError(f"Node {key!r} not found")
         
         return self._valueof(self.adj[key])
     

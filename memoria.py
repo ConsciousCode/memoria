@@ -5,7 +5,7 @@ from uuid import UUID
 from ipld.cid import CIDv1
 
 from db import Database, SonaRow
-from models import ACThread, Edge, Memory, MemoryDAG, RecallConfig, SelfMemory, Sona, StopReason, memory_document
+from models import ACThread, Edge, Memory, MemoryDAG, RecallConfig, SelfMemory, Sona, StopReason
 from util import todo_list
 
 class Memoria:
@@ -250,7 +250,7 @@ class Memoria:
             #  do we actually run recall on them.
             edges: list[Edge[CIDv1]] = []
             for e in db.backward_edges(memory_id):
-                prompt = memory_document(e.target.to_memory())
+                prompt = e.target.to_memory().document()
                 for row, score in db.recall(sona, prompt, timestamp, config):
                     if cid := row.cid:
                         edges.append(Edge(

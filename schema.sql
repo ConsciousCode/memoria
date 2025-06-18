@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS edges (
     dst_id INTEGER REFERENCES memories(rowid) ON DELETE CASCADE,
     weight REAL NOT NULL DEFAULT 1.0,
 
-    PRIMARY KEY (src_id, label)
+    PRIMARY KEY (src_id, dst_id)
 );
 
 /**

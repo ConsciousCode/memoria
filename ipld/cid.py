@@ -131,11 +131,7 @@ class CID:
     def __eq__(self, other):
         if not isinstance(other, CID):
             return NotImplemented
-        return (
-            self.version == other.version and
-            self.codec == other.codec and
-            self.multihash == other.multihash
-        )
+        return self.buffer == other.buffer
     
     def __lt__(self, other: Any) -> bool:
         if not isinstance(other, CID):
