@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
-import inspect
 import json
 import re
 from typing import Annotated, Iterable, Literal, Optional
@@ -19,6 +18,33 @@ from ipld.cid import CIDv1
 from db import Edge
 from memoria import Database, Memoria
 from models import Chatlog, Memory, MemoryDAG, OtherMemory, RecallConfig, SelfMemory, StopReason
+
+ANNOTATE_EDGES = """\
+This document begins with a topologically sorted memory subgraph. Each memory is prepended with a metadata tag [ref]. Then, a user message [final] indicates a prompt, and an assistant responds to the user prepended with [response], informed by the preceding context. The document ends with an assistant message consisting only of JSON with the following format:
+{
+    "relevance": {
+        "<index>": score
+        // (for example):
+        "1": 8,
+        "2": 5,
+    },
+    "importance": {
+        "novelty": score,
+        "intensity": score,
+        "future": score,
+        "personal": score,
+        "saliency": score
+    }
+}
+The "relevance" object identifies which memories ([ref:index] or [final:index]) are relevant to the [response]. Each key is a quoted number (the index indicated by the tag) and the score is a number 1-10 indicating how relevant the memory is to the response. Only the memories that are relevant to the response are included.
+
+The "importance" object scores the assistant's response according to the following dimensions (0-10):
+- "novelty": How unique or original the response is.
+- "intensity": How emotionally impactful the response is.
+- "future": How useful this response might be in future conversations.
+- "personal": How relevant the response is to the *assistant's* personal context.
+- "saliency": How attention-grabbing or notable the response is.
+"""
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
@@ -332,8 +358,7 @@ def act_next(
 def parse_edge_ref(k: str):
     # Some models are stupid cunts which can't follow instructions.
     if m := re.search(r"\d+", k):
-        k = m[0]
-    return int(k)
+        return int(m[0])
 
 async def annotate_edges(
         ctx: Context,
@@ -342,8 +367,7 @@ async def annotate_edges(
     '''Use sampling with a faster model to annotate which memories are connected and by how much.'''
     # Append a clarification prompt to enforce JSON-only output and prepare annotation context.
     clarification = (
-        "[CLARIFICATION]\tThis marks the epistemic boundary. "
-        "Please reply only with JSON for annotation. Refer to the SYSTEM PROMPT for instructions."
+        "[SYSTEM NOTICE]\tThe document is ending. Please reply only with JSON for annotation. Refer to the SYSTEM PROMPT for instructions."
     )
     msgs_for_sample = list(messages)
     msgs_for_sample.append(
@@ -351,43 +375,7 @@ async def annotate_edges(
     )
     result = await ctx.sample(
         msgs_for_sample,
-        system_prompt=inspect.cleandoc("""
-            You are an annotator tasked with analyzing conversations and providing structured feedback. Each conversation consists of a series of user and assistant messages, the last of which is marked with [final]\t, and the assistant's [response]\t. Afterwards, your job is to respond only with a JSON object that captures the relevance and importance of the assistant's final response based on the conversation history:
-            ```
-            <user>[ref:(index)->(references)\ttimestamp]\t<user_message>
-            <assistant>[ref...]\t<assistant_message>
-            ...
-            <user|assistant>[final...]\t<final_message>
-            <assistant>[response]\t<assistant_message>
-            <assistant>{
-                "relevance": {
-                    "[index]": score
-                },
-                "importance": {
-                    "novelty": score,
-                    "intensity": score,
-                    "future": score,
-                    "personal": score,
-                    "saliency": score
-                }
-            }
-            ```
-            1. **Relevance Analysis:**
-            - Identify which memories from the conversation history are relevant to the assistant's final [response].
-            - Assign a relevance score (1-10) to each relevant memory, where 1 indicates a trivial reference and 10 indicates that the response would not be possible without it.
-            - Format these as a JSON object with memory indices as keys and scores as values.
-
-            2. **Importance Analysis:**
-            - Score the assistant's response according to the following dimensions (0-10):
-            - **Novelty:** How unique or original the response is.
-            - **Emotional Intensity:** How emotionally impactful the response is.
-            - **Future Relevance:** How useful this response might be in future conversations.
-            - **Personal Relevance:** How relevant the response is to the *assistant's* personal context.
-            - **Saliency:** How attention-grabbing or notable the response is.
-            - Format these scores as a JSON object.
-
-            The conversation context is not linear but is instead a topologically sorted subgraph of relevant memories, with timestamps used as tiebreakers. Typically, the interaction involves a series of messages, though occasionally it may include a direct user query followed by a response.
-        """),
+        system_prompt=ANNOTATE_EDGES,
         temperature=0,
         max_tokens=None,
         model_preferences=ModelPreferences(
@@ -410,10 +398,15 @@ async def annotate_edges(
             raise ValueError(f"Edge annotation response must be a JSON object, got {type(result)}: {result}")
         
         importance = result.get("importance", {})
-        return {
-            parse_edge_ref(k): v/10
-                for k, v in result.get("relevance", {}).items()
-        }, {
+        edges = {}
+        for k, v in result.get("relevance", {}).items():
+            if ki := parse_edge_ref(k):
+                if not isinstance(v, (int, float)):
+                    raise ValueError(
+                        f"Edge relevance score must be a number, got {type(v)}: {v}"
+                    )
+                edges[ki] = v/10  # Normalize relevance scores to 0-1 range
+        return edges, {
             "novelty": importance.get("novelty", 0)/10,
             "intensity": importance.get("intensity", 0)/10,
             "future": importance.get("future", 0)/10,
@@ -466,11 +459,14 @@ async def chat(
     Single-turn conversation returning the response. This is committed to memory.
     '''
     if isinstance(timestamp, datetime):
-        ts = timestamp.timestamp()
         dt = timestamp
+        ts = dt.timestamp()
+    elif timestamp is None:
+        dt = datetime.now()
+        ts = dt.timestamp()
     else:
-        ts = timestamp
-        dt = datetime.fromtimestamp(timestamp) if timestamp else None
+        ts = timestamp or datetime.now().timestamp()
+        dt = datetime.fromtimestamp(ts) if ts else None
 
     memoria = mcp_context(ctx)
     g = memoria.recall(

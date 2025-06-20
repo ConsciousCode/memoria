@@ -173,7 +173,6 @@ class Memoria:
                 g.add_edge(srccid, dstcid, weight)
 
                 fw.append((energy*imp, dst_id, dstcid))
-        print(g)
         return g
 
     def act_push(self,

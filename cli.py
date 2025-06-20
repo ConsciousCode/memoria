@@ -331,44 +331,39 @@ def build_provider(provider: str, config: Config) -> Optional[Provider]:
 def build_model(name: str, provider: Provider, config: Config) -> Model:
     '''Build the model for the given name and provider.'''
 
-    try:
-        match provider.name:
-            case "anthropic":
-                from pydantic_ai.models.anthropic import AnthropicModel
-                return AnthropicModel(name, provider=provider)
-            
-            #case "azure": pass
-            
-            case "cohere":
-                from pydantic_ai.models.cohere import CohereModel
-                return CohereModel(name, provider=provider)
-            
-            case "deepseek"|"openai":
-                from pydantic_ai.models.openai import OpenAIModel
-                return OpenAIModel(name, provider=provider)
-            
-            #case "google": pass
-            #case "google_gla": pass
-            #case "google_vertex": pass
+    match provider.name:
+        case "anthropic":
+            from pydantic_ai.models.anthropic import AnthropicModel
+            return AnthropicModel(name, provider=provider)
+        
+        #case "azure": pass
+        
+        case "cohere":
+            from pydantic_ai.models.cohere import CohereModel
+            return CohereModel(name, provider=provider)
+        
+        case "deepseek"|"openai":
+            from pydantic_ai.models.openai import OpenAIModel
+            return OpenAIModel(name, provider=provider)
+        
+        #case "google": pass
+        #case "google_gla": pass
+        #case "google_vertex": pass
 
-            case "groq":
-                from pydantic_ai.models.groq import GroqModel
-                return GroqModel(name, provider=provider)
-            
-            case "openai": # ollama, openrouter
-                from pydantic_ai.models.openai import OpenAIModel
-                return OpenAIModel(name, provider=provider)
+        case "groq":
+            from pydantic_ai.models.groq import GroqModel
+            return GroqModel(name, provider=provider)
+        
+        case "openai": # ollama, openrouter
+            from pydantic_ai.models.openai import OpenAIModel
+            return OpenAIModel(name, provider=provider)
 
-            case "mistral":
-                from pydantic_ai.models.mistral import MistralModel
-                return MistralModel(name, provider=provider)
-            
-            case _:
-                raise ValueError(f"Unknown provider {provider.name!r} for model {name!r}")
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        raise
+        case "mistral":
+            from pydantic_ai.models.mistral import MistralModel
+            return MistralModel(name, provider=provider)
+        
+        case _:
+            raise ValueError(f"Unknown provider {provider.name!r} for model {name!r}")
 
 class MemoriaApp:
     def __init__(self, *rest, help=None, config=None):
@@ -593,7 +588,7 @@ class MemoriaApp:
                 print("Provider", provider)
                 print(params.systemPrompt or SYSTEM_PROMPT)
                 agent = Agent(
-                    model, system_prompt=params.systemPrompt or SYSTEM_PROMPT
+                    model, instructions=params.systemPrompt or SYSTEM_PROMPT
                 )
 
                 history: list[ModelRequest | ModelResponse] = []
