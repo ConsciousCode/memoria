@@ -414,7 +414,6 @@ class MemoriaApp:
             chatlog: The Chatlog object to print.
             meta: If True, print metadata about the chat log.
         """
-        print(refs, log, [m.cid for m in log], sep="\n")
         for m in log:
             self.print_memory(m, refs, verbose=verbose, extra=extra)
     
@@ -622,9 +621,9 @@ class MemoriaApp:
 
                 return CreateMessageResult(
                     role="assistant",
-                    model=f"{prov}:{name}",
                     content=TextContent(type="text", text=result.output),
-                    stopReason=None,
+                    model=f"{prov}:{name}",
+                    stopReason="endTurn"
                 )
         except Exception as e:
             import traceback
@@ -672,7 +671,7 @@ class MemoriaApp:
             log, refs,
             meta=bool(opts.get('meta')),
             verbose=bool(opts.get('verbose')),
-            extra=bool(opts.get('extra'))
+            extra=not opts.get('quiet')
         )
 
     async def subcmd_query(self, *argv: str):
@@ -738,6 +737,7 @@ class MemoriaApp:
             })
             for item in chatlog:
                 assert isinstance(item, TextContent)
+                print(item.text)
                 d = TypeAdapter(dict[CIDv1, PartialMemory]).validate_json(item.text)
                 g = MemoryDAG(d)
                 log = []

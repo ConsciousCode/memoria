@@ -3,7 +3,7 @@ from typing import Callable, Iterable, Optional, Protocol, cast, overload
 import sqlite3
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from numpy import ndarray
 import numpy
@@ -11,7 +11,7 @@ import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
-from ipld.cid import CIDv1
+from ipld.cid import CIDv1, cidhash
 from models import ACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, Memory, MemoryKind, PartialMemory, RecallConfig
 from util import finite
 
@@ -70,7 +70,7 @@ class BaseMemoryRow(BaseModel):
 
     rowid: PrimaryKey
     #cid: Optional[bytes] # None when the memory is incomplete
-    timestamp: Optional[float]
+    timestamp: Optional[StrictInt]
     kind: MemoryKind
     data: JSONB
     importance: Optional[float]
@@ -89,10 +89,12 @@ class MemoryRow(BaseMemoryRow):
     @classmethod
     def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'MemoryRow':
         '''Create a MemoryRow from a raw database row.'''
+        if not timestamp.is_integer():
+            raise TypeError("Timestamp must be an integer.")
         return MemoryRow(
             rowid=rowid,
-            cid=CIDv1(cid),
-            timestamp=timestamp,
+            cid=cid and CIDv1(cid),
+            timestamp=int(timestamp),
             kind=kind,
             data=data,
             importance=importance
@@ -152,6 +154,15 @@ class EdgeRow(BaseModel):
     src_id: MemoryRow.PrimaryKey
     dst_id: MemoryRow.PrimaryKey
     weight: float
+
+    @classmethod
+    def factory(cls, src_id, dst_id, weight) -> 'EdgeRow':
+        '''Create an EdgeRow from a raw database row.'''
+        return cls(
+            src_id=src_id,
+            dst_id=dst_id,
+            weight=weight
+        )
 
 class SonaRow(BaseModel):
     type PrimaryKey = int
@@ -248,6 +259,7 @@ class Database:
     def __init__(self, db_path: str=":memory:", file_path: str="files"):
         self.db_path = db_path
         self.file_path = file_path
+        print("Hello world")
 
     def __enter__(self):
         conn = self.conn = sqlite3.connect(self.db_path)
@@ -294,16 +306,16 @@ class Database:
     
     def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory]:
         '''Lookup an IPLD memory object by CID, returning its IPLD model.'''
-        cur = self.cursor(MemoryRow.factory)
+        cur = self.cursor(MemoryRow)
         mem: Optional[MemoryRow] = cur.execute("""
-            SELECT cid, timestamp, kind, data, importance
+            SELECT rowid, cid, timestamp, kind, JSON(data), importance
             FROM memories
             WHERE cid = ?
-        """, (cid,)).fetchone()
+        """, (cid.buffer,)).fetchone()
         if mem is None:
             return None
         
-        cur = self.cursor(EdgeRow)
+        cur = self.cursor()
         cur.execute("""
             SELECT dst.cid, weight
             FROM edges
@@ -324,19 +336,19 @@ class Database:
         '''Lookup an IPLD act thread by CID.'''
         cur = self.cursor()
         row = cur.execute("""
-            SELECT s.cid, m.cid, p.cid
+            SELECT s.uuid, m.cid, p.cid
             FROM acthreads act
                 JOIN sonas s ON s.rowid = act.sona_id
                 JOIN memories m ON m.rowid = act.memory_id
                 JOIN acthreads p ON p.rowid = act.prev_id
             WHERE act.cid = ?
-        """, (cid,)).fetchone()
+        """, (cid.buffer,)).fetchone()
         if row is None:
             return None
         
         s, m, p = row
         t = ACThread(
-            sona=CIDv1(s),
+            sona=UUID(s),
             memory=CIDv1(m),
             prev=p and CIDv1(p)
         )
@@ -512,6 +524,30 @@ class Database:
                 target=MemoryRow.factory(*row[:6]),
                 weight=row[6]
             )
+
+    def backward_edges_cid(self, cid: CIDv1) -> Iterable[Edge[MemoryRow]]:
+        '''
+        Get all edges leading to the given memory, returning the source id
+        and weight of the edge.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            SELECT
+                m2.rowid, m2.cid, m2.timestamp, m2.kind,
+                    JSON(m2.data), m2.importance,
+                e.weight
+            FROM memories m1
+                JOIN edges e ON e.src_id = m1.rowid
+                JOIN memories m2 ON e.dst_id = m2.rowid
+            WHERE m1.cid = ?
+            ORDER BY e.weight DESC
+        """, (cid.buffer,))
+        
+        for row in cur:
+            yield Edge(
+                target=MemoryRow.factory(*row[:6]),
+                weight=row[6]
+            )
     
     def forward_edges(self, dst_id: int) -> Iterable[Edge[AnyMemoryRow]]:
         '''
@@ -529,9 +565,10 @@ class Database:
         """, (dst_id,))
         
         for row in cur:
+            which = MemoryRow if row[1] else IncompleteMemoryRow
             yield Edge(
                 weight=row[6],
-                target=MemoryRow.factory(*row[:6])
+                target=which.factory(*row[:6])
             )
 
     def recall(self,
@@ -567,7 +604,7 @@ class Database:
                 fts AS (
                     SELECT rowid, bm25(memory_fts) AS score
                     FROM memory_fts
-                    WHERE memory_fts MATCH :prompt
+                    WHERE :prompt AND memory_fts MATCH :prompt
                     LIMIT {int(k)!r}
                 ),
                 mvss AS (
@@ -672,7 +709,7 @@ class DatabaseRW(Database):
         s, m, p = row
 
         act = ACThread(
-            sona=CIDv1(s),
+            sona=UUID(s),
             memory=CIDv1(m),
             prev=p and CIDv1(p)
         )
@@ -683,6 +720,21 @@ class DatabaseRW(Database):
         """, (act.cid.buffer, rowid))
 
         return act
+    
+    def propagate_importance(self, memory: CIDv1):
+        '''
+        Propagate the importance of a memory to its edges, updating the edges
+        in the database.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            UPDATE memories AS m2
+                SET importance = -- M2 <- M1
+                    (1 - e.weight) * m2.importance + e.weight * m1.importance
+            FROM edges e
+                JOIN memories m1 ON e.src_id = m1.rowid
+            WHERE m2.rowid = e.dst_id AND m1.cid = ?
+        """, (memory.buffer,))
 
     @overload
     def find_sona(self, name: UUID) -> Optional[SonaRow]: ...
@@ -795,7 +847,7 @@ class DatabaseRW(Database):
                 (cid, timestamp, kind, data, importance)
                     VALUES (?, ?, ?, JSONB(?), ?)
         """, (
-            cid,
+            cid and cid.buffer,
             memory.timestamp,
             memory.data.kind,
             memory.data.model_dump_json(exclude={"kind"}),

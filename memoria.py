@@ -43,6 +43,10 @@ class Memoria:
                 if sona_row := db.find_sona(sona):
                     db.link_sona(sona_row.rowid, rowid)
     
+    def propogate_importance(self, memory: CIDv1):
+        with self.db.transaction() as db:
+            db.propagate_importance(memory)
+
     @overload
     def find_sona(self, sona: UUID) -> Optional[Sona]: ...
     @overload
@@ -197,7 +201,7 @@ class Memoria:
                     data=IncompleteMemory.SelfData(
                         parts=[],
                     ),
-                    timestamp=datetime.now().timestamp(),
+                    timestamp=int(datetime.now().timestamp()),
                     edges=prompts,
                 ))
 
@@ -310,10 +314,13 @@ class Memoria:
             include: Optional[list[CIDv1]]=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
-        edges: list[Edge[CIDv1]] = []
-        for row, score in self.db.recall(sona, prompt, timestamp, config):
-            edges.append(Edge(
-                weight=score,
-                target=CIDv1(row.cid)
-            ))
-        return self.build_subgraph(edges)
+        return self.build_subgraph([
+            Edge(target=CIDv1(row.target.cid), weight=1.0)
+                for cid in (include or [])
+                    for row in self.db.backward_edges_cid(cid)
+        ] + [
+            Edge(target=CIDv1(row.cid), weight=score)
+                for row, score in self.db.recall(
+                    sona, prompt, timestamp, config
+                )
+        ])

@@ -2,17 +2,17 @@ from functools import cached_property
 from typing import Annotated, Iterable, Literal, Optional, overload, override
 from uuid import UUID
 
-from pydantic import BaseModel, Field, PlainSerializer, TypeAdapter
+from pydantic import BaseModel, Field, PlainSerializer, StrictInt
 
 from graph import IGraph
 from ipld import dagcbor
-from ipld.cid import CID, CIDv1, cidhash
+from ipld.cid import CIDv1, cidhash
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
-type UUIDCID = Annotated[CIDv1,
+type UUIDCID = Annotated[UUID,
     PlainSerializer(lambda u: cidhash(u.bytes, codec='raw'))
 ]
-type StopReason = Literal["end", "error", "cancel"]
+type StopReason = Literal["endTurn", "stopSequence", "maxTokens"] | str
 
 class RecallConfig(BaseModel):
     '''Configuration for how to weight memory recall.'''
@@ -45,7 +45,6 @@ class IPLDModel(BaseModel):
     '''Base model for IPLD objects.'''
     @cached_property
     def cid(self):
-        print(id(self), self.model_dump())
         return cidhash(dagcbor.marshal(self.model_dump()))
 
 class Edge[T](BaseModel):
@@ -102,7 +101,7 @@ class BaseMemory(BaseModel):
     ]
 
     data: MemoryData
-    timestamp: Optional[float] = None
+    timestamp: Optional[StrictInt] = None
     edges: list[Edge[CIDv1]] = Field(
         default_factory=list,
         description="Edges to other memories."
@@ -274,12 +273,11 @@ class MemoryDAG(IGraph[CIDv1, float, PartialMemory, PartialMemory]):
 
     @override
     def _add_edge(self, src: PartialMemory, dst: CIDv1, edge: float):
-        if any(dst == e.target for e in src.edges):
-            raise ValueError(f"Edge to {dst!r} already exists")
-        src.edges.append(Edge[CIDv1](
-            target=dst,
-            weight=edge
-        ))
+        if not any(dst == e.target for e in src.edges):
+            src.edges.append(Edge[CIDv1](
+                target=dst,
+                weight=edge
+            ))
     
     @override
     def _pop_edge(self, src: PartialMemory, dst: CIDv1) -> Optional[float]:

@@ -1,11 +1,11 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 import json
 import re
 from typing import Annotated, Iterable, Literal, Optional, Sequence
 from uuid import UUID
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Header, Request, Response
 from fastmcp.exceptions import ResourceError, ToolError
 from mcp import SamplingMessage
 from mcp.types import ModelHint, ModelPreferences, PromptMessage, TextContent
@@ -48,11 +48,23 @@ DO NOT write comments.
 DO NOT write anything EXCEPT JSON.
 """
 
+gmemoria = None
+
+@contextmanager
+def build_memoria():
+    global gmemoria
+    if gmemoria:
+        yield gmemoria
+    else:
+        with Database("private/memoria.db", "files") as db:
+            yield (gmemoria := Memoria(db))
+        gmemoria = None
+
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    global gmemoria
-    with Database("private/memoria.db", "files") as db:
-        yield (gmemoria := Memoria(db))
+    '''Lifespan context for the FastAPI app.'''
+    with build_memoria() as memoria:
+        yield memoria
 
 mcp = FastMCP("memoria",
     """Coordinates a "sona" representing a cohesive identity and memory.""",
@@ -77,17 +89,28 @@ def get_ipfs_empty():
     return Response()
 
 @ipfs.get("/{path:path}")
-def get_ipfs(path: str, request: Request):
+def get_ipfs(
+        path: str,
+        request: Request,
+        accept: Annotated[Optional[list[str]], Header()] = None
+    ):
+    if accept is None:
+        accept = []
     cid = CIDv1(path)
-    if ob := gmemoria.lookup_memory(cid):
-        return dagcbor.marshal(ob)
-    if ob := gmemoria.lookup_act(cid):
-        return dagcbor.marshal(ob)
-    # ipfs_api.lookup(cid) # TODO
-    return Response(
-        status_code=404,
-        content=f"Memory or ACT not found for CID {cid}"
-    )
+    with build_memoria() as gmemoria:
+        if ob := gmemoria.lookup_memory(cid):
+            if "application/cbor" in accept:
+                return dagcbor.marshal(ob)
+            return ob
+        if ob := gmemoria.lookup_act(cid):
+            if "application/cbor" in accept:
+                return dagcbor.marshal(ob)
+            return ob
+        # ipfs_api.lookup(cid) # TODO
+        return Response(
+            status_code=404,
+            content=f"Memory or ACT not found for CID {cid}"
+        )
 
 ## MCP
 
@@ -496,6 +519,8 @@ async def chat(
         ts = timestamp or datetime.now().timestamp()
         dt = datetime.fromtimestamp(ts) if ts else None
 
+    ts = int(ts)
+
     memoria = mcp_context(ctx)
     g = memoria.recall(
         sona, message, ts, config, list(memories or ())
@@ -545,13 +570,14 @@ async def chat(
         model_preferences=model_preferences
     )
     assert isinstance(response, TextContent)
-    
+    print("Annotation", response.annotations, response.model_config)
+
     # Add self memory to annotate edges
     self_memory = IncompleteMemory(
         timestamp=ts,
         data=IncompleteMemory.SelfData(
             parts=[IncompleteMemory.SelfData.Part(content=response.text)],
-            stop_reason="end"
+            stop_reason="endTurn"
         )
     )
 
@@ -559,11 +585,12 @@ async def chat(
         ctx, chat_memories,
         other_memory, self_memory
     )
-
     # Combine importance with self-weighted mean
     importance = sum(x**2 for x in imp.values()) / sum(imp.values()) / 10
 
-    # Now that there's no risk of interruption, insert the memories
+    # Now that there's no risk of interruption,
+
+    # Insert the user memory
     if other_memory:
         other_memory = other_memory.complete()
         refs[lastref] = other_memory.cid
@@ -574,15 +601,17 @@ async def chat(
             message
         )
 
+    # Finish the response memory for insertion and return
     self_memory.edges = [
         Edge(target=target, weight=weight / 10)
             for ref, weight in rel.items()
                 if (target := refs.get(ref))
     ]
+    self_memory = self_memory.complete()
     memoria.insert(self_memory, importance, sona, response.text)
     return Chatlog(
         chatlog=chat_memories,
-        response=self_memory.complete()
+        response=self_memory
     )
 
 @mcp.tool(
@@ -646,11 +675,14 @@ async def query(
     messages: list[str|SamplingMessage] = []
     for cid in g.invert().toposort(key=lambda v: v.timestamp):
         m = g[cid]
-        chatlog.append(m := g[cid])
+        chatlog.append(m)
         messages.append(
             SamplingMessage(
                 role="assistant" if m.data.kind == "self" else "user",
-                content=TextContent(type="text", text=m.data.document())
+                content=TextContent(
+                    type="text",
+                    text=build_tags([], dt) + m.data.document()
+                )
             )
         )
     
@@ -669,7 +701,7 @@ async def query(
     return Chatlog(
         chatlog=chatlog,
         response=Memory(
-            timestamp=datetime.now().timestamp(),
+            timestamp=int(datetime.now().timestamp()),
             data=Memory.SelfData(
                 parts=[Memory.SelfData.Part(content=response.text)]
             )

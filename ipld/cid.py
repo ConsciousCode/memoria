@@ -399,35 +399,26 @@ class CIDv1(CID):
         """
         def validate_cidv1(value) -> 'CIDv1':
             """Validate and convert input to a CIDv1 object."""
-            try:
-                match cid := CID(value):
-                    case CIDv1(): return cid
-                    case CIDv0(): return CIDv1(cid)
-                    case _: raise ValueError(f"Invalid CIDv1 input: {value}")
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                raise ValueError(f"Invalid CIDv1: {e}") from e
-        try:
-            return core_schema.union_schema([
-                # Accept existing CIDv1 objects
-                core_schema.is_instance_schema(CIDv1),
-                # Accept strings that can be converted to CIDv1
-                core_schema.no_info_after_validator_function(
-                    validate_cidv1,
-                    core_schema.str_schema(
-                        pattern=r'^[a-zA-Z0-9+/=-]+$',
-                        min_length=10,
-                        max_length=200,
-                    )
+            match cid := CID(value):
+                case CIDv1(): return cid
+                case CIDv0(): return CIDv1(cid)
+                case _: raise ValueError(f"Invalid CIDv1 input: {value}")
+        
+        return core_schema.union_schema([
+            # Accept existing CIDv1 objects
+            core_schema.is_instance_schema(CIDv1),
+            # Accept strings that can be converted to CIDv1
+            core_schema.no_info_after_validator_function(
+                validate_cidv1,
+                core_schema.str_schema(
+                    pattern=r'^[a-zA-Z0-9+/=-]+$',
+                    min_length=10,
+                    max_length=200,
                 )
-            ], serialization=core_schema.plain_serializer_function_ser_schema(
-                str, return_schema=core_schema.str_schema(),
-            ))
-        except:
-            import traceback
-            traceback.print_exc()
-            raise
+            )
+        ], serialization=core_schema.plain_serializer_function_ser_schema(
+            str, return_schema=core_schema.str_schema(),
+        ))
     
     @classmethod
     def __get_pydantic_json_schema__(cls, core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
