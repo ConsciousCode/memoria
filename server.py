@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 import json
 import re
-from typing import Annotated, Iterable, Literal, Optional
+from typing import Annotated, Iterable, Literal, Optional, Sequence
 from uuid import UUID
 
 from fastapi import FastAPI, Request, Response
@@ -17,14 +17,13 @@ from ipld import dagcbor
 from ipld.cid import CIDv1
 from db import Edge
 from memoria import Database, Memoria
-from models import Chatlog, Memory, MemoryDAG, OtherMemory, RecallConfig, SelfMemory, StopReason
+from models import AnyMemory, Chatlog, CompleteMemory, IncompleteMemory, Memory, MemoryDAG, PartialMemory, RecallConfig, StopReason
 
 ANNOTATE_EDGES = """\
-This document begins with a topologically sorted memory subgraph. Each memory is prepended with a metadata tag [ref]. Then, a user message [final] indicates a prompt, and an assistant responds to the user prepended with [response], informed by the preceding context. The document ends with an assistant message consisting only of JSON with the following format:
+Respond ***ONLY*** with a JSON object with the following schema:
 {
     "relevance": {
         "<index>": score
-        // (for example):
         "1": 8,
         "2": 5,
     },
@@ -44,6 +43,9 @@ The "importance" object scores the assistant's response according to the followi
 - "future": How useful this response might be in future conversations.
 - "personal": How relevant the response is to the *assistant's* personal context.
 - "saliency": How attention-grabbing or notable the response is.
+
+DO NOT write comments.
+DO NOT write anything EXCEPT JSON.
 """
 
 @asynccontextmanager
@@ -96,7 +98,7 @@ def ipfs_resource(ctx: Context, cid: CIDv1):
     if (m := memoria.lookup_memory(cid)) is None:
         raise ResourceError("Memory not found")
     
-    if m.kind != "file":
+    if m.data.kind != "file":
         raise ResourceError("Memory is not a file")
     
     return m.data.content
@@ -131,13 +133,17 @@ def insert_memory(
             Memory,
             Field(description="Memory to insert.")
         ],
+        importance: Annotated[
+            Optional[float],
+            Field(description="Importance of the memory, from 0 to 1.")
+        ] = None,
         index: Annotated[
             Optional[str],
             Field(description="Plaintext indexing field for the memory if available.")
         ] = None
     ):
     '''Insert a new memory into the sona.'''
-    return mcp_context(ctx).insert(memory, sona, index)
+    return mcp_context(ctx).insert(memory, importance, sona, index)
 
 @mcp.tool(
     annotations=dict(
@@ -227,7 +233,7 @@ def recall(
     Recall memories related to the prompt, including relevant included memories
     and their dependencies.
     '''
-    d = dict(
+    return dict(
         mcp_context(ctx).recall(
             sona,
             prompt,
@@ -236,8 +242,6 @@ def recall(
             memories or []
         ).items()
     )
-    print(d)
-    return d
 
 class ConvoMessage(BaseModel):
     role: Literal['user', 'assistant']
@@ -248,7 +252,7 @@ def build_tags(tags: list[str], timestamp: Optional[datetime]) -> str:
         tags.append(timestamp.replace(microsecond=0).isoformat())
     return f"[{'\t'.join(tags)}]\t"
 
-def memory_to_message(ref: int, refs: list[int], memory: Memory, final: bool=False) -> ConvoMessage:
+def memory_to_message(ref: int, refs: list[int], memory: AnyMemory, final: bool=False) -> ConvoMessage:
     '''Render memory for the context.'''
     
     tags = []
@@ -264,8 +268,8 @@ def memory_to_message(ref: int, refs: list[int], memory: Memory, final: bool=Fal
     else:
         ts = None
     
-    match memory.kind:
-        case "self":
+    match memory.data:
+        case Memory.SelfData():
             if name := memory.data.name:
                 tags.append(f"name:{name}")
             if sr := memory.data.stop_reason:
@@ -276,13 +280,13 @@ def memory_to_message(ref: int, refs: list[int], memory: Memory, final: bool=Fal
                 content=build_tags(tags, ts) +
                     ''.join(p.content for p in memory.data.parts),
             )
-        case "text":
+        case Memory.TextData():
             tags.append("kind:raw_text")
             return ConvoMessage(
                 role="user",
-                content=build_tags(tags, ts) + memory.data
+                content=build_tags(tags, ts) + memory.data.content
             )
-        case "other":
+        case Memory.OtherData():
             if name := memory.data.name:
                 tags.append(f"name:{name}")
             return ConvoMessage(
@@ -306,9 +310,9 @@ def memory_to_message(ref: int, refs: list[int], memory: Memory, final: bool=Fal
         '''
         
         case _:
-            raise ValueError(f"Unknown memory kind: {memory.kind}")
+            raise ValueError(f"Unknown memory kind: {memory.data.kind}")
 
-def dag_to_convo(g: MemoryDAG, include_final=False) -> Iterable[tuple[int, Memory, ConvoMessage]]:
+def dag_to_convo(g: MemoryDAG, include_final=False) -> Iterable[tuple[int, PartialMemory, ConvoMessage]]:
     '''Convert a memory DAG to a conversation.'''
     refs: dict[CIDv1, int] = {}
     
@@ -362,19 +366,43 @@ def parse_edge_ref(k: str):
 
 async def annotate_edges(
         ctx: Context,
-        messages: list[str|SamplingMessage]
+        memories: Sequence[CompleteMemory],
+        prompt: Optional[IncompleteMemory],
+        response: IncompleteMemory
     ) -> tuple[dict[int, float], dict[str, float]]:
     '''Use sampling with a faster model to annotate which memories are connected and by how much.'''
-    # Append a clarification prompt to enforce JSON-only output and prepare annotation context.
-    clarification = (
-        "[SYSTEM NOTICE]\tThe document is ending. Please reply only with JSON for annotation. Refer to the SYSTEM PROMPT for instructions."
-    )
-    msgs_for_sample = list(messages)
-    msgs_for_sample.append(
-        SamplingMessage(role="user", content=TextContent(type="text", text=clarification))
-    )
+
+    refs: dict[CIDv1, int] = {}
+    context = []
+    for m in memories:
+        refs[m.cid] = index = len(context) + 1
+        c = {
+            "index": index,
+            "role": {
+                "self": "assistant",
+                "other": "user"
+            }[m.data.kind],
+            "content": m.data.document()
+        }
+        if m.edges:
+            c['deps'] = [refs[e.target] for e in m.edges]
+        context.append(c)
+    
+    if prompt:
+        context.append({
+            "index": len(context) + 1,
+            "role": "user",
+            "content": prompt.data.document(),
+        })
+    context.append({
+        "index": len(context) + 1,
+        "deps": None,
+        "role": "assistant",
+        "content": response.data.document()
+    })
+    
     result = await ctx.sample(
-        msgs_for_sample,
+        [json.dumps(context, indent=2)],
         system_prompt=ANNOTATE_EDGES,
         temperature=0,
         max_tokens=None,
@@ -389,28 +417,28 @@ async def annotate_edges(
         raise ValueError(
             f"Edge annotation response must be text, got {type(result)}: {result}"
         )
-    # Debug print the annotated history and raw JSON response
-    print("History", repr(msgs_for_sample))
-    print("Annotation", repr(result.text))
     try:
-        result = json.loads(result.text)
-        if not isinstance(result, dict):
+        assert (m := re.match(r"^(?:```(?:json)?)?([\s\S\n]+?)(?:```)?$", result.text))
+        data = json.loads(m[1])
+        
+        if not isinstance(data, dict):
             raise ValueError(f"Edge annotation response must be a JSON object, got {type(result)}: {result}")
         
-        importance = result.get("importance", {})
-        edges = {}
-        for k, v in result.get("relevance", {}).items():
+        importance = data.get("importance", {})
+        edges: dict[int, float] = {}
+        for k, v in data.get("relevance", {}).items():
+            if v < 0: continue
             if ki := parse_edge_ref(k):
                 if not isinstance(v, (int, float)):
                     raise ValueError(
                         f"Edge relevance score must be a number, got {type(v)}: {v}"
                     )
-                edges[ki] = v/10  # Normalize relevance scores to 0-1 range
+                edges[ki] = v
         return edges, {
-            "novelty": importance.get("novelty", 0)/10,
-            "intensity": importance.get("intensity", 0)/10,
-            "future": importance.get("future", 0)/10,
-            "personal": importance.get("personal", 0)/10
+            "novelty": importance.get("novelty", 0),
+            "intensity": importance.get("intensity", 0),
+            "future": importance.get("future", 0),
+            "personal": importance.get("personal", 0)
         }
     except json.JSONDecodeError as e:
         raise ValueError(f"Edge annotation response is not valid JSON: {e}") from e
@@ -474,13 +502,13 @@ async def chat(
     )
 
     refs: dict[int, CIDv1] = {}
-    chatlog: list[Memory] = []
-    messages: list[str|SamplingMessage] = []
+    chat_memories: list[PartialMemory] = []
+    chat_messages: list[str|SamplingMessage] = []
     
     for ref, memory, m in dag_to_convo(g, include_final=not message):
         refs[ref] = memory.cid
-        chatlog.append(memory)
-        messages.append(
+        chat_memories.append(memory)
+        chat_messages.append(
             SamplingMessage(
                 role=m.role,
                 content=TextContent(type="text", text=m.content)
@@ -490,65 +518,72 @@ async def chat(
     lastref = len(refs) + 1
     if message:
         # Annotate the final user message with reference tags
-        final_content = build_tags([f"final:{lastref}"], timestamp=dt) + message
-        messages.append(
-            SamplingMessage(
-                role="user",
-                content=TextContent(type="text", text=final_content)
+        other_memory = IncompleteMemory(
+            timestamp=ts,
+            data=IncompleteMemory.OtherData(
+                content=message
             )
         )
+        chat_messages.append(
+            SamplingMessage(
+                role="user",
+                content=TextContent(
+                    type="text",
+                    text=build_tags([f"final:{lastref}"], timestamp=dt) + message
+                )
+            )
+        )
+    else:
+        other_memory = None
 
+    # Agent response
     response = await ctx.sample(
-        messages,
+        chat_messages,
         system_prompt="I'm talking to a user. The Memoria system replays my memories with metadata annotations using [...]\t prefixes, ending with [final] for the last replayed message. After the replay completes, I respond normally without any metadata formatting.",
         temperature=temperature,
         max_tokens=max_tokens,
         model_preferences=model_preferences
     )
-    if not isinstance(response, TextContent):
-        raise ValueError(
-            f"Chat response must be text, got {type(response)}: {response}"
-        )
-    print("Response", repr(response.text))
+    assert isinstance(response, TextContent)
     
-    messages.append(
-        SamplingMessage(
-            role="assistant",
-            content=TextContent(type="text", text="[response]\t" + response.text)
+    # Add self memory to annotate edges
+    self_memory = IncompleteMemory(
+        timestamp=ts,
+        data=IncompleteMemory.SelfData(
+            parts=[IncompleteMemory.SelfData.Part(content=response.text)],
+            stop_reason="end"
         )
     )
-    rel, imp = await annotate_edges(ctx, messages)
+
+    rel, imp = await annotate_edges(
+        ctx, chat_memories,
+        other_memory, self_memory
+    )
+
+    # Combine importance with self-weighted mean
     importance = sum(x**2 for x in imp.values()) / sum(imp.values()) / 10
 
-    # Now that there's no risk of interruption, insert the message
-    if message:
-        refs[lastref] = memoria.insert(
-            OtherMemory(
-                timestamp=ts,
-                data=OtherMemory.Data(
-                    content=message
-                ),
-                importance=importance*rel.get(lastref, 0),
-            ),
+    # Now that there's no risk of interruption, insert the memories
+    if other_memory:
+        other_memory = other_memory.complete()
+        refs[lastref] = other_memory.cid
+        memoria.insert(
+            other_memory,
+            rel.get(lastref, 0) / 10,
             sona,
-            index=message
+            message
         )
 
-    # Insert the response
-    resmem = SelfMemory(
-        timestamp=datetime.now().timestamp(),
-        data=SelfMemory.Data(
-            parts=[SelfMemory.Data.Part(content=response.text)]
-        ),
-        edges=[
-            Edge(target=target, weight=weight)
-                for ref, weight in rel.items()
-                    if (target := refs.get(ref))
-        ],
-        importance=importance
+    self_memory.edges = [
+        Edge(target=target, weight=weight / 10)
+            for ref, weight in rel.items()
+                if (target := refs.get(ref))
+    ]
+    memoria.insert(self_memory, importance, sona, response.text)
+    return Chatlog(
+        chatlog=chat_memories,
+        response=self_memory.complete()
     )
-    memoria.insert(resmem, sona, response.text)
-    return Chatlog(chatlog=chatlog, response=resmem)
 
 @mcp.tool(
     annotations=dict(
@@ -607,15 +642,15 @@ async def query(
     # Because this isn't committed to memory, we don't actually need
     # to annotate edges, and thus don't need localized references.
 
-    chatlog: list[Memory] = []
+    chatlog: list[PartialMemory] = []
     messages: list[str|SamplingMessage] = []
     for cid in g.invert().toposort(key=lambda v: v.timestamp):
         m = g[cid]
         chatlog.append(m := g[cid])
         messages.append(
             SamplingMessage(
-                role="assistant" if m.kind == "self" else "user",
-                content=TextContent(type="text", text=m.document())
+                role="assistant" if m.data.kind == "self" else "user",
+                content=TextContent(type="text", text=m.data.document())
             )
         )
     
@@ -633,10 +668,10 @@ async def query(
 
     return Chatlog(
         chatlog=chatlog,
-        response=SelfMemory(
+        response=Memory(
             timestamp=datetime.now().timestamp(),
-            data=SelfMemory.Data(
-                parts=[SelfMemory.Data.Part(content=response.text)]
+            data=Memory.SelfData(
+                parts=[Memory.SelfData.Part(content=response.text)]
             )
         )
     )

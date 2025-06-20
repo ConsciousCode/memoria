@@ -222,8 +222,7 @@ class CID(Immutable):
         codec = cast(Codec, multicodec.get_codec(data))
         multihash = multicodec.remove_prefix(data)
 
-        try:
-            Multihash(multihash) # validate multihash with exception
+        try: Multihash(multihash) # validate multihash with exception
         except ValueError:
             raise
         

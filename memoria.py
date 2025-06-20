@@ -5,7 +5,7 @@ from uuid import UUID
 from ipld.cid import CIDv1
 
 from db import Database
-from models import ACThread, Edge, Memory, MemoryDAG, RecallConfig, SelfMemory, Sona, StopReason
+from models import ACThread, AnyMemory, Edge, IncompleteMemory, Memory, MemoryDAG, RecallConfig, Sona, StopReason
 from util import todo_list
 
 class Memoria:
@@ -25,21 +25,14 @@ class Memoria:
         return self.db.lookup_ipld_act(cid)
 
     def insert(self,
-            memory: Memory,
+            memory: AnyMemory,
+            importance: Optional[float] = None,
             sona: Optional[UUID|str] = None,
             index: Optional[str] = None
-        ) -> CIDv1:
+        ):
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
-            md = memory.data
-            rowid = db.insert_memory(
-                memory.cid,
-                memory.kind,
-                md if isinstance(md, str) else md.model_dump(),
-                memory.timestamp,
-                memory.importance
-            )
-            
+            rowid = db.insert_memory(memory, importance)
             db.link_memory_edges(rowid, memory.edges or [])
             
             if index:
@@ -49,8 +42,6 @@ class Memoria:
             if sona:
                 if sona_row := db.find_sona(sona):
                     db.link_sona(sona_row.rowid, rowid)
-            
-            return memory.cid
     
     @overload
     def find_sona(self, sona: UUID) -> Optional[Sona]: ...
@@ -93,7 +84,7 @@ class Memoria:
             if (mr := self.db.select_memory_cid(origcid)) is None:
                 continue
 
-            g.insert(origcid, mr.to_memory())
+            g.insert(origcid, mr.to_partial())
 
             energy = score*budget
 
@@ -146,7 +137,7 @@ class Memoria:
                 
                 dstcid = CIDv1(dst.cid)
 
-                g.insert(srccid, dst.to_memory())
+                g.insert(srccid, dst.to_partial())
                 g.add_edge(srccid, dstcid, weight)
 
                 bw.append((energy*weight, dst.rowid, dstcid))
@@ -169,7 +160,7 @@ class Memoria:
 
                 srccid = CIDv1(src.cid)
 
-                g.insert(srccid, src.to_memory())
+                g.insert(srccid, src.to_partial())
                 g.add_edge(srccid, dstcid, weight)
 
                 fw.append((energy*imp, dst_id, dstcid))
@@ -202,12 +193,13 @@ class Memoria:
                 )
 
                 # Create the incomplete memory to receive the response
-                response_id = db.insert_memory(
-                    cid=None,
-                    kind="self",
-                    data=None,
-                    timestamp=datetime.now().timestamp()
-                )
+                response_id = db.insert_memory(IncompleteMemory(
+                    data=IncompleteMemory.SelfData(
+                        parts=[],
+                    ),
+                    timestamp=datetime.now().timestamp(),
+                    edges=prompts,
+                ))
 
                 # Create a new pending thread
                 db.update_sona_pending(sona_row.rowid,
@@ -250,7 +242,7 @@ class Memoria:
             #  do we actually run recall on them.
             edges: list[Edge[CIDv1]] = []
             for e in db.backward_edges(memory_id):
-                prompt = e.target.to_memory().document()
+                prompt = e.target.to_incomplete().data.document()
                 for row, score in db.recall(sona, prompt, timestamp, config):
                     if cid := row.cid:
                         edges.append(Edge(
@@ -285,18 +277,18 @@ class Memoria:
                     db.sona_stage_active(sona_row.rowid)
             
             # Update the memory data
-            if (memory := db.select_memory_rowid(thread.memory_id)) is None:
+            if (mr := db.select_memory_rowid(thread.memory_id)) is None:
                 return "thread memory not found"
             
-            if memory.kind != "self":
+            if mr.kind != "self":
                 return "thread memory is not a self memory"
             
-            data = SelfMemory.Data.model_validate_json(memory.data)
+            data = Memory.build_data('self', mr.data)
             last = data.parts[-1] if data.parts else None
             if last and (model is None or last.model == model):
                 last.content += delta or ""
             else:
-                data.parts.append(SelfMemory.Data.Part(
+                data.parts.append(Memory.SelfData.Part(
                     content=delta or "",
                     model=model
                 ))
@@ -305,10 +297,10 @@ class Memoria:
             if stop_reason:
                 data.stop_reason = stop_reason
                 db.update_sona_active(sona_row.rowid, None)
-                db.finalize_memory(memory.rowid)
+                db.finalize_memory(mr.rowid)
                 db.finalize_act(thread.rowid)
             
-            db.update_memory_data(memory.rowid, data.model_dump_json())
+            db.update_memory_data(mr.rowid, data.model_dump_json())
 
     def recall(self,
             sona: Optional[str],

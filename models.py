@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, PlainSerializer, TypeAdapter
 
 from graph import IGraph
 from ipld import dagcbor
-from ipld.cid import CIDv1, cidhash
+from ipld.cid import CID, CIDv1, cidhash
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
 type UUIDCID = Annotated[CIDv1,
@@ -45,6 +45,7 @@ class IPLDModel(BaseModel):
     '''Base model for IPLD objects.'''
     @cached_property
     def cid(self):
+        print(id(self), self.model_dump())
         return cidhash(dagcbor.marshal(self.model_dump()))
 
 class Edge[T](BaseModel):
@@ -52,13 +53,84 @@ class Edge[T](BaseModel):
     target: T
     weight: float
 
-class BaseMemory(IPLDModel):
+class BaseMemory(BaseModel):
+    '''Base memory model.'''
+    class SelfData(BaseModel):
+        kind: Literal["self"] = "self"
+        class Part(BaseModel):
+            content: str = ""
+            model: Optional[str] = None
+        
+        name: Optional[str] = None
+        parts: list[Part]
+        stop_reason: Optional[StopReason] = None
+
+        def document(self):
+            return "".join(part.content for part in self.parts)
+
+    class OtherData(BaseModel):
+        kind: Literal["other"] = "other"
+        name: Optional[str] = None
+        content: str
+
+        def document(self):
+            return self.content
+    
+    class TextData(BaseModel):
+        kind: Literal["text"] = "text"
+        content: str
+
+        def document(self):
+            return self.content
+    
+    class FileData(BaseModel):
+        kind: Literal["file"] = "file"
+        name: Annotated[Optional[str],
+            Field(description="Name of the file at time of upload, if available.")
+        ] = None
+        content: Annotated[str,
+            Field(description="Base64 encoded file contents.")
+        ]
+        mimeType: Optional[str] = None
+
+        def document(self):
+            return self.content
+    
+    type MemoryData = Annotated[
+        SelfData | OtherData | TextData | FileData,
+        Field(discriminator="kind")
+    ]
+
+    data: MemoryData
     timestamp: Optional[float] = None
     edges: list[Edge[CIDv1]] = Field(
         default_factory=list,
         description="Edges to other memories."
     )
-    importance: Optional[float] = Field(exclude=True, default=None)
+
+    @overload
+    @classmethod
+    def build_data(cls, kind: Literal["self"], json: str) -> SelfData: ...
+    @overload
+    @classmethod
+    def build_data(cls, kind: Literal["other"], json: str) -> OtherData: ...
+    @overload
+    @classmethod
+    def build_data(cls, kind: Literal["text"], json: str) -> TextData: ...
+    @overload
+    @classmethod
+    def build_data(cls, kind: Literal["image", "file"], json: str) -> FileData: ...
+
+    @classmethod
+    def build_data(cls, kind: MemoryKind, json: str) -> MemoryData:
+        '''Build memory data based on the kind.'''
+        match kind:
+            case "self": return cls.SelfData.model_validate_json(json)
+            case "other": return cls.OtherData.model_validate_json(json)
+            case "text": return cls.TextData.model_validate_json(json)
+            case "image" | "file": return cls.FileData.model_validate_json(json)
+            case _:
+                raise ValueError(f"Unknown memory kind: {kind}")
 
     def edge(self, target: CIDv1) -> Optional[Edge[CIDv1]]:
         '''Get the edge to the target memory, if it exists.'''
@@ -67,6 +139,22 @@ class BaseMemory(IPLDModel):
             if edge.target == target:
                 return edge
         return None
+
+class IncompleteMemory(BaseMemory):
+    '''
+    A memory which is still incomplete and thus can't be referred to by
+    CID. Allows mutation of edges and data.
+    '''
+
+    cid: None = None
+
+    def complete(self) -> 'Memory':
+        '''Complete the memory by adding edges and returning a Memory object.'''
+        return Memory(
+            data=self.data,
+            timestamp=self.timestamp,
+            edges=self.edges
+        )
     
     def insert_edge(self, target: CIDv1, weight: float):
         '''Insert an edge to the target memory with the given weight.'''
@@ -77,106 +165,54 @@ class BaseMemory(IPLDModel):
             target=target,
             weight=weight
         ))
+
+class PartialMemory(BaseMemory):
+    '''
+    A memory which is complete, but does not have its full contents. Thus
+    the CID can't be calculated from it and must be provided.
+    '''
     
+    cid: CIDv1
+
+    def insert_edge(self, target: CIDv1, weight: float):
+        '''Insert an edge to the target memory with the given weight.'''
+        if self.edge(target) is not None:
+            raise ValueError(f"Edge to {target} already exists")
+        
+        self.edges.append(Edge(
+            target=target,
+            weight=weight
+        ))
+
+class Memory(BaseMemory, IPLDModel):
+    '''A completed memory which can be referred to by CID.'''
     @cached_property
     @override
     def cid(self) -> CIDv1:
         # Edges must be sorted by target CID to ensure deterministic ordering
         self.edges.sort(key=lambda e: e.target)
         return super().cid
-
-class SelfMemory(BaseMemory):
-    class Data(BaseModel):
-        class Part(BaseModel):
-            content: str = ""
-            model: Optional[str] = None
-        
-        name: Optional[str] = None
-        parts: list[Part]
-        stop_reason: Optional[StopReason] = None
     
-    kind: Literal["self"] = "self"
-    data: Data
+    def incomplete(self):
+        '''Return an incomplete memory which can be mutated.'''
+        return IncompleteMemory(
+            data=self.data,
+            timestamp=self.timestamp,
+            edges=self.edges
+        )
 
-    def document(self):
-        return "".join(part.content for part in self.data.parts)
-
-class OtherMemory(BaseMemory):
-    class Data(BaseModel):
-        name: Optional[str] = None
-        content: str
-    
-    kind: Literal["other"] = "other"
-    data: Data
-
-    def document(self):
-        return self.data.content
-
-class TextMemory(BaseMemory):
-    type Data = str
-    kind: Literal["text"] = "text"
-    data: Data
-
-    def document(self):
-        return self.data
-
-class FileMemory(BaseMemory):
-    class Data(BaseModel):
-        name: Annotated[Optional[str],
-            Field(description="Name of the file at time of upload, if available.")
-        ] = None
-        content: Annotated[str,
-            Field(description="Base64 encoded file contents.")
-        ]
-        mimeType: Optional[str] = None
-
-    kind: Literal["file"] = "file"
-    data: Data
-    
-    def document(self):
-        return self.data.content
-
-type Memory = Annotated[
-    SelfMemory | OtherMemory | TextMemory | FileMemory,
-    Field(discriminator="kind")
-]
-type MemoryData = SelfMemory.Data | OtherMemory.Data | TextMemory.Data | FileMemory.Data
-MemoryDataAdapter = TypeAdapter[MemoryData](MemoryData)
-
-@overload
-def build_memory(kind: Literal['self'], data: SelfMemory.Data, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> SelfMemory: ...
-@overload
-def build_memory(kind: Literal['other'], data: OtherMemory.Data, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> OtherMemory: ...
-@overload
-def build_memory(kind: Literal['text'], data: TextMemory.Data, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> TextMemory: ...
-@overload
-def build_memory(kind: Literal['file'], data: FileMemory.Data, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> FileMemory: ...
-@overload
-def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float], edges: Optional[dict[CIDv1, float]]=None) -> Memory: ...
-
-def build_memory(kind: MemoryKind, data: MemoryData, timestamp: Optional[float]=None, edges: Optional[dict[CIDv1, float]]=None) -> Memory:
-    '''Build a memory object from the given data.'''
-    args = {
-        "data": data,
-        "timestamp": timestamp
-    }
-    if edges: args['edges'] = [
-        Edge(target=k, weight=v) for k, v in edges.items()
-    ]
-    match kind:
-        case "self": return SelfMemory(**args)
-        case "other": return OtherMemory(**args)
-        case "text": return TextMemory(**args)
-        case "file": return FileMemory(**args)
-        case _: raise ValueError(f"Unknown memory kind: {kind}")
+type CompleteMemory = PartialMemory | Memory
+'''A memory with a CID.'''
+type AnyMemory = IncompleteMemory | PartialMemory | Memory
 
 class Chatlog(BaseModel):
-    chatlog: list[Memory]
+    '''Data model for a single-turn chat as returned by the server.'''
+    chatlog: list[PartialMemory]
     response: Memory
 
 class IncompleteACThread(IPLDModel):
     '''A thread of memories in the agent's context.'''
-    memory: Memory # Memory is incomplete so it can't be referenced by CID
+    memory: IncompleteMemory # Can't be referred to by cid
     prev: Optional[CIDv1] = None
 
 class Sona(BaseModel):
@@ -205,21 +241,21 @@ class ACThread(IPLDModel):
     memory: CIDv1
     prev: Optional[CIDv1] = None
 
-class MemoryDAG(IGraph[CIDv1, float, Memory, Memory]):
+class MemoryDAG(IGraph[CIDv1, float, PartialMemory, PartialMemory]):
     '''IPLD data model for memories implementing the IGraph interface.'''
 
-    def __init__(self, keys: dict[CIDv1, Memory]|None = None):
+    def __init__(self, keys: dict[CIDv1, PartialMemory]|None = None):
         super().__init__()
         self.adj = keys or {}
     
     @override
-    def _node(self, value: Memory) -> Memory:
+    def _node(self, value: PartialMemory) -> PartialMemory:
         copy = value.model_copy(deep=True)
         copy.edges = []
         return copy
     
     @override
-    def _setvalue(self,  node: Memory, value: Memory):
+    def _setvalue(self,  node: PartialMemory, value: PartialMemory):
         # We're assigning the discriminant with the data together so despite
         #  not being technically correct, there is no observable type violations
         node.kind = value.kind # type: ignore
@@ -228,16 +264,16 @@ class MemoryDAG(IGraph[CIDv1, float, Memory, Memory]):
         node.edges = value.edges
     
     @override
-    def _valueof(self, node: Memory) -> Memory:
+    def _valueof(self, node: PartialMemory) -> PartialMemory:
         return node
     
     @override
-    def _edges(self, node: Memory) -> Iterable[tuple[CIDv1, float]]:
+    def _edges(self, node: PartialMemory) -> Iterable[tuple[CIDv1, float]]:
         for edge in node.edges:
             yield edge.target, edge.weight
 
     @override
-    def _add_edge(self, src: Memory, dst: CIDv1, edge: float):
+    def _add_edge(self, src: PartialMemory, dst: CIDv1, edge: float):
         if any(dst == e.target for e in src.edges):
             raise ValueError(f"Edge to {dst!r} already exists")
         src.edges.append(Edge[CIDv1](
@@ -246,7 +282,7 @@ class MemoryDAG(IGraph[CIDv1, float, Memory, Memory]):
         ))
     
     @override
-    def _pop_edge(self, src: Memory, dst: CIDv1) -> Optional[float]:
+    def _pop_edge(self, src: PartialMemory, dst: CIDv1) -> Optional[float]:
         edges = src.edges
         for i, edge in enumerate(edges):
             if edge.target == dst:

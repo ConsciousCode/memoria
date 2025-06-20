@@ -1,7 +1,6 @@
 from contextlib import contextmanager
 from typing import Callable, Iterable, Optional, Protocol, cast, overload
 import sqlite3
-import json
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -13,8 +12,8 @@ from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
 from ipld.cid import CIDv1
-from models import ACThread, Edge, IncompleteACThread, Memory, MemoryDataAdapter, MemoryKind, RecallConfig, build_memory
-from util import finite, json_t
+from models import ACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, Memory, MemoryKind, PartialMemory, RecallConfig
+from util import finite
 
 nomic_text = TextEmbedding(
     model_name="nomic-ai/nomic-embed-text-v1.5",
@@ -99,9 +98,30 @@ class MemoryRow(BaseMemoryRow):
             importance=importance
         )
     
-    def to_memory(self):
+    def to_incomplete(self, edges: list[Edge[CIDv1]] = []):
+        '''Convert this row to an IncompleteMemory object.'''
+        return IncompleteMemory(
+            data=IncompleteMemory.build_data(self.kind, self.data),
+            timestamp=self.timestamp,
+            edges=edges
+        )
+    
+    def to_partial(self, edges: list[Edge[CIDv1]] = []):
+        '''Convert this row to a Memory object without finalizing it.'''
+        return PartialMemory(
+            cid=self.cid,
+            data=Memory.build_data(self.kind, self.data),
+            timestamp=self.timestamp,
+            edges=edges
+        )
+    
+    def to_memory(self, edges: list[Edge[CIDv1]]):
         '''Convert this row to a Memory object.'''
-        return build_memory(self.kind, json.loads(self.data), self.timestamp)
+        return Memory(
+            data=Memory.build_data(self.kind, self.data),
+            timestamp=self.timestamp,
+            edges=edges
+        )
 
 class IncompleteMemoryRow(BaseMemoryRow):
     '''An incomplete memory, does not have a CID.'''
@@ -117,6 +137,13 @@ class IncompleteMemoryRow(BaseMemoryRow):
             kind=kind,
             data=data,
             importance=importance
+        )
+    
+    def to_memory(self, edges: list[Edge[CIDv1]]):
+        return IncompleteMemory(
+            data=IncompleteMemory.build_data(self.kind, self.data),
+            timestamp=self.timestamp,
+            edges=edges
         )
 
 type AnyMemoryRow = MemoryRow | IncompleteMemoryRow
@@ -284,10 +311,10 @@ class Database:
             WHERE src_id = ?
         """, (mem.rowid,))
 
-        m = build_memory(mem.kind, mem.data, mem.timestamp, {
-            CIDv1(dst): weight
+        m = mem.to_memory([
+            Edge(target=CIDv1(dst), weight=weight)
                 for dst, weight in cur
-        })
+        ])
         if m.cid != cid:
             raise ValueError(f"Memory CID {m.cid} does not match requested CID {cid}")
         
@@ -385,12 +412,12 @@ class Database:
             FROM memories WHERE cid = ?
         """, (cid.buffer,)).fetchone()
 
-    def ipld_memory_rowid(self, rowid: int) -> Optional[Memory]:
+    def ipld_memory_rowid(self, rowid: int) -> Optional[AnyMemory]:
         '''
         Build a Memory object from a memory rowid. This will also fetch the
         edges for the memory.
         '''
-        if (memory := self.select_memory_rowid(rowid)) is None:
+        if (mr := self.select_memory_rowid(rowid)) is None:
             return None
         
         cur = self.cursor()
@@ -401,10 +428,10 @@ class Database:
             WHERE src_id = ?
         """, (rowid,))
         
-        return build_memory(memory.kind, memory.data, memory.timestamp, {
-            CIDv1(cid): weight
-                for cid, weight in cur
-        })
+        return mr.to_memory([
+            Edge(target=CIDv1(dst), weight=weight)
+                for dst, weight in cur
+        ])
 
     def get_incomplete_act(self, rowid: int) -> Optional[IncompleteACThread]:
         '''Get the act thread for a sona and memory.'''
@@ -421,18 +448,14 @@ class Database:
             return None
         
         kind, data, timestamp, prev = row
-        edges: dict[CIDv1, float] = {}
-        for edge in self.backward_edges(rowid):
-            if cid := edge.target.cid:
-                edges[CIDv1(cid)] = edge.weight
-            else:
-                raise ValueError(
-                    f"Memory with rowid {rowid} has an edge to an incomplete memory: {edge.target.rowid}"
-                )
-
         return IncompleteACThread(
-            memory=build_memory(
-                kind, MemoryDataAdapter.validate_json(data), timestamp, edges
+            memory=IncompleteMemory(
+                data=IncompleteMemory.build_data(kind, data),
+                timestamp=timestamp,
+                edges=[
+                    Edge(target=e.target.cid, weight=e.weight)
+                        for e in self.backward_edges(rowid)
+                ]
             ),
             prev=CIDv1(prev)
         )
@@ -614,28 +637,22 @@ class DatabaseRW(Database):
         Finalize a memory by setting its CID and returning the memory object.
         This is used after all edges have been linked to the memory.
         '''
-        if (memory := self.select_memory_rowid(rowid)) is None:
+        if (mr := self.select_memory_rowid(rowid)) is None:
             raise ValueError(f"Memory with rowid {rowid} does not exist.")
         
-        if memory.cid is not None:
-            raise ValueError(f"Memory with rowid {rowid} already has a CID: {memory.cid}")
+        if mr.cid is not None:
+            raise ValueError(f"Memory with rowid {rowid} already has a CID: {mr.cid}")
         
         # Build the CID from the memory data
-        edges: dict[CIDv1, float] = {}
-        for edge in self.backward_edges(rowid):
-            if cid := edge.target.cid:
-                edges[CIDv1(cid)] = edge.weight
-            else:
-                raise ValueError(
-                    f"Memory with rowid {rowid} has an edge to a memory without a CID: {edge.target.rowid}"
-                )
-        
-        memory = build_memory(memory.kind, memory.data, memory.timestamp, edges)
+        m = mr.to_memory([
+            Edge(target=e.target.cid, weight=e.weight)
+                for e in self.backward_edges(rowid)
+        ]).complete()
         cur = self.cursor()
         cur.execute("""
             UPDATE memories SET cid = ? WHERE rowid = ?
-        """, (memory.cid.buffer, rowid))
-        return memory
+        """, (m.cid.buffer, rowid))
+        return m
     
     def finalize_act(self, rowid: int) -> ACThread:
         '''Finalize an ACT by setting its CID and returning it.'''
@@ -770,26 +787,32 @@ class DatabaseRW(Database):
             VALUES (?, ?)
         """, (memory_id, index))
 
-    def insert_memory(self,
-            cid: Optional[CIDv1],
-            kind: MemoryKind,
-            data: json_t,
-            timestamp: Optional[float],
-            importance: Optional[float] = None
-        ) -> int:
-        c = cid and cid.buffer
+    def insert_memory(self, memory: AnyMemory, importance: Optional[float]=None) -> int:
+        cid = memory.cid
         cur = self.cursor()
         cur.execute("""
             INSERT OR IGNORE INTO memories
-            (cid, timestamp, kind, data, importance)
-            VALUES (?, ?, ?, JSONB(?), ?)
-        """, (c, timestamp, kind, json.dumps(data), importance))
+                (cid, timestamp, kind, data, importance)
+                    VALUES (?, ?, ?, JSONB(?), ?)
+        """, (
+            cid,
+            memory.timestamp,
+            memory.data.kind,
+            memory.data.model_dump_json(exclude={"kind"}),
+            importance
+        ))
         
+        # 0 (ignored) or None (error)
         if not (rowid := cur.lastrowid):
-            # Memory already exists
-            rowid, = cur.execute("""
-                SELECT rowid FROM memories WHERE cid = ?
-            """, (c,)).fetchone()
+            if cid:
+                # Memory already exists
+                rowid, = cur.execute("""
+                    SELECT rowid FROM memories WHERE cid = ?
+                """, (cid,)).fetchone()
+            else:
+                raise RuntimeError(
+                    "Failed to insert memory, it may already exist."
+                )
         
         return rowid
     
@@ -857,6 +880,7 @@ class DatabaseRW(Database):
         Link the edges of a memory to the database. This is used when inserting
         a memory with edges that are already in the database.
         '''
+        assert all(0 <= e.weight <= 1 for e in edges)
         cur = self.cursor()
         cur.executemany("""
             INSERT OR IGNORE INTO edges (src_id, dst_id, weight)

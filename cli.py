@@ -4,8 +4,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import cached_property
 import os
-from typing import TYPE_CHECKING, Any, Final, Iterable, Iterator, NoReturn, Optional
+from typing import TYPE_CHECKING, Any, Final, Iterable, Iterator, NoReturn, Optional, Sequence
 import inspect
+import readline
 
 from mcp.types import ModelHint, ModelPreferences
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -13,7 +14,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
 
 from ipld.cid import CIDv1
-from models import Chatlog, Memory, MemoryDAG, OtherMemory, RecallConfig, SelfMemory
+from models import AnyMemory, Chatlog, Memory, MemoryDAG, PartialMemory, RecallConfig
 
 if TYPE_CHECKING:
     # These can be pretty beefy, so put in a type check to avoid
@@ -371,25 +372,41 @@ class MemoriaApp:
         self.help = help
         self.config = config or CONFIG
     
-    def print_memory(self, memory: Memory, refs: dict[CIDv1, int], verbose=True, extra=True):
+    def tagname(self, memory: AnyMemory):
+        match memory.data:
+            case Memory.SelfData():
+                return "assistant"
+            
+            case Memory.OtherData():
+                return "user"
+            
+            case _:
+                return memory.data.kind
+
+    def print_memory(self, memory: AnyMemory, refs: dict[CIDv1, int], verbose=True, extra=True):
         """Print a message to the user."""
         if extra:
             parts = []
-            if es := memory.edges:
-                rs = ','.join(str(refs[cid.target]) for cid in es)
-                parts.append(f"ref={refs[memory.cid]}->{rs}")
+            if cid := memory.cid:
+                ref = refs[cid]
             else:
-                parts.append(f"ref={refs[memory.cid]}")
+                ref = ""
+            
+            if es := memory.edges:
+                rs = ','.join(str(refs[e.target]) for e in es)
+                parts.append(f"ref={ref}->{rs}")
+            else:
+                parts.append(f"ref={ref}")
             
             if ts := memory.timestamp:
                 dt = datetime.fromtimestamp(ts).replace(microsecond=0)
                 parts.append(f"{dt.isoformat()}")
             
             after = ' ' + ' '.join(parts) if verbose and parts else ""
-            print(f"<{memory.kind}{after}> ", end='')
-        print(memory.document())
+            print(f"<{self.tagname(memory)}{after}> ", end='')
+        print(memory.data.document())
     
-    def print_chatlog(self, log: list[Memory], refs: dict[CIDv1, int], meta=False, verbose=True, extra=True):
+    def print_chatlog(self, log: Sequence[AnyMemory], refs: dict[CIDv1, int], meta=False, verbose=True, extra=True):
         """
         Print the chat log in a readable format.
         
@@ -397,7 +414,7 @@ class MemoriaApp:
             chatlog: The Chatlog object to print.
             meta: If True, print metadata about the chat log.
         """
-
+        print(refs, log, [m.cid for m in log], sep="\n")
         for m in log:
             self.print_memory(m, refs, verbose=verbose, extra=extra)
     
@@ -543,13 +560,10 @@ class MemoriaApp:
             for c in contents:
                 assert isinstance(c, TextContent)
                 chatlog = Chatlog.model_validate_json(c.text)
-                refs: dict[CIDv1, int] = {}
-                log: list[Memory] = []
-                for m in chatlog.chatlog + [chatlog.response]:
-                    log.append(m)
-                    refs[m.cid] = len(log)
-
-                return args, opts, log, refs
+                log = chatlog.chatlog + [chatlog.response]
+                return args, opts, log, {
+                    m.cid: i for i, m in enumerate(log, start=1)
+                }
         
         raise ValueError("No chat log found in response.")
 
@@ -584,9 +598,7 @@ class MemoriaApp:
                 else:
                     model = name
 
-                print("Sampling model", model if isinstance(model, str) else model.model_name)
-                print("Provider", provider)
-                print(params.systemPrompt or SYSTEM_PROMPT)
+                print("Model", model if isinstance(model, str) else model.model_name)
                 agent = Agent(
                     model, instructions=params.systemPrompt or SYSTEM_PROMPT
                 )
@@ -603,7 +615,6 @@ class MemoriaApp:
                     else:
                         raise ValueError(f"Unknown role {m.role!r} in message {m!r}")
 
-                print(history)
                 result = await agent.run(
                     message_history=history,
                     model_settings=settings
@@ -727,11 +738,12 @@ class MemoriaApp:
             })
             for item in chatlog:
                 assert isinstance(item, TextContent)
-                d = TypeAdapter(dict[CIDv1, Memory]).validate_json(item.text)
+                d = TypeAdapter(dict[CIDv1, PartialMemory]).validate_json(item.text)
                 g = MemoryDAG(d)
                 log = []
                 refs: dict[CIDv1, int] = {}
                 for cid in g.invert().toposort(key=lambda m: m.timestamp):
+                    assert g[cid].cid == cid
                     log.append(g[cid])
                     refs[cid] = len(log)
                 
