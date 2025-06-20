@@ -2,7 +2,7 @@ import json
 
 from . import multibase
 from .cid import CID, CIDv0, CIDv1
-from .ipld import _encodec, _decodec, IPLData
+from ._common import _encodec, _decodec, IPLData
 
 __all__ = ("marshal", "unmarshal")
 

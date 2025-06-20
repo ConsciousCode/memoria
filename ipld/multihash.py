@@ -1,10 +1,12 @@
 from io import BytesIO
-from typing import Literal, Self, cast, overload
+from typing import Literal, Self, overload
 import hashlib
+
+from ._common import Immutable
 
 from . import varint, multibase
 
-__all__ = ('Multihash', 'multihash')
+__all__ = ("HASH_CODES", "CODE_HASHES", 'Multihash', 'multihash')
 
 HASH_CODES: dict[str, int] = {
     'id': 0,
@@ -59,40 +61,50 @@ CODE_HASHES: dict[int, str] = {
 def _pack_mh(function: int, digest: bytes) -> bytes:
     return varint.encode(function) + varint.encode(len(digest)) + digest
 
-class Multihash:
+class Multihash(Immutable):
     '''A hash with a function code and digest.'''
+    # Unlike CID, we can't store just the buffer because the function is
+    #  a varint, so there otherwise can't be O(1) access to these.
     __slots__ = ("function", "digest")
     __match_args__ = ("function", "digest")
 
     function: int
     digest: bytes
 
+    def __new__(cls, function: 'int|str|bytes|Multihash', digest: str|bytes|None = None) -> 'Multihash':
+        if isinstance(function, Multihash):
+            if digest is not None:
+                raise TypeError("Copy constructor does not accept digest argument")
+            return function
+        return super().__new__(cls)
+
     @overload
     def __init__(self, function: int|str, digest: str|bytes): ...
     @overload
-    def __init__(self, buffer: bytes): ...
+    def __init__(self, buffer: 'bytes|Multihash'): ...
     
     def __init__(self, *args, **kwargs):
         # Types of function, digest, and buffer are interlinked, we need to
-        # combine them into a single tuple to match against (parts).
+        # combine them into a single tuple to match against.
+        parts: tuple[int|str, str|bytes, None]|tuple[None, None, bytes|Multihash]
         match args:
             case (int(function)|str(function), bytes(digest)):
                 parts = (function, digest, None)
 
             case (buffer,):
                 if digest := kwargs.pop("digest", None):
-                    parts = (cast(int|str, buffer), cast(bytes, digest), None)
+                    parts = (buffer, digest, None)
                 else:
-                    parts = (None, None, cast(bytes, buffer))
+                    parts = (None, None, buffer)
             case ():
                 if (buffer := kwargs.pop("buffer", None)):
-                    parts = (None, None, cast(bytes, buffer))
+                    parts = (None, None, buffer)
                 else:
                     function = kwargs.pop("function", None)
                     digest = kwargs.pop("digest", None)
                     if function is None or digest is None:
                         raise TypeError('Multihash() missing function or digest')
-                    parts = (cast(int|str, function), cast(bytes, digest), None)
+                    parts = (function, digest, None)
             
             case _:
                 raise TypeError('Multihash() got too many arguments')        
@@ -100,38 +112,56 @@ class Multihash:
         if kwargs:
             raise TypeError('Multihash() got too many arguments')
 
-        if parts[2] is not None:
-            bio = BytesIO(parts[2])
-            try: function = varint.decode_stream(bio)
-            except TypeError:
-                raise ValueError('Invalid varint provided') from None
+        # Now that we've detangled them, we can process them.
+        match parts:
+            case (function, digest, None):
+                if isinstance(function, str):
+                    if (function := HASH_CODES.get(function)) is None:
+                        raise ValueError(f"Unknown hash function: {function}")
+                elif function not in CODE_HASHES:
+                    raise ValueError(f'Unsupported hash code {function:02x}')
+                
+                if isinstance(digest, str):
+                    digest = bytes.fromhex(digest)
+            
+            case (None, None, bytes(buffer)):
+                bio = BytesIO(buffer)
+                try: function = varint.decode_stream(bio)
+                except TypeError:
+                    raise ValueError('Invalid varint provided') from None
 
-            if function not in CODE_HASHES:
-                raise ValueError(f'Unsupported hash code {function:02x}')
+                if function not in CODE_HASHES:
+                    raise ValueError(f'Unsupported hash code {function:02x}')
 
-            try: length = varint.decode_stream(bio)
-            except TypeError:
-                raise ValueError('Invalid length provided') from None
+                try: length = varint.decode_stream(bio)
+                except TypeError:
+                    raise ValueError('Invalid length provided') from None
 
-            if len(digest := bio.read()) != length:
-                raise ValueError(f'Inconsistent multihash length {len(digest)} != {length}')
-        else:
-            function, digest, _ = parts
-            if isinstance(function, str):
-                if (function := HASH_CODES.get(function)) is None:
-                    raise ValueError(f"Unknown hash function: {function}")
-        
-        if isinstance(digest, str):
-            digest = bytes.fromhex(digest)
+                if len(digest := bio.read()) != length:
+                    raise ValueError(f'Inconsistent multihash length {len(digest)} != {length}')
+            
+            case (None, None, Multihash() as mh):
+                if hasattr(self, 'function'):
+                    return
+                function, digest = mh.function, mh.digest
+            
+            case _:
+                raise TypeError(f"Invalid arguments for Multihash: {args!r}, {kwargs!r}")
 
+        # Sanity checks because these fields are immutable and if they're wrong
+        #  they float around in the codebase as tiny bombs
         if not isinstance(function, int):
-            raise TypeError(f"Expected function to be int, got {type(function).__name__}")
+            raise TypeError(
+                f"Expected function to be int, got {type(function).__name__}"
+            )
         
         if not isinstance(digest, bytes):
-            raise TypeError(f"Expected digest to be bytes, got {type(digest).__name__}")
+            raise TypeError(
+                f"Expected digest to be bytes, got {type(digest).__name__}"
+            )
 
-        super().__setattr__('function', function)
-        super().__setattr__('digest', digest)
+        object.__setattr__(self, 'function', function)
+        object.__setattr__(self, 'digest', digest)
     
     @classmethod
     def from_hex(cls, hex_string: str) -> Self:
@@ -166,9 +196,6 @@ class Multihash:
             return False
 
         return True
-
-    def __setattr__(self, name, value):
-        raise AttributeError("Multihash is immutable")
 
     def __len__(self):
         return len(self.buffer)

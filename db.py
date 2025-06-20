@@ -6,18 +6,19 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from ipld.cid import CIDv1
 from numpy import ndarray
 import numpy
 import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
+from ipld.cid import CIDv1
 from models import ACThread, Edge, IncompleteACThread, Memory, MemoryDataAdapter, MemoryKind, RecallConfig, build_memory
 from util import finite, json_t
 
 nomic_text = TextEmbedding(
     model_name="nomic-ai/nomic-embed-text-v1.5",
+    cache_dir="private/local_cache"
 )
 
 type JSONB = str
@@ -61,24 +62,55 @@ class FileRow(BaseModel):
             content=content
         )
 
-class MemoryRow(BaseModel):
+class BaseMemoryRow(BaseModel):
+    '''
+    Split MemoryRow into complete and incomplete varieties for type-level
+    guarantees about whether a memory has a CID.
+    '''
     type PrimaryKey = int
 
     rowid: PrimaryKey
-    cid: Optional[bytes] # None when the memory is incomplete
+    #cid: Optional[bytes] # None when the memory is incomplete
     timestamp: Optional[float]
     kind: MemoryKind
     data: JSONB
     importance: Optional[float]
 
-    def to_memory(self):
-        '''Convert this row to a Memory object.'''
-        return build_memory(self.kind, json.loads(self.data), self.timestamp)
-    
+    @classmethod
+    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'AnyMemoryRow':
+        '''Create a MemoryRow from a raw database row.'''
+        return (MemoryRow if cid else IncompleteMemoryRow).factory(
+            rowid, cid, timestamp, kind, data, importance
+        )
+
+class MemoryRow(BaseMemoryRow):
+    '''A completed memory, has a CID.'''
+    cid: CIDv1
+
     @classmethod
     def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'MemoryRow':
         '''Create a MemoryRow from a raw database row.'''
-        return cls(
+        return MemoryRow(
+            rowid=rowid,
+            cid=CIDv1(cid),
+            timestamp=timestamp,
+            kind=kind,
+            data=data,
+            importance=importance
+        )
+    
+    def to_memory(self):
+        '''Convert this row to a Memory object.'''
+        return build_memory(self.kind, json.loads(self.data), self.timestamp)
+
+class IncompleteMemoryRow(BaseMemoryRow):
+    '''An incomplete memory, does not have a CID.'''
+    cid: None = None
+
+    @classmethod
+    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'IncompleteMemoryRow':
+        '''Create an IncompleteMemoryRow from a raw database row.'''
+        return IncompleteMemoryRow(
             rowid=rowid,
             cid=cid,
             timestamp=timestamp,
@@ -86,6 +118,8 @@ class MemoryRow(BaseModel):
             data=data,
             importance=importance
         )
+
+type AnyMemoryRow = MemoryRow | IncompleteMemoryRow
 
 class EdgeRow(BaseModel):
     src_id: MemoryRow.PrimaryKey
@@ -110,25 +144,56 @@ class SonaRow(BaseModel):
             pending_id=pending_id
         )
 
-class ACThreadRow(BaseModel):
+class BaseACThreadRow(BaseModel):
+    '''
+    Split ACThreadRow into complete and incomplete varieties for type-level
+    guarantees about whether an ACT has a CID.
+    '''
     type PrimaryKey = int
 
     rowid: PrimaryKey
-    cid: Optional[bytes] # Depends on memory CID and previous CID
     sona_id: SonaRow.PrimaryKey
-    memory_id: MemoryRow.PrimaryKey
+    memory_id: BaseMemoryRow.PrimaryKey
     prev_id: Optional[int]
+
+    @classmethod
+    def factory(cls, rowid, cid, sona_id, memory_id, prev_id) -> 'AnyACThreadRow':
+        '''Create an ACThreadRow from a raw database row.'''
+        return (ACThreadRow if cid else IncompleteACThreadRow).factory(
+            rowid, cid, sona_id, memory_id, prev_id
+        )
+
+class ACThreadRow(BaseACThreadRow):
+    '''A completed act thread, has a CID.'''
+    cid: CIDv1
 
     @classmethod
     def factory(cls, rowid, cid, sona_id, memory_id, prev_id) -> 'ACThreadRow':
         '''Create an ACThreadRow from a raw database row.'''
-        return cls(
+        return ACThreadRow(
+            rowid=rowid,
+            cid=CIDv1(cid),
+            sona_id=sona_id,
+            memory_id=memory_id,
+            prev_id=prev_id
+        )
+
+class IncompleteACThreadRow(BaseACThreadRow):
+    '''An incomplete act thread, does not have a CID.'''
+    cid: None = None
+
+    @classmethod
+    def factory(cls, rowid, cid, sona_id, memory_id, prev_id) -> 'IncompleteACThreadRow':
+        '''Create an IncompleteACThread from a raw database row.'''
+        return IncompleteACThreadRow(
             rowid=rowid,
             cid=cid,
             sona_id=sona_id,
             memory_id=memory_id,
             prev_id=prev_id
         )
+
+type AnyACThreadRow = ACThreadRow | IncompleteACThreadRow
 
 class CancelTransaction(Exception):
     '''
@@ -306,8 +371,8 @@ class Database:
             WHERE s.rowid = ?
         """, (sona_id,)).fetchone()
     
-    def select_memory_rowid(self, rowid: int) -> Optional[MemoryRow]:
-        cur = self.cursor(MemoryRow)
+    def select_memory_rowid(self, rowid: int) -> Optional[AnyMemoryRow]:
+        cur = self.cursor(BaseMemoryRow)
         return cur.execute("""
             SELECT rowid, cid, timestamp, kind, JSON(data), importance
             FROM memories WHERE rowid = ?
@@ -381,7 +446,7 @@ class Database:
             return numpy.frombuffer(row[0], dtype=numpy.float32)
         return None
     
-    def get_active_memory(self, sona_id: int) -> list[MemoryRow]:
+    def get_active_memory(self, sona_id: int) -> list[IncompleteMemoryRow]:
         '''Get the active memory for a sona.'''
         cur = self.cursor(EdgeRow)
         return cur.execute("""
@@ -425,7 +490,7 @@ class Database:
                 weight=row[6]
             )
     
-    def forward_edges(self, dst_id: int) -> Iterable[Edge[MemoryRow]]:
+    def forward_edges(self, dst_id: int) -> Iterable[Edge[AnyMemoryRow]]:
         '''
         Get all edges leading from the given memory, returning the destination id
         and weight of the edge.
@@ -508,6 +573,7 @@ class Database:
                 LEFT JOIN fts ON fts.rowid = m.rowid
                 LEFT JOIN mvss ON mvss.memory_id = m.rowid
                 LEFT JOIN svss ON svss.sona_id = sm.sona_id
+            WHERE cid IS NOT NULL -- DO NOT recall incomplete memories
             ORDER BY score DESC
             LIMIT {int(k)!r}
         """, {

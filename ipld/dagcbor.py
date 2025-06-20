@@ -1,7 +1,7 @@
 import cbor2
 
 from .cid import CID
-from .ipld import _encodec, _decodec, IPLData
+from ._common import _encodec, _decodec, IPLData
 
 __all__ = (
     "marshal", "unmarshal"

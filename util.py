@@ -136,12 +136,6 @@ def cidstr(c: bytes) -> str:
     """
     return CID(c).encode()
 
-def iter_in(item: object, iterable: Iterable) -> bool:
-    for it in iterable:
-        if item == it:
-            return True
-    return False
-
 class classproperty[T, R]:
     def __init__(self, fn: Callable[[type[T]], R]):
         self.fn = fn

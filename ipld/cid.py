@@ -4,6 +4,8 @@ from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import core_schema
 
+from ._common import Immutable
+
 from .multihash import Multihash, multihash
 from . import multibase, multicodec
 
@@ -30,7 +32,7 @@ type Codec = Literal[
 ]
 type AnyCID = 'CID|CIDv0|CIDv1'
 
-class CID:
+class CID(Immutable):
     buffer: bytes
 
     __slots__ = ("buffer",)
@@ -56,6 +58,7 @@ class CID:
     def __new__(cls, /, codec: Codec, multihash: str|bytes|Multihash) -> 'CIDv1': ...
 
     def __new__(cls, *args, **kwargs) -> AnyCID:
+        # Subclass fast path
         if cls is not CID:
             return super().__new__(cls)
         
@@ -63,6 +66,7 @@ class CID:
         if args and isinstance(cid := args[0], CID):
             return cid
 
+        # Factory method for CID construction
         args = list(args)
         if (multihash := kwargs.get('multihash')) is None:
             match args:
@@ -87,14 +91,13 @@ class CID:
             case []|[1]: return CIDv1(codec, multihash)
             case _: raise ValueError("invalid arguments")
     
-    def __init__(self, data: 'bytes|CID', /):
-        if not isinstance(data, bytes) and hasattr(data, 'buffer'):
-            return
-        super().__init__()
-        super().__setattr__('buffer', data)
-
-    def __setattr__(self, name: str, value: Any):
-        raise TypeError("CID objects are immutable.")
+    def __init__(self, data: bytes, /):
+        # Sanity check the data type because otherwise they're tiny bug bombs
+        if isinstance(data, bytes):
+            super().__init__()
+            object.__setattr__(self, 'buffer', data)
+        else:
+            raise TypeError(f"CID.__init__ received non-bytes {data}")
 
     @property
     def version(self) -> int:
@@ -157,7 +160,7 @@ class CID:
             try:
                 return cls(value)
             except Exception as e:
-                raise ValueError(f"Invalid CID: {e}") from e
+                raise ValueError(f"Invalid CID: {value!r}") from e
 
         return core_schema.no_info_plain_validator_function(
             validate_cid,
@@ -184,7 +187,7 @@ class CID:
             return False
 
     @staticmethod
-    def parse(raw: str|bytes|Multihash) -> tuple[Version, Codec, bytes]:
+    def parse(raw: 'str|bytes|Multihash|CIDv0|CIDv1') -> tuple[Version, Codec, bytes]:
         """
         Parses a CID string and returns a CID object.
 
@@ -193,24 +196,34 @@ class CID:
             - multibase-encoded CID
         :return: a CID object
         """
-        if isinstance(raw, Multihash):
-            if raw.function == 'base58btc':
+        match raw:
+            case CIDv0():
                 return 0, CIDv0.CODEC, raw.buffer
-            raise ValueError(f'Bare multihash requires CIDv0 which is base58btc-only. Got {raw.function}')
+            case CIDv1():
+                return 1, raw.codec, raw.multihash.buffer
+            case Multihash():
+                if raw.function == 'base58btc':
+                    return 0, CIDv0.CODEC, raw.buffer
+                raise ValueError(f'Bare multihash requires CIDv0 which is base58btc-only. Got {raw.function}')
+            
+            case str():
+                if multibase.is_encoded(raw):
+                    raw = multibase.decode(raw)
+                else:
+                    raw = multibase.base58.decode(raw)
         
-        if isinstance(raw, str):
-            if multibase.is_encoded(raw):
-                raw = multibase.decode(raw)
-            else:
-                raw = multibase.base58.decode(raw)
-        
+        if len(raw) <= 2:
+            raise ValueError(
+                f"Invalid CID length {len(raw)}. Expected at least 2 bytes for version and codec."
+            )
+
         # if the bytestream is a CID
         version, data = raw[0], raw[1:]
         codec = cast(Codec, multicodec.get_codec(data))
         multihash = multicodec.remove_prefix(data)
 
         try:
-            Multihash(multihash) # validate multihash
+            Multihash(multihash) # validate multihash with exception
         except ValueError:
             raise
         
@@ -218,8 +231,8 @@ class CID:
             raise ValueError(f"Unsupported CID version {version}, expected 0 or 1")
         return version, codec, multihash
     
-    @staticmethod
-    def build(version: Version, codec: Codec, multihash: str|bytes|Multihash) -> bytes:
+    @classmethod
+    def build(cls, version: Version, codec: Codec, multihash: str|bytes|Multihash) -> bytes:
         """
         Constructs a CID byte string from its components.
 
@@ -240,22 +253,22 @@ class CID:
             multihash = multibase.decode(multihash)
         return b'\1' + multicodec.add_prefix(codec, multihash)
     
-    @staticmethod
-    def normalize(cid: str|bytes|Multihash) -> bytes:
+    @classmethod
+    def normalize(cls, cid: "str|bytes|Multihash|CIDv0|CIDv1") -> bytes:
         """
         Normalizes a CID string or bytes to its canonical byte representation.
 
         :param cid: CID string or bytes
         :return: normalized CID byte representation
         """
-        return CID.build(*CID.parse(cid))
+        return cls.build(*CID.parse(cid))
 
 class CIDv0(CID):
     """ CID version 0 object """
 
     CODEC = 'dag-pb'
 
-    def __new__(cls, data: 'str|bytes|Multihash|CIDv0', /) -> 'CIDv0':
+    def __new__(cls, data: 'str|bytes|Multihash|CIDv0|CIDv1', /) -> 'CIDv0':
         if isinstance(data, Multihash):
             return super().__new__(cls, 0, "dag-pb", data.buffer)
         else:
@@ -264,19 +277,13 @@ class CIDv0(CID):
                 return self
         raise TypeError(f"Expected CIDv0, got {type(self).__name__}")
     
-    def __init__(self, data: 'str|bytes|Multihash|CIDv0', /):
-        match data:
-            case CIDv0(): return
-            case Multihash():
-                if data.function != 'base58btc':
-                    raise ValueError(f'CIDv0 requires base58btc multihash, got {data.function}')
-                
+    def __init__(self, data: 'str|bytes|Multihash|CIDv0|CIDv1', /):
+        if isinstance(data, CIDv0):
+            # CIDv0(c := CIDv0()) is c
+            if not hasattr(self, 'buffer'):
                 super().__init__(data.buffer)
-            
-            case bytes(): super().__init__(data)
-            case str(): super().__init__(multibase.base58.decode(data))
-            case _:
-                raise TypeError(f"CIDv0 expected str, bytes, or Multihash, got {type(data).__name__}")
+            return
+        super().__init__(self.normalize(data))
 
     def __repr__(self):
         return f"CIDv0({self.multihash!r})"
@@ -293,7 +300,7 @@ class CIDv0(CID):
             """Validate and convert input to a CIDv1 object."""
             try:
                 match cid := CID(value):
-                    case CIDv1(): return cid.v0()
+                    case CIDv1(): return CIDv0(cid)
                     case CIDv0(): return cid
                     case _: raise ValueError(f"Invalid CIDv0 input: {value}")
             except Exception as e:
@@ -305,6 +312,20 @@ class CIDv0(CID):
                 str, return_schema=core_schema.str_schema(),
             )
         )
+    
+    @classmethod
+    def build(cls, version: Version, codec: Codec, multihash: str|bytes|Multihash) -> bytes:
+        """
+        Constructs a CIDv0 byte string from its components.
+
+        :param multihash: Multihash for the CID
+        :return: CIDv0 byte string
+        """
+        if version != 0:
+            raise ValueError(f"CIDv0 requires version 0, got {version}")
+        if codec != cls.CODEC:
+            raise ValueError(f"CIDv0 requires codec {cls.CODEC}, got {codec}")
+        return super().build(0, cls.CODEC, multihash)
 
     @property
     @override
@@ -328,17 +349,13 @@ class CIDv0(CID):
             raise ValueError('CIDv0 does not support encoding, use CIDv1 instead')
         return multibase.base58.encode(self.buffer)
 
-    def v1(self):
-        """Get an equivalent :py:class:`cid.CIDv1` object."""
-        return CIDv1(self.CODEC, self.buffer)
-
 class CIDv1(CID):
     """ CID version 1 object """
 
     @overload
-    def __new__(cls, data: 'str|bytes|CIDv1', /) -> Self: ...
+    def __new__(cls, data: 'str|bytes|CIDv0|CIDv1', /) -> Self: ...
     @overload
-    def __new__(cls, /, codec: Codec, multihash: str|bytes) -> Self: ...
+    def __new__(cls, /, codec: Codec, multihash: str|bytes|Multihash) -> Self: ...
 
     def __new__(cls, *args, **kwargs) -> Self:
         self = super().__new__(cls, *args, **kwargs)
@@ -347,31 +364,29 @@ class CIDv1(CID):
         raise TypeError(f"Expected CIDv1, got CIDv0")
 
     @overload
-    def __init__(self, data: 'str|bytes|CIDv1', /): ...
+    def __init__(self, data: 'str|bytes|CIDv0|CIDv1', /): ...
     @overload
     def __init__(self, codec: Codec, multihash: str|bytes|Multihash): ...
     
-    def __init__(self, codec: 'str|bytes|CIDv1', multihash: Optional[str|bytes|Multihash] = None):
+    def __init__(self, codec: 'str|bytes|CIDv0|CIDv1', multihash: Optional[str|bytes|Multihash] = None):
         """
         :param codec: codec for the CID
         :param multihash: multihash for the CID, if not provided, it is cidexpected that `codec` is a multibase encoded string
         """
-        if isinstance(codec, CIDv1):
-            return
-
         if multihash is None:
-            # "codec" is actually the entire CID
-            if isinstance(codec, str):
-                codec = multibase.decode(codec)
-            super().__init__(codec)
-        elif isinstance(codec, bytes):
-            raise TypeError(
-                '`codec` should be a string, got bytes. If you want to use a multibase encoded CID, pass it as a single argument.'
+            # CIDv1(c := CIDv1()) is c
+            if isinstance(codec, CIDv1) and hasattr(self, 'buffer'):
+                return
+            return super().__init__(self.normalize(codec))
+        
+        if isinstance(codec, str):
+            return super().__init__(
+                self.build(1, cast(Codec, codec), multihash)
             )
-        else:
-            if isinstance(multihash, str):
-                multihash = multibase.decode(multihash)
-            super().__init__(CID.build(1, cast(Codec, codec), multihash))
+        
+        raise TypeError(
+            f'`codec` should be a str, got {type(codec).__name__}. If you want to use a multibase-encoded CID, pass it as a single argument.'
+        )
 
     def __repr__(self):
         return f"CIDv1({self.codec!r}, {self.multihash!r})"
@@ -388,26 +403,32 @@ class CIDv1(CID):
             try:
                 match cid := CID(value):
                     case CIDv1(): return cid
-                    case CIDv0(): return cid.v1()
+                    case CIDv0(): return CIDv1(cid)
                     case _: raise ValueError(f"Invalid CIDv1 input: {value}")
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 raise ValueError(f"Invalid CIDv1: {e}") from e
-        
-        return core_schema.union_schema([
-            # Accept existing CIDv1 objects
-            core_schema.is_instance_schema(CIDv1),
-            # Accept strings that can be converted to CIDv1
-            core_schema.no_info_after_validator_function(
-                validate_cidv1,
-                core_schema.str_schema(
-                    pattern=r'^[a-zA-Z0-9+/=-]+$',
-                    min_length=10,
-                    max_length=200,
+        try:
+            return core_schema.union_schema([
+                # Accept existing CIDv1 objects
+                core_schema.is_instance_schema(CIDv1),
+                # Accept strings that can be converted to CIDv1
+                core_schema.no_info_after_validator_function(
+                    validate_cidv1,
+                    core_schema.str_schema(
+                        pattern=r'^[a-zA-Z0-9+/=-]+$',
+                        min_length=10,
+                        max_length=200,
+                    )
                 )
-            )
-        ], serialization=core_schema.plain_serializer_function_ser_schema(
-            str, return_schema=core_schema.str_schema(),
-        ))
+            ], serialization=core_schema.plain_serializer_function_ser_schema(
+                str, return_schema=core_schema.str_schema(),
+            ))
+        except:
+            import traceback
+            traceback.print_exc()
+            raise
     
     @classmethod
     def __get_pydantic_json_schema__(cls, core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
@@ -430,6 +451,19 @@ class CIDv1(CID):
             'title': 'CIDv1'
         })
         return json_schema
+
+    @classmethod
+    def build(cls, version: Version, codec: Codec, multihash: str|bytes|Multihash) -> bytes:
+        """
+        Constructs a CIDv1 byte string from its components.
+
+        :param codec: Codec for the CID
+        :param multihash: Multihash for the CID
+        :return: CIDv1 byte string
+        """
+        if version != 1:
+            raise ValueError(f"CIDv1 requires version 1, got {version}")
+        return super().build(1, codec, multihash)
 
     @property
     @override
@@ -457,12 +491,6 @@ class CIDv1(CID):
         :return: encoded raw representation with the given encoding
         """
         return multibase.encode(encoding, self.buffer)
-
-    def v0(self):
-        """Get an equivalent :py:class:`cid.CIDv0` object."""
-        if self.codec != CIDv0.CODEC:
-            raise ValueError(f'CIDv1 can only be converted for codec {CIDv0.CODEC}')
-        return CIDv0(self.multihash.buffer)
 
 def cidhash(data: bytes, *, function: str = 'sha2-256', codec: Codec='dag-cbor') -> CIDv1:
     """

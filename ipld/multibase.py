@@ -137,8 +137,10 @@ ENCODINGS: dict[str, Codec] = {
     'base2': base2,
     'base8': base8,
     'base10': base10,
+    
     'base16': base16,
     'base16upper': base16upper,
+
     'base32hex': base32hex,
     'base32hexupper': base32hexupper,
     'base32hexpad': base32hexpad,
@@ -148,11 +150,15 @@ ENCODINGS: dict[str, Codec] = {
     'base32pad': base32pad,
     'base32padupper': base32padupper,
     'base32z': base32z,
+    
     'base36': base36,
     'base36upper': base36upper,
+    
     'base45': base45,
+    
     'base58btc': base58btc,
     'base58flickr': base58flickr,
+    
     'base64': base64,
     'base64pad': base64pad,
     'base64url': base64url,

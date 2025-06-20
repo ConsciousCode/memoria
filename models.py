@@ -207,12 +207,19 @@ class ACThread(IPLDModel):
 
 class MemoryDAG(IGraph[CIDv1, float, Memory, Memory]):
     '''IPLD data model for memories implementing the IGraph interface.'''
-    @override
-    def _node(self, value: Memory) -> Memory:
-        return value
+
+    def __init__(self, keys: dict[CIDv1, Memory]|None = None):
+        super().__init__()
+        self.adj = keys or {}
     
     @override
-    def _setvalue(self, node: Memory, value: Memory):
+    def _node(self, value: Memory) -> Memory:
+        copy = value.model_copy(deep=True)
+        copy.edges = []
+        return copy
+    
+    @override
+    def _setvalue(self,  node: Memory, value: Memory):
         # We're assigning the discriminant with the data together so despite
         #  not being technically correct, there is no observable type violations
         node.kind = value.kind # type: ignore
@@ -228,11 +235,12 @@ class MemoryDAG(IGraph[CIDv1, float, Memory, Memory]):
     def _edges(self, node: Memory) -> Iterable[tuple[CIDv1, float]]:
         for edge in node.edges:
             yield edge.target, edge.weight
-        return node.edges
 
     @override
     def _add_edge(self, src: Memory, dst: CIDv1, edge: float):
-        src.edges.append(Edge(
+        if any(dst == e.target for e in src.edges):
+            raise ValueError(f"Edge to {dst!r} already exists")
+        src.edges.append(Edge[CIDv1](
             target=dst,
             weight=edge
         ))

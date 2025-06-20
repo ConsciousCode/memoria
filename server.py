@@ -9,14 +9,13 @@ from uuid import UUID
 from fastapi import FastAPI, Request, Response
 from fastmcp.exceptions import ResourceError, ToolError
 from mcp import SamplingMessage
-from mcp.types import ModelPreferences, PromptMessage, TextContent
+from mcp.types import ModelHint, ModelPreferences, PromptMessage, TextContent
 from fastmcp import Context, FastMCP
 from fastmcp.prompts.prompt import Message
 from pydantic import BaseModel, Field
 
 from ipld import dagcbor
 from ipld.cid import CIDv1
-
 from db import Edge
 from memoria import Database, Memoria
 from models import Chatlog, Memory, MemoryDAG, OtherMemory, RecallConfig, SelfMemory, StopReason
@@ -202,16 +201,17 @@ def recall(
     Recall memories related to the prompt, including relevant included memories
     and their dependencies.
     '''
-    return {
-        cid: mem
-            for cid, mem in mcp_context(ctx).recall(
-                sona,
-                prompt,
-                timestamp,
-                config,
-                memories or []
-            ).items()
-    }
+    d = dict(
+        mcp_context(ctx).recall(
+            sona,
+            prompt,
+            timestamp,
+            config,
+            memories or []
+        ).items()
+    )
+    print(d)
+    return d
 
 class ConvoMessage(BaseModel):
     role: Literal['user', 'assistant']
@@ -340,32 +340,58 @@ async def annotate_edges(
         messages: list[str|SamplingMessage]
     ) -> tuple[dict[int, float], dict[str, float]]:
     '''Use sampling with a faster model to annotate which memories are connected and by how much.'''
+    # Append a clarification prompt to enforce JSON-only output and prepare annotation context.
+    clarification = (
+        "[CLARIFICATION]\tThis marks the epistemic boundary. "
+        "Please reply only with JSON for annotation. Refer to the SYSTEM PROMPT for instructions."
+    )
+    msgs_for_sample = list(messages)
+    msgs_for_sample.append(
+        SamplingMessage(role="user", content=TextContent(type="text", text=clarification))
+    )
     result = await ctx.sample(
-        messages,
+        msgs_for_sample,
         system_prompt=inspect.cleandoc("""
-            This task is annotation.
-            
-            Given the conversational memory up to the [final] tag and the agent's response, which memories were relevant to that response? Irrelevant memories are ignored. Memories which contributed are ranked 1-10 with 1 being a trivial reference and 10 meaning the response would not be possible without it.
-
-            Additionally, the response itself is annotated for structurally recognizable importance with limited broader context. The dimensions of importance are novelty, emotional intensity, future relevance, saliency, and personal relevance. These are scored 0-10.
-
-            The process answers with only a JSON object following this schema:
-            {
+            You are an annotator tasked with analyzing conversations and providing structured feedback. Each conversation consists of a series of user and assistant messages, the last of which is marked with [final]\t, and the assistant's [response]\t. Afterwards, your job is to respond only with a JSON object that captures the relevance and importance of the assistant's final response based on the conversation history:
+            ```
+            <user>[ref:(index)->(references)\ttimestamp]\t<user_message>
+            <assistant>[ref...]\t<assistant_message>
+            ...
+            <user|assistant>[final...]\t<final_message>
+            <assistant>[response]\t<assistant_message>
+            <assistant>{
                 "relevance": {
-                    [index]: score
+                    "[index]": score
                 },
                 "importance": {
                     "novelty": score,
                     "intensity": score,
                     "future": score,
-                    "personal": score
+                    "personal": score,
+                    "saliency": score
                 }
             }
-            "relevance" maps memory indices (quoted, to be JSON-compliant) to their relevance score, e.g. {"2": 10, "8": 5}. The indices are the same as in the conversation, marked with ref:(index). Only use the index in the key, not the tag. "importance" scores the importance of the agent's response. 
+            ```
+            1. **Relevance Analysis:**
+            - Identify which memories from the conversation history are relevant to the assistant's final [response].
+            - Assign a relevance score (1-10) to each relevant memory, where 1 indicates a trivial reference and 10 indicates that the response would not be possible without it.
+            - Format these as a JSON object with memory indices as keys and scores as values.
+
+            2. **Importance Analysis:**
+            - Score the assistant's response according to the following dimensions (0-10):
+            - **Novelty:** How unique or original the response is.
+            - **Emotional Intensity:** How emotionally impactful the response is.
+            - **Future Relevance:** How useful this response might be in future conversations.
+            - **Personal Relevance:** How relevant the response is to the *assistant's* personal context.
+            - **Saliency:** How attention-grabbing or notable the response is.
+            - Format these scores as a JSON object.
+
+            The conversation context is not linear but is instead a topologically sorted subgraph of relevant memories, with timestamps used as tiebreakers. Typically, the interaction involves a series of messages, though occasionally it may include a direct user query followed by a response.
         """),
         temperature=0,
         max_tokens=None,
         model_preferences=ModelPreferences(
+            hints=[ModelHint(purpose="annotation")], # type: ignore
             costPriority=0,
             speedPriority=1,
             intelligencePriority=0.2
@@ -375,6 +401,8 @@ async def annotate_edges(
         raise ValueError(
             f"Edge annotation response must be text, got {type(result)}: {result}"
         )
+    # Debug print the annotated history and raw JSON response
+    print("History", repr(msgs_for_sample))
     print("Annotation", repr(result.text))
     try:
         result = json.loads(result.text)
@@ -383,7 +411,7 @@ async def annotate_edges(
         
         importance = result.get("importance", {})
         return {
-            parse_edge_ref(k): v
+            parse_edge_ref(k): v/10
                 for k, v in result.get("relevance", {}).items()
         }, {
             "novelty": importance.get("novelty", 0)/10,
@@ -465,8 +493,13 @@ async def chat(
     
     lastref = len(refs) + 1
     if message:
+        # Annotate the final user message with reference tags
+        final_content = build_tags([f"final:{lastref}"], timestamp=dt) + message
         messages.append(
-            build_tags([f"final:{lastref}"], timestamp=dt) + message
+            SamplingMessage(
+                role="user",
+                content=TextContent(type="text", text=final_content)
+            )
         )
 
     response = await ctx.sample(
@@ -480,11 +513,12 @@ async def chat(
         raise ValueError(
             f"Chat response must be text, got {type(response)}: {response}"
         )
+    print("Response", repr(response.text))
     
     messages.append(
         SamplingMessage(
             role="assistant",
-            content=TextContent(type="text", text=response.text)
+            content=TextContent(type="text", text="[response]\t" + response.text)
         )
     )
     rel, imp = await annotate_edges(ctx, messages)

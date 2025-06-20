@@ -1,4 +1,5 @@
-from . import varint, multihash
+from . import varint
+from .multihash import HASH_CODES
 
 __all__ = (
     'extract_prefix', 'get_prefix', 'add_prefix', 'remove_prefix',
@@ -21,7 +22,7 @@ CODECS = {
     'multibase': 0x33,
 
     # multihash
-    **multihash.HASH_CODES,
+    **HASH_CODES,
 
     # multiaddr
     'ip4': 0x04,

@@ -1,5 +1,10 @@
 from typing import IO, Iterable
 
+__all__ = (
+    'encode_iter', 'decode_iter', 'stream_bytes',
+    'encode', 'decode_stream', 'decode_bytes'
+)
+
 def encode_iter(number: int) -> Iterable[int]:
     """Pack `number` into varint bytes as an iterable of integers"""
     while True:

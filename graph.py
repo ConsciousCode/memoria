@@ -1,8 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import Callable, Iterable, Optional, override
-
-from util import Least, Lexicographic, ifnone, iter_in, todo_heap
+from typing import Callable, Iterable, Optional, overload, override
 from heapq import heapify, heappush
+
+from util import Least, Lexicographic, ifnone, todo_heap
+
+_default = object()
 
 class IGraph[K, E, V, Node](ABC):
     adj: dict[K, Node]
@@ -60,20 +62,41 @@ class IGraph[K, E, V, Node](ABC):
 
     def __getitem__(self, key: K) -> V:
         '''Get the value of a node.'''
-        if key not in self.adj:
-            raise KeyError(f"Node {key!r} not found")
-        
-        return self._valueof(self.adj[key])
+        return self.get(key)
     
     def __iter__(self):
         return iter(self.adj)
     
+    @overload
+    def get(self, key: K, /) -> V: ...
+    @overload
+    def get[D](self, key: K, /, default: D) -> V|D: ...
+
+    def get[D](self, key: K, /, default: D = _default) -> V|D:
+        '''Get the value of a node, or return default if not found.'''
+        if key in self.adj:
+            return self._valueof(self.adj[key])
+        if default is _default:
+            raise KeyError(key)
+        return default
+
     def insert(self, key: K, value: V):
         if key not in self.adj:
             self.adj[key] = self._node(value)
 
-    def edges(self, node: K) -> Iterable[tuple[K, E]]:
-        return self._edges(self.adj[node])
+    @overload
+    def edges(self, node: K, /) -> Iterable[tuple[K, E]]: ...
+    @overload
+    def edges[D](self, node: K, /, default: D) -> Iterable[tuple[K, E]]|D: ...
+    
+    def edges[D](self, node: K, /, default: D = _default) -> Iterable[tuple[K, E]]|D:
+        '''Iterate over the edges of a node.'''
+        n = self.adj.get(node, _default)
+        if n is _default:
+            if default is _default:
+                raise KeyError(node)
+            return default
+        return self._edges(n) # type: ignore
 
     def add_edge(self, src: K, dst: K, edge: E):
         if src not in self.adj:
@@ -105,10 +128,8 @@ class IGraph[K, E, V, Node](ABC):
         return self.adj.items()
 
     def has_edge(self, src: K, dst: K) -> bool:
-        '''
-        Check if there is an edge from src to dst.
-        '''
-        return iter_in(dst, self.edges(src))
+        '''Check if there is an edge from src to dst.'''
+        return any(dst == k for k, _ in self.edges(src, []))
 
     def copy(self):
         '''Deepy copy of the graph.'''

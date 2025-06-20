@@ -1,10 +1,11 @@
 from functools import wraps
-from typing import Any, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Self
 
-from .cid import CID, CIDv0, CIDv1
+if TYPE_CHECKING:
+    from .cid import CID, CIDv0, CIDv1
 
 __all__ = (
-    'IPLData', '_encodec', '_decodec'
+    'IPLData', '_encodec', '_decodec', 'Immutable'
 )
 
 type IPLData = Mapping[str, IPLData]|Iterable[IPLData]|CID|CIDv0|CIDv1|bytes|str|int|float|bool|None
@@ -57,3 +58,16 @@ def _decodec(name: str):
                 )
         return transform
     return staged
+
+class Immutable:
+    def __setattr__(self, name, value, /) -> None:
+        raise TypeError(type(self).__name__ + " objects are immutable.")
+    
+    def __delattr__(self, name, /) -> None:
+        raise TypeError(type(self).__name__ + " objects are immutable.")
+    
+    def __copy__(self) -> Self:
+        return self
+    
+    def __deepcopy__(self, memo) -> Self:
+        return self
