@@ -5,7 +5,7 @@ from uuid import UUID
 from ipld.cid import CIDv1
 
 from db import Database
-from models import ACThread, AnyMemory, Edge, IncompleteMemory, Memory, MemoryDAG, RecallConfig, Sona, StopReason
+from models import ACThread, AnyMemory, Edge, IncompleteMemory, MaybeMemory, Memory, MemoryDAG, PartialMemory, RecallConfig, Sona, StopReason
 from util import todo_list
 
 class Memoria:
@@ -324,3 +324,34 @@ class Memoria:
                     sona, prompt, timestamp, config
                 )
         ])
+    
+    def list_messages(self,
+            page: int,
+            perpage: int
+        ) -> list[MaybeMemory]:
+        '''List messages in a sona.'''
+        out: list[MaybeMemory] = []
+        for rowid, mem in self.db.list_memories(page, perpage):
+            mem.sonas = [
+                UUID(bytes=s.uuid)
+                    for s in self.db.list_memory_sonas(rowid)
+            ]
+            out.append(mem)
+        return out
+    
+    def list_sonas(self,
+            page: int,
+            perpage: int
+        ) -> list[Sona]:
+        '''List sonas in the database.'''
+        with self.db.transaction() as db:
+            return [
+                Sona(
+                    uuid=UUID(bytes=row.uuid),
+                    aliases=db.select_sona_aliases(row.rowid),
+                    pending=db.get_incomplete_act(row.pending_id)
+                        if row.pending_id else None,
+                    active=db.get_incomplete_act(row.active_id)
+                        if row.active_id else None
+                ) for row in db.list_sonas(page, perpage)
+            ]

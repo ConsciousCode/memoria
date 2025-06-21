@@ -421,7 +421,9 @@ class CIDv1(CID):
         ))
     
     @classmethod
-    def __get_pydantic_json_schema__(cls, core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+    def __get_pydantic_json_schema__(
+            cls, core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+        ) -> JsonSchemaValue:
         """
         Modifies the JSON schema for MCP compatibility.
         This method is called by Pydantic when generating JSON schemas.

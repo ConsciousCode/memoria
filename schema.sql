@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS sona_memories (
 CREATE TABLE IF NOT EXISTS acthreads (
     rowid INTEGER PRIMARY KEY,
     cid BLOB UNIQUE, -- ACT CID depends on memory CID which may be NULL for staged memories
-    sona_id INTEGER REFERENCES sonas(rowid) ON DELETE CASCADE,
+    sona_id INTEGER NOT NULL REFERENCES sonas(rowid) ON DELETE CASCADE,
     memory_id INTEGER REFERENCES memories(rowid) ON DELETE CASCADE,
     prev_id INTEGER REFERENCES acthreads(rowid) ON DELETE CASCADE
 );

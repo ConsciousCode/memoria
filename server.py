@@ -13,8 +13,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.prompts.prompt import Message
 from pydantic import BaseModel, Field
 
-from ipld import dagcbor
-from ipld.cid import CIDv1
+from ipld import dagcbor, CIDv1
 from db import Edge
 from memoria import Database, Memoria
 from models import AnyMemory, Chatlog, CompleteMemory, IncompleteMemory, Memory, MemoryDAG, PartialMemory, RecallConfig, StopReason
@@ -75,7 +74,6 @@ mcp_app = mcp.http_app()
 app = FastAPI(lifespan=mcp_app.lifespan)
 ipfs = FastAPI()
 app.mount("/ipfs", ipfs)
-app.mount("", mcp_app)
 
 def mcp_context(ctx: Context) -> Memoria:
     '''Get memoria from the FastAPI context.'''
@@ -112,7 +110,75 @@ def get_ipfs(
             content=f"Memory or ACT not found for CID {cid}"
         )
 
+@app.get("/memories/list")
+def list_memories(
+        request: Request,
+        page: Annotated[
+            int,
+            Header(description="Page number to return.")
+        ] = 1,
+        perpage: Annotated[
+            int,
+            Header(description="Number of messages to return per page.")
+        ] = 100,
+        accept: Annotated[Optional[list[str]], Header()] = None
+    ):
+    '''List messages in the Memoria system.'''
+    with build_memoria() as memoria:
+        messages = memoria.list_messages(page, perpage)
+        accept = accept or []
+        if "application/cbor" in accept:
+            return dagcbor.marshal(messages)
+        return messages
+
+@app.get("/sona/{uuid}")
+def get_sona(
+        request: Request,
+        uuid: UUID|str,
+        accept: Annotated[Optional[list[str]], Header()] = None
+    ):
+    '''Get a sona by UUID.'''
+    try: uuid = UUID(uuid) # type: ignore
+    except (ValueError, TypeError):
+        pass
+
+    with build_memoria() as memoria:
+        if sona := memoria.find_sona(uuid):
+            accept = accept or []
+            if "application/cbor" in accept:
+                return dagcbor.marshal(sona)
+            return sona.human_json()
+        return Response(
+            status_code=404,
+            content=f"Sona with UUID {uuid} not found."
+        )
+
+@app.get("/sonas/list")
+def list_sonas(
+        request: Request,
+        page: Annotated[
+            int,
+            Header(description="Page number to return.")
+        ] = 1,
+        perpage: Annotated[
+            int,
+            Header(description="Number of sonas to return per page.")
+        ] = 100,
+        accept: Annotated[Optional[list[str]], Header()] = None
+    ):
+    '''List sonas in the Memoria system.'''
+    with build_memoria() as memoria:
+        sonas = memoria.list_sonas(page, perpage)
+        accept = accept or []
+        if "application/cbor" in accept:
+            return dagcbor.marshal(sonas)
+        return [
+            sona.human_json()
+                for sona in sonas
+        ]
+
 ## MCP
+app.mount("", mcp_app)
 
 @mcp.resource("ipfs://{cid}")
 def ipfs_resource(ctx: Context, cid: CIDv1):

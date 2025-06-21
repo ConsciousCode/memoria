@@ -737,7 +737,6 @@ class MemoriaApp:
             })
             for item in chatlog:
                 assert isinstance(item, TextContent)
-                print(item.text)
                 d = TypeAdapter(dict[CIDv1, PartialMemory]).validate_json(item.text)
                 g = MemoryDAG(d)
                 log = []

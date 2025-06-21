@@ -2,7 +2,7 @@ from functools import cached_property
 from typing import Annotated, Iterable, Literal, Optional, overload, override
 from uuid import UUID
 
-from pydantic import BaseModel, Field, PlainSerializer, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, StrictInt, aliases
 
 from graph import IGraph
 from ipld import dagcbor
@@ -10,7 +10,10 @@ from ipld.cid import CIDv1, cidhash
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
 type UUIDCID = Annotated[UUID,
-    PlainSerializer(lambda u: cidhash(u.bytes, codec='raw'))
+    PlainSerializer(
+        lambda u: cidhash(u.bytes, codec='raw'),
+        return_type=CIDv1
+    )
 ]
 type StopReason = Literal["endTurn", "stopSequence", "maxTokens"] | str
 
@@ -40,11 +43,16 @@ class RecallConfig(BaseModel):
         Optional[int],
         Field(description="Number of memories to return. 20 by default.")
     ]=None
+    decay: Annotated[
+        Optional[float],
+        Field(description="Time decay factor for recency. 0.995 by default.")
+    ]=None
 
 class IPLDModel(BaseModel):
     '''Base model for IPLD objects.'''
     @cached_property
     def cid(self):
+        print(type(self), dagcbor._dagcbor_encode(self.model_dump()))
         return cidhash(dagcbor.marshal(self.model_dump()))
 
 class Edge[T](BaseModel):
@@ -55,11 +63,11 @@ class Edge[T](BaseModel):
 class BaseMemory(BaseModel):
     '''Base memory model.'''
     class SelfData(BaseModel):
-        kind: Literal["self"] = "self"
         class Part(BaseModel):
             content: str = ""
             model: Optional[str] = None
         
+        kind: Literal["self"] = "self"
         name: Optional[str] = None
         parts: list[Part]
         stop_reason: Optional[StopReason] = None
@@ -105,6 +113,16 @@ class BaseMemory(BaseModel):
     edges: list[Edge[CIDv1]] = Field(
         default_factory=list,
         description="Edges to other memories."
+    )
+    importance: Optional[float] = Field(
+        default=None,
+        exclude=True,
+        description="Importance of the memory, used for recall weighting."
+    )
+    sonas: Optional[list[UUID]] = Field(
+        default=None,
+        exclude=True,
+        description="Sonas the memory belongs to."
     )
 
     @overload
@@ -185,6 +203,9 @@ class PartialMemory(BaseMemory):
 
 class Memory(BaseMemory, IPLDModel):
     '''A completed memory which can be referred to by CID.'''
+
+    model_config = ConfigDict(frozen=True)
+
     @cached_property
     @override
     def cid(self) -> CIDv1:
@@ -200,6 +221,8 @@ class Memory(BaseMemory, IPLDModel):
             edges=self.edges
         )
 
+type MaybeMemory = IncompleteMemory | PartialMemory
+'''A memory which may or may not have a CID.'''
 type CompleteMemory = PartialMemory | Memory
 '''A memory with a CID.'''
 type AnyMemory = IncompleteMemory | PartialMemory | Memory
@@ -209,17 +232,27 @@ class Chatlog(BaseModel):
     chatlog: list[PartialMemory]
     response: Memory
 
-class IncompleteACThread(IPLDModel):
+class IncompleteACThread(BaseModel):
     '''A thread of memories in the agent's context.'''
+    cid: None = None # Incomplete threads can't have a cid
+    sona: UUIDCID
     memory: IncompleteMemory # Can't be referred to by cid
     prev: Optional[CIDv1] = None
+
+class ACThread(IPLDModel):
+    '''A thread of memories in the agent's context.'''
+    sona: UUIDCID
+    memory: CIDv1
+    prev: Optional[CIDv1] = None
+
+type AnyACThread = IncompleteACThread | ACThread
 
 class Sona(BaseModel):
     '''
     Sona model for returning from memory queries. It is not immutable and
     is thus referred to by UUID rather than CID.
     '''
-    uuid: UUID = Field(
+    uuid: UUIDCID = Field(
         description="Unique identifier for the Sona."
     )
     aliases: list[str] = Field(
@@ -234,11 +267,17 @@ class Sona(BaseModel):
         description="Pending thread for the Sona, if any."
     )
 
-class ACThread(IPLDModel):
-    '''A thread of memories in the agent's context.'''
-    sona: UUIDCID
-    memory: CIDv1
-    prev: Optional[CIDv1] = None
+    def human_json(self):
+        '''Return a human-readable JSON representation of the Sona.'''
+        # Need to do this separately because if we use model_dump(),
+        # it will trigger UUIDCID's serialization as a CID and lose the
+        # human-readable UUID.
+        return {
+            "uuid": str(self.uuid),
+            "aliases": self.aliases,
+            "active": self.active.model_dump() if self.active else None,
+            "pending": self.pending.model_dump() if self.pending else None
+        }
 
 class MemoryDAG(IGraph[CIDv1, float, PartialMemory, PartialMemory]):
     '''IPLD data model for memories implementing the IGraph interface.'''
