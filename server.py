@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import FastAPI, Header, Request, Response
 from fastmcp.exceptions import ResourceError, ToolError
 from mcp import CreateMessageResult, SamplingMessage
-from mcp.types import ModelHint, ModelPreferences, PromptMessage, TextContent
+from mcp.types import ModelHint, ModelPreferences, PromptMessage, Role, TextContent
 from fastmcp import Context, FastMCP
 from fastmcp.prompts.prompt import Message
 from pydantic import BaseModel, Field
@@ -347,10 +347,6 @@ def recall(
     '''
     return dict(mcp_context(ctx).recall(sona, prompt, config).items())
 
-class ConvoMessage(BaseModel):
-    role: Literal['user', 'assistant']
-    content: str
-
 def build_tags(tags: list[str], timestamp: Optional[float|datetime]) -> str:
     if timestamp is not None:
         if not isinstance(timestamp, datetime):
@@ -358,7 +354,7 @@ def build_tags(tags: list[str], timestamp: Optional[float|datetime]) -> str:
         tags.append(timestamp.replace(microsecond=0).isoformat())
     return f"[{'\t'.join(tags)}]\t"
 
-def memory_to_message(ref: int, refs: list[int], memory: AnyMemory, final: bool=False) -> ConvoMessage:
+def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=False) -> tuple[Role, str]:
     '''Render memory for the context.'''
     
     tags = []
@@ -366,13 +362,11 @@ def memory_to_message(ref: int, refs: list[int], memory: AnyMemory, final: bool=
         tags.append("final")
     tags.append(
         f"ref:{ref}" +
-        (f" -> {','.join(map(str, refs))}" if refs else "")
+        (f" -> {','.join(map(str, deps))}" if deps else "")
     )
 
-    if memory.timestamp:
-        ts = datetime.fromtimestamp(memory.timestamp)
-    else:
-        ts = None
+    if (ts := memory.timestamp) is not None:
+        ts = datetime.fromtimestamp(ts)
     
     match memory.data:
         case Memory.SelfData():
@@ -381,23 +375,23 @@ def memory_to_message(ref: int, refs: list[int], memory: AnyMemory, final: bool=
             if sr := memory.data.stop_reason:
                 if sr != "finish":
                     tags.append(f"stop_reason:{sr}")
-            return ConvoMessage(
-                role="assistant",
-                content=build_tags(tags, ts) +
-                    ''.join(p.content for p in memory.data.parts),
+            return (
+                "assistant",
+                build_tags(tags, ts) +
+                    ''.join(p.content for p in memory.data.parts)
             )
         case Memory.TextData():
             tags.append("kind:raw_text")
-            return ConvoMessage(
-                role="user",
-                content=build_tags(tags, ts) + memory.data.content
+            return (
+                "user",
+                build_tags(tags, ts) + memory.data.content
             )
         case Memory.OtherData():
             if name := memory.data.name:
                 tags.append(f"name:{name}")
-            return ConvoMessage(
-                role="user",
-                content=build_tags(tags, ts) + memory.data.content
+            return (
+                "user",
+                build_tags(tags, ts) + memory.data.content
             )
             '''
         case "file":
@@ -418,18 +412,59 @@ def memory_to_message(ref: int, refs: list[int], memory: AnyMemory, final: bool=
         case _:
             raise ValueError(f"Unknown memory kind: {memory.data.kind}")
 
-def dag_to_convo(g: MemoryDAG, include_final=False) -> Iterable[tuple[int, PartialMemory, ConvoMessage]]:
-    '''Convert a memory DAG to a conversation.'''
-    refs: dict[CIDv1, int] = {}
+class ConvoMessage(BaseModel):
+    '''
+    I hate everything about this and would like nothing more than some
+    other approach to serializing the conversation that doen't involve
+    *REIFYING THE ENTIRE FUCKING ITERATOR STATE*
+    '''
+    g: MemoryDAG
+    ref: int
+    refs: dict[CIDv1, int]
+    memory: PartialMemory
     
+    def message(self, include_final: bool = False):
+        cid = self.memory.cid
+        return memory_to_message(
+            self.ref,
+            [self.refs[dst] for dst, _ in self.g.edges(cid)],
+            self.memory,
+            final=include_final and (self.ref >= len(self.refs))
+        )
+
+    def prompt_message(self, include_final: bool = False) -> PromptMessage:
+        role, content = self.message(include_final)
+        return PromptMessage(
+            role=role,
+            content=TextContent(
+                type="text",
+                text=content
+            )
+        )
+    
+    def sampling_message(self, include_final: bool = False) -> SamplingMessage:
+        role, content = self.message(include_final)
+        return SamplingMessage(
+            role=role,
+            content=TextContent(
+                type="text",
+                text=content
+            )
+        )
+
+def serialize_dag(g: MemoryDAG, refs: Optional[dict[CIDv1, int]]=None) -> Iterable[ConvoMessage]:
+    '''Convert a memory DAG to a conversation.'''
+    if refs is None:
+        refs = {}
     for cid in g.invert().toposort(key=lambda v: v.timestamp):
         # We need ids for each memory so their edges can be annotated later
         ref = refs[cid] = len(refs) + 1
-        yield ref, g[cid], memory_to_message(
-            ref,
-            [refs[dst] for dst, _ in g.edges(cid)],
-            g[cid],
-            final=include_final and (ref == len(g))
+        #yield ref, g[cid]
+        yield ConvoMessage(
+            g=g,
+            ref=ref,
+            refs=refs,
+            memory=g[cid]
         )
 
 @mcp.prompt()
@@ -459,10 +494,8 @@ def act_next(
         return None
 
     return [
-        Message(
-            role=m.role,
-            content=m.content
-        ) for _, _, m in dag_to_convo(g, include_final=True)
+        m.prompt_message(include_final=True)
+            for m in serialize_dag(g)
     ]
 
 def parse_edge_ref(k: str):
@@ -582,15 +615,10 @@ async def chat(
     chat_memories: list[PartialMemory] = []
     chat_messages: list[SamplingMessage] = []
     
-    for ref, memory, m in dag_to_convo(g, include_final=not prompt):
-        refs[ref] = memory.cid
-        chat_memories.append(memory)
-        chat_messages.append(
-            SamplingMessage(
-                role=m.role,
-                content=TextContent(type="text", text=m.content)
-            )
-        )
+    for m in serialize_dag(g):
+        refs[m.ref] = m.memory.cid
+        chat_memories.append(m.memory)
+        chat_messages.append(m.sampling_message(include_final=not prompt))
     
     lastref = len(refs) + 1
     if prompt:
@@ -690,9 +718,9 @@ async def insert_interaction(
     refs: dict[int, CIDv1] = {}
     chat_samples: list[PartialMemory] = []
 
-    for ref, memory, m in dag_to_convo(g, include_final=not prompt):
-        refs[ref] = memory.cid
-        chat_samples.append(memory)
+    for m in serialize_dag(g):
+        refs[m.ref] = m.memory.cid
+        chat_samples.append(m.memory)
     
     lastref = len(refs) + 1
     
