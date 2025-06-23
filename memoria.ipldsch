@@ -1,0 +1,52 @@
+type Edge struct {
+    target &Memory
+    weight int
+}
+
+type Memory struct {
+    data MemoryData
+    timestamp optional int
+    edges [Edge]
+}
+
+type MemoryData union {
+    | SelfData "self"
+    | OtherData "other"
+    | TextData "text" 
+    | FileData "file"
+} representation inline {
+    discriminantKey "kind"
+}
+
+type SelfData struct {
+    kind string
+    name optional string
+    parts [Part]
+    stop_reason optional StopReason
+}
+
+type OtherData struct {
+    kind string
+    name optional string
+    content string
+}
+
+type TextData struct {
+    kind string
+    content string
+}
+
+type FileData struct {
+    kind string
+    name optional string
+    file Link
+    mimeType optional string
+}
+
+type UUID bytes
+
+type ACThread struct {
+    sona UUID
+    memory &Memory
+    prev nullable &ACThread
+}

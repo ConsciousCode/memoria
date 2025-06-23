@@ -2,57 +2,66 @@ from functools import cached_property
 from typing import Annotated, Iterable, Literal, Optional, overload, override
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, StrictInt, aliases
+from mcp.types import ModelPreferences
+from pydantic import BaseModel, ConfigDict, Field
 
 from graph import IGraph
 from ipld import dagcbor
 from ipld.cid import CIDv1, cidhash
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
-type UUIDCID = Annotated[UUID,
-    PlainSerializer(
-        lambda u: cidhash(u.bytes, codec='raw'),
-        return_type=CIDv1
-    )
-]
 type StopReason = Literal["endTurn", "stopSequence", "maxTokens"] | str
 
 class RecallConfig(BaseModel):
     '''Configuration for how to weight memory recall.'''
     importance: Annotated[
-        Optional[float],
+        float,
         Field(description="Weight of memory importance.")
-    ]=None
+    ] = 0.30
     recency: Annotated[
-        Optional[float],
+        float,
         Field(description="Weight of the recency of the memory.")
-    ]=None
+    ] = 0.30
     sona: Annotated[
-        Optional[float],
+        float,
         Field(description="Weight of the sona relevance.")
-    ]=None
+    ] = 0.10
     fts: Annotated[
-        Optional[float],
-        Field(description="Weight of the ull-text search relevance.")
-    ]=None
+        float,
+        Field(description="Weight of the full-text search relevance.")
+    ] = 0.15
     vss: Annotated[
-        Optional[float],
+        float,
         Field(description="Weight of the vector similarity.")
-    ]=None
+    ] = 0.25
     k: Annotated[
-        Optional[int],
+        int,
         Field(description="Number of memories to return. 20 by default.")
-    ]=None
+    ] = 20
     decay: Annotated[
         Optional[float],
         Field(description="Time decay factor for recency. 0.995 by default.")
-    ]=None
+    ] = 0.995
+
+class SampleConfig(BaseModel):
+    '''Configuration for sampling responses.'''
+    temperature: Annotated[
+        Optional[float],
+        Field(description="Sampling temperature for the response. If `null`, uses the default value.")
+    ] = None
+    max_tokens: Annotated[
+        Optional[int],
+        Field(description="Maximum number of tokens to generate in the response. If `null`, uses the default value.")
+    ] = None
+    model_preferences: Annotated[
+        Optional[ModelPreferences | str | list[str]],
+        Field(description="List of preferred models to use for the response. If `null`, uses the default model.")
+    ] = None
 
 class IPLDModel(BaseModel):
     '''Base model for IPLD objects.'''
     @cached_property
     def cid(self):
-        print(type(self), dagcbor._dagcbor_encode(self.model_dump()))
         return cidhash(dagcbor.marshal(self.model_dump()))
 
 class Edge[T](BaseModel):
@@ -109,11 +118,7 @@ class BaseMemory(BaseModel):
     ]
 
     data: MemoryData
-    timestamp: Optional[StrictInt] = None
-    edges: list[Edge[CIDv1]] = Field(
-        default_factory=list,
-        description="Edges to other memories."
-    )
+    timestamp: Optional[int] = None
     importance: Optional[float] = Field(
         default=None,
         exclude=True,
@@ -124,6 +129,9 @@ class BaseMemory(BaseModel):
         exclude=True,
         description="Sonas the memory belongs to."
     )
+
+    def document(self) -> str:
+        return self.data.document()
 
     @overload
     @classmethod
@@ -149,18 +157,51 @@ class BaseMemory(BaseModel):
             case _:
                 raise ValueError(f"Unknown memory kind: {kind}")
 
+class LeafMemory(BaseMemory):
+    '''A memory which is a leaf in the memory graph, i.e. has no edges.'''
+
+class NodeMemory(BaseMemory):
+    '''A memory which is a node in the memory graph, i.e. has edges.'''
+
+    edges: list[Edge[CIDv1]] = Field(
+        default_factory=list,
+        description="Edges to other memories."
+    )
+
     def edge(self, target: CIDv1) -> Optional[Edge[CIDv1]]:
         '''Get the edge to the target memory, if it exists.'''
-        
         for edge in self.edges:
             if edge.target == target:
                 return edge
         return None
 
-class IncompleteMemory(BaseMemory):
+    def insert_edge(self, target: CIDv1, weight: float):
+        '''Insert an edge to the target memory with the given weight.'''
+        if self.edge(target) is not None:
+            raise ValueError(f"Edge to {target} already exists")
+        
+        self.edges.append(Edge(
+            target=target,
+            weight=weight
+        ))
+
+class DraftMemory(NodeMemory):
+    '''A memory which cannot derive a CID.'''
+    
+    def insert_edge(self, target: CIDv1, weight: float):
+        '''Insert an edge to the target memory with the given weight.'''
+        if self.edge(target) is not None:
+            raise ValueError(f"Edge to {target} already exists")
+        
+        self.edges.append(Edge(
+            target=target,
+            weight=weight
+        ))
+
+class IncompleteMemory(DraftMemory):
     '''
-    A memory which is still incomplete and thus can't be referred to by
-    CID. Allows mutation of edges and data.
+    A memory which is incomplete and in the process of being created.
+    Cannot be assigned a CID.
     '''
 
     cid: None = None
@@ -172,36 +213,15 @@ class IncompleteMemory(BaseMemory):
             timestamp=self.timestamp,
             edges=self.edges
         )
-    
-    def insert_edge(self, target: CIDv1, weight: float):
-        '''Insert an edge to the target memory with the given weight.'''
-        if self.edge(target) is not None:
-            raise ValueError(f"Edge to {target} already exists")
-        
-        self.edges.append(Edge(
-            target=target,
-            weight=weight
-        ))
 
-class PartialMemory(BaseMemory):
+class PartialMemory(DraftMemory):
     '''
-    A memory which is complete, but does not have its full contents. Thus
+    A memory which is complete but does not have its full contents. Thus
     the CID can't be calculated from it and must be provided.
     '''
-    
     cid: CIDv1
 
-    def insert_edge(self, target: CIDv1, weight: float):
-        '''Insert an edge to the target memory with the given weight.'''
-        if self.edge(target) is not None:
-            raise ValueError(f"Edge to {target} already exists")
-        
-        self.edges.append(Edge(
-            target=target,
-            weight=weight
-        ))
-
-class Memory(BaseMemory, IPLDModel):
+class Memory(NodeMemory, IPLDModel):
     '''A completed memory which can be referred to by CID.'''
 
     model_config = ConfigDict(frozen=True)
@@ -221,7 +241,6 @@ class Memory(BaseMemory, IPLDModel):
             edges=self.edges
         )
 
-type MaybeMemory = IncompleteMemory | PartialMemory
 '''A memory which may or may not have a CID.'''
 type CompleteMemory = PartialMemory | Memory
 '''A memory with a CID.'''
@@ -235,13 +254,13 @@ class Chatlog(BaseModel):
 class IncompleteACThread(BaseModel):
     '''A thread of memories in the agent's context.'''
     cid: None = None # Incomplete threads can't have a cid
-    sona: UUIDCID
+    sona: UUID
     memory: IncompleteMemory # Can't be referred to by cid
     prev: Optional[CIDv1] = None
 
 class ACThread(IPLDModel):
     '''A thread of memories in the agent's context.'''
-    sona: UUIDCID
+    sona: UUID
     memory: CIDv1
     prev: Optional[CIDv1] = None
 
@@ -252,7 +271,7 @@ class Sona(BaseModel):
     Sona model for returning from memory queries. It is not immutable and
     is thus referred to by UUID rather than CID.
     '''
-    uuid: UUIDCID = Field(
+    uuid: UUID = Field(
         description="Unique identifier for the Sona."
     )
     aliases: list[str] = Field(
@@ -270,13 +289,13 @@ class Sona(BaseModel):
     def human_json(self):
         '''Return a human-readable JSON representation of the Sona.'''
         # Need to do this separately because if we use model_dump(),
-        # it will trigger UUIDCID's serialization as a CID and lose the
+        # it will trigger UUID's serialization as a CID and lose the
         # human-readable UUID.
         return {
             "uuid": str(self.uuid),
             "aliases": self.aliases,
-            "active": self.active.model_dump() if self.active else None,
-            "pending": self.pending.model_dump() if self.pending else None
+            "active": self.active and self.active.model_dump(),
+            "pending": self.pending and self.pending.model_dump()
         }
 
 class MemoryDAG(IGraph[CIDv1, float, PartialMemory, PartialMemory]):

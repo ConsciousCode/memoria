@@ -1,11 +1,11 @@
 from datetime import datetime
-from typing import Optional, overload
+from typing import Iterable, Optional, overload
 from uuid import UUID
 
 from ipld.cid import CIDv1
 
 from db import Database
-from models import ACThread, AnyMemory, Edge, IncompleteMemory, MaybeMemory, Memory, MemoryDAG, PartialMemory, RecallConfig, Sona, StopReason
+from models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, PartialMemory, RecallConfig, Sona, StopReason
 from util import todo_list
 
 class Memoria:
@@ -27,21 +27,11 @@ class Memoria:
     def insert(self,
             memory: AnyMemory,
             importance: Optional[float] = None,
-            sona: Optional[UUID|str] = None,
-            index: Optional[str] = None
+            sona: Optional[UUID|str] = None
         ):
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
-            rowid = db.insert_memory(memory, importance)
-            db.link_memory_edges(rowid, memory.edges or [])
-            
-            if index:
-                db.insert_text_embedding(rowid, index)
-                db.insert_text_fts(rowid, index)
-            
-            if sona:
-                if sona_row := db.find_sona(sona):
-                    db.link_sona(sona_row.rowid, rowid)
+            db.insert_memory(memory, importance, sona)
     
     def propogate_importance(self, memory: CIDv1):
         with self.db.transaction() as db:
@@ -308,50 +298,42 @@ class Memoria:
 
     def recall(self,
             sona: Optional[str],
-            prompt: Optional[str],
-            timestamp: Optional[float]=None,
-            config: Optional[RecallConfig]=None,
-            include: Optional[list[CIDv1]]=None
+            prompt: DraftMemory,
+            config: Optional[RecallConfig]=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
-        return self.build_subgraph([
-            Edge(target=CIDv1(row.target.cid), weight=1.0)
-                for cid in (include or [])
-                    for row in self.db.backward_edges_cid(cid)
-        ] + [
-            Edge(target=CIDv1(row.cid), weight=score)
+        return self.build_subgraph(
+            prompt.edges + [
+            Edge(target=row.cid, weight=score)
                 for row, score in self.db.recall(
-                    sona, prompt, timestamp, config
+                    sona, prompt.document(), prompt.timestamp, config
                 )
         ])
     
     def list_messages(self,
             page: int,
             perpage: int
-        ) -> list[MaybeMemory]:
+        ) -> Iterable[DraftMemory]:
         '''List messages in a sona.'''
-        out: list[MaybeMemory] = []
         for rowid, mem in self.db.list_memories(page, perpage):
             mem.sonas = [
                 UUID(bytes=s.uuid)
                     for s in self.db.list_memory_sonas(rowid)
             ]
-            out.append(mem)
-        return out
+            yield mem
     
     def list_sonas(self,
             page: int,
             perpage: int
-        ) -> list[Sona]:
+        ) -> Iterable[Sona]:
         '''List sonas in the database.'''
         with self.db.transaction() as db:
-            return [
-                Sona(
+            for row in db.list_sonas(page, perpage):
+                yield Sona(
                     uuid=UUID(bytes=row.uuid),
                     aliases=db.select_sona_aliases(row.rowid),
                     pending=db.get_incomplete_act(row.pending_id)
                         if row.pending_id else None,
                     active=db.get_incomplete_act(row.active_id)
                         if row.active_id else None
-                ) for row in db.list_sonas(page, perpage)
-            ]
+                )

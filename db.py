@@ -3,7 +3,7 @@ from typing import Callable, Iterable, Optional, Protocol, cast, overload
 import sqlite3
 from uuid import UUID
 
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel
 
 from numpy import ndarray
 import numpy
@@ -12,8 +12,8 @@ from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
 from ipld.cid import CIDv1
-from models import ACThread, AnyACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, MaybeMemory, Memory, MemoryKind, PartialMemory, RecallConfig, Sona
-from util import finite, ifnone
+from models import ACThread, AnyACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, DraftMemory, Memory, MemoryKind, PartialMemory, RecallConfig
+from util import finite
 
 nomic_text = TextEmbedding(
     model_name="nomic-ai/nomic-embed-text-v1.5",
@@ -22,14 +22,6 @@ nomic_text = TextEmbedding(
 
 type JSONB = str
 '''Alias for JSONB type in SQLite, which is selected as a string.'''
-
-DEFAULT_IMPORTANCE = 0.30
-DEFAULT_RECENCY = 0.30
-DEFAULT_FTS = 0.15
-DEFAULT_VSS = 0.25
-DEFAULT_SONA = 0.10
-DEFAULT_K = 20
-DEFAULT_DECAY = 0.995
 
 ## Rows are represented as the raw output from a select query with no processing
 ## - this allows us to avoid processing columns we don't need
@@ -70,7 +62,7 @@ class BaseMemoryRow(BaseModel):
     type PrimaryKey = int
 
     rowid: PrimaryKey
-    timestamp: Optional[StrictInt]
+    timestamp: Optional[int]
     kind: MemoryKind
     data: JSONB
     importance: Optional[float]
@@ -100,7 +92,7 @@ class MemoryRow(BaseMemoryRow):
             importance=importance
         )
     
-    def to_maybe(self, edges: list[Edge[CIDv1]] = []) -> MaybeMemory:
+    def to_mutable(self, edges: list[Edge[CIDv1]] = []) -> DraftMemory:
         '''Convert this row to a MaybeMemory object.'''
         if self.cid:
             return self.to_partial(edges)
@@ -148,7 +140,7 @@ class IncompleteMemoryRow(BaseMemoryRow):
             importance=importance
         )
     
-    def to_maybe(self, edges: list[Edge[CIDv1]] = []) -> MaybeMemory:
+    def to_maybe(self, edges: list[Edge[CIDv1]] = []) -> DraftMemory:
         '''Convert this row to a MaybeMemory object.'''
         return self.to_incomplete()
     
@@ -653,7 +645,7 @@ class Database:
                 target=which.factory(*row[:6])
             )
     
-    def list_memories(self, page: int, perpage: int) -> Iterable[tuple[int, MaybeMemory]]:
+    def list_memories(self, page: int, perpage: int) -> Iterable[tuple[int, DraftMemory]]:
         '''List messages in the database, paginated.'''
         cur = self.cursor(MemoryRow)
         cur.execute("""
@@ -733,7 +725,9 @@ class Database:
                 LEFT JOIN fts ON fts.rowid = m.rowid
                 LEFT JOIN mvss ON mvss.memory_id = m.rowid
                 LEFT JOIN svss ON svss.sona_id = sm.sona_id
-            WHERE cid IS NOT NULL -- DO NOT recall incomplete memories
+            WHERE
+                m.cid IS NOT NULL AND -- Don't recall incomplete memories
+                m.timestamp <= :timestamp -- Don't recall future memories
             ORDER BY score DESC
             LIMIT :k
         """, {
@@ -741,13 +735,13 @@ class Database:
             "vss_e": e.tobytes(),
             "sona_e": s.tobytes(),
             "timestamp": timestamp,
-            "w_importance": finite(ifnone(config.importance, DEFAULT_IMPORTANCE)),
-            "w_recency": finite(ifnone(config.recency, DEFAULT_RECENCY)),
-            "w_fts": finite(ifnone(config.fts, DEFAULT_FTS)),
-            "w_vss": finite(ifnone(config.vss, DEFAULT_VSS)),
-            "w_sona": finite(ifnone(config.sona, DEFAULT_SONA)),
-            "k": int(config.k or DEFAULT_K),
-            "decay": finite(config.decay or DEFAULT_DECAY)
+            "w_importance": finite(config.importance),
+            "w_recency": finite(config.recency),
+            "w_fts": finite(config.fts),
+            "w_vss": finite(config.vss),
+            "w_sona": finite(config.sona),
+            "k": int(config.k),
+            "decay": finite(config.decay)
         })
 
         for row in cur:
@@ -940,7 +934,7 @@ class DatabaseRW(Database):
             VALUES (?, ?)
         """, (memory_id, index))
 
-    def insert_memory(self, memory: AnyMemory, importance: Optional[float]=None) -> int:
+    def insert_memory(self, memory: AnyMemory, importance: Optional[float]=None, sona: Optional[UUID|str]=None) -> int:
         cid = memory.cid
         cur = self.cursor()
         cur.execute("""
@@ -956,16 +950,25 @@ class DatabaseRW(Database):
         ))
         
         # 0 (ignored) or None (error)
-        if not (rowid := cur.lastrowid):
-            if cid:
-                # Memory already exists
-                rowid, = cur.execute("""
-                    SELECT rowid FROM memories WHERE cid = ?
-                """, (cid,)).fetchone()
-            else:
-                raise RuntimeError(
-                    "Failed to insert memory, it may already exist."
-                )
+        if rowid := cur.lastrowid:
+            # Continue insertion
+            self.link_memory_edges(rowid, memory.edges or [])
+
+            index = memory.document()
+            self.insert_text_embedding(rowid, index)
+            self.insert_text_fts(rowid, index)
+            
+            if sona and (sona_row := self.find_sona(sona)):
+                self.link_sona(sona_row.rowid, rowid)
+        elif cid:
+            # Memory already exists
+            rowid, = cur.execute("""
+                SELECT rowid FROM memories WHERE cid = ?
+            """, (cid,)).fetchone()
+        else:
+            raise RuntimeError(
+                "Failed to insert memory, it may already exist."
+            )
         
         return rowid
     

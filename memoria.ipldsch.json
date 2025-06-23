@@ -1,0 +1,181 @@
+{
+  "types": {
+    "Edge": {
+      "struct": {
+        "fields": {
+          "target": {
+            "type": {
+              "link": {
+                "expectedType": "Memory"
+              }
+            }
+          },
+          "weight": {
+            "type": "int"
+          }
+        },
+        "representation": {
+          "map": {}
+        }
+      }
+    },
+    "Memory": {
+      "struct": {
+        "fields": {
+          "data": {
+            "type": "MemoryData"
+          },
+          "timestamp": {
+            "type": "int",
+            "optional": true
+          },
+          "edges": {
+            "type": {
+              "list": {
+                "valueType": "Edge"
+              }
+            }
+          }
+        },
+        "representation": {
+          "map": {}
+        }
+      }
+    },
+    "MemoryData": {
+      "union": {
+        "members": [
+          "SelfData",
+          "OtherData",
+          "TextData",
+          "FileData"
+        ],
+        "representation": {
+          "inline": {
+            "discriminantKey": "kind",
+            "discriminantTable": {
+              "self": "SelfData",
+              "other": "OtherData",
+              "text": "TextData",
+              "file": "FileData"
+            }
+          }
+        }
+      }
+    },
+    "SelfData": {
+      "struct": {
+        "fields": {
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "optional": true
+          },
+          "parts": {
+            "type": {
+              "list": {
+                "valueType": "Part"
+              }
+            }
+          },
+          "stop_reason": {
+            "type": "StopReason",
+            "optional": true
+          }
+        },
+        "representation": {
+          "map": {}
+        }
+      }
+    },
+    "OtherData": {
+      "struct": {
+        "fields": {
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "optional": true
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "representation": {
+          "map": {}
+        }
+      }
+    },
+    "TextData": {
+      "struct": {
+        "fields": {
+          "kind": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "representation": {
+          "map": {}
+        }
+      }
+    },
+    "FileData": {
+      "struct": {
+        "fields": {
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "optional": true
+          },
+          "file": {
+            "type": "Link"
+          },
+          "mimeType": {
+            "type": "string",
+            "optional": true
+          }
+        },
+        "representation": {
+          "map": {}
+        }
+      }
+    },
+    "UUID": {
+      "bytes": {}
+    },
+    "ACThread": {
+      "struct": {
+        "fields": {
+          "sona": {
+            "type": "UUID"
+          },
+          "memory": {
+            "type": {
+              "link": {
+                "expectedType": "Memory"
+              }
+            }
+          },
+          "prev": {
+            "type": {
+              "link": {
+                "expectedType": "ACThread"
+              }
+            },
+            "nullable": true
+          }
+        },
+        "representation": {
+          "map": {}
+        }
+      }
+    }
+  }
+}
