@@ -177,13 +177,11 @@ class NodeMemory(BaseMemory):
 
     def insert_edge(self, target: CIDv1, weight: float):
         '''Insert an edge to the target memory with the given weight.'''
-        if self.edge(target) is not None:
-            raise ValueError(f"Edge to {target} already exists")
-        
-        self.edges.append(Edge(
-            target=target,
-            weight=weight
-        ))
+        if self.edge(target) is None:
+            self.edges.append(Edge(
+                target=target,
+                weight=weight
+            ))
 
 class DraftMemory(NodeMemory):
     '''A memory which cannot derive a CID.'''
@@ -221,6 +219,9 @@ class PartialMemory(DraftMemory):
     '''
     cid: CIDv1
 
+    def partial(self):
+        return self
+
 class Memory(NodeMemory, IPLDModel):
     '''A completed memory which can be referred to by CID.'''
 
@@ -233,12 +234,13 @@ class Memory(NodeMemory, IPLDModel):
         self.edges.sort(key=lambda e: e.target)
         return super().cid
     
-    def incomplete(self):
-        '''Return an incomplete memory which can be mutated.'''
-        return IncompleteMemory(
+    def partial(self):
+        '''Return a PartialMemory with the same data and edges, but without the CID.'''
+        return PartialMemory(
             data=self.data,
             timestamp=self.timestamp,
-            edges=self.edges
+            edges=self.edges,
+            cid=self.cid
         )
 
 '''A memory which may or may not have a CID.'''
@@ -249,7 +251,7 @@ type AnyMemory = IncompleteMemory | PartialMemory | Memory
 class Chatlog(BaseModel):
     '''Data model for a single-turn chat as returned by the server.'''
     chatlog: list[PartialMemory]
-    response: Memory
+    response: AnyMemory
 
 class IncompleteACThread(BaseModel):
     '''A thread of memories in the agent's context.'''

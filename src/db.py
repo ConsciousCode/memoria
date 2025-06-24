@@ -4,7 +4,6 @@ import sqlite3
 from uuid import UUID
 
 from pydantic import BaseModel
-
 from numpy import ndarray
 import numpy
 import sqlite_vec
@@ -484,6 +483,27 @@ class Database:
             SELECT rowid, uuid, active_id, pending_id
             FROM sonas WHERE rowid = ?
         """, (rowid,)).fetchone()
+    
+    def select_sona_uuid(self, uuid: UUID) -> Optional[SonaRow]:
+        '''Select a sona by its UUID.'''
+        cur = self.cursor(SonaRow)
+        return cur.execute("""
+            SELECT rowid, uuid, active_id, pending_id
+            FROM sonas WHERE uuid = ?
+        """, (uuid.bytes,)).fetchone()
+    
+    def select_sona_uuid_embedding(self, uuid: UUID) -> Optional[ndarray]:
+        '''Select the embedding for a sona by its UUID.'''
+        cur = self.cursor()
+        cur.execute("""
+            SELECT embedding
+            FROM sona
+                JOIN sona_vss ON sona.rowid = sona_vss.sona_id
+            WHERE sona.rowid = ?
+        """, (uuid,))
+        if row := cur.fetchone():
+            return numpy.frombuffer(row[0], dtype=numpy.float32)
+        return None
 
     def ipld_memory_rowid(self, rowid: int) -> Optional[AnyMemory]:
         '''
@@ -671,24 +691,22 @@ class Database:
         """, (perpage, (page - 1) * perpage))
 
     def recall(self,
-            sona: Optional[str],
-            prompt: Optional[str],
-            timestamp: Optional[float]=None,
+            prompt: DraftMemory,
             config: Optional[RecallConfig]=None
         ) -> Iterable[tuple[MemoryRow, float]]:
         config = config or RecallConfig()
         
-        if prompt:
-            e, = nomic_text.embed(prompt)
+        index = prompt.document()
+        e, = nomic_text.embed(index)
+        s = numpy.zeros(1536, dtype=numpy.float32)
+        if ps := prompt.sonas:
+            for sona in ps:
+                if (se := self.select_sona_uuid_embedding(sona)) is None:
+                    raise ValueError(f"Sona with rowid {sona} does not exist.")
+                s += se
+            s /= len(ps)
         else:
-            config.vss = 0
-            e = numpy.zeros(1536, dtype=numpy.float32)
-
-        if sona:
-            s, = nomic_text.embed(sona)
-        else:
-            config.sona = 0
-            s = numpy.zeros(1536, dtype=numpy.float32)
+            config.sona = 0.0
         
         cur = self.cursor()
         cur.execute("""
@@ -696,7 +714,7 @@ class Database:
                 fts AS (
                     SELECT rowid, bm25(memory_fts) AS score
                     FROM memory_fts
-                    WHERE :prompt AND memory_fts MATCH :prompt
+                    WHERE :index AND memory_fts MATCH :index
                     LIMIT :k
                 ),
                 mvss AS (
@@ -731,10 +749,10 @@ class Database:
             ORDER BY score DESC
             LIMIT :k
         """, {
-            "prompt": prompt and f'"{prompt.replace('"', '""')}"',
+            "index": index,
             "vss_e": e.tobytes(),
             "sona_e": s.tobytes(),
-            "timestamp": timestamp,
+            "timestamp": prompt.timestamp,
             "w_importance": finite(config.importance),
             "w_recency": finite(config.recency),
             "w_fts": finite(config.fts),
@@ -840,25 +858,10 @@ class DatabaseRW(Database):
     def find_sona(self, name: UUID|str):
         '''Find or create the sona closest to the given name.'''
 
-        cur = self.cursor()
         if isinstance(name, UUID):
-            cur.execute("""
-                SELECT rowid, uuid, active_id, pending_id
-                FROM sonas
-                WHERE uuid = ?
-            """, (name.bytes,))
+            return self.select_sona_uuid(name)
 
-            if row := cur.fetchone():
-                rowid, uuid, active_id, pending_id = row
-                return SonaRow(
-                    rowid=rowid,
-                    uuid=uuid,
-                    active_id=active_id,
-                    pending_id=pending_id
-                )
-            else:
-                return None
-        
+        cur = self.cursor()        
         cur.execute("""
             SELECT rowid, uuid, active_id, pending_id
             FROM sona_aliases
@@ -934,7 +937,7 @@ class DatabaseRW(Database):
             VALUES (?, ?)
         """, (memory_id, index))
 
-    def insert_memory(self, memory: AnyMemory, importance: Optional[float]=None, sona: Optional[UUID|str]=None) -> int:
+    def insert_memory(self, memory: AnyMemory) -> int:
         cid = memory.cid
         cur = self.cursor()
         cur.execute("""
@@ -946,7 +949,7 @@ class DatabaseRW(Database):
             memory.timestamp,
             memory.data.kind,
             memory.data.model_dump_json(exclude={"kind"}),
-            importance
+            memory.importance
         ))
         
         # 0 (ignored) or None (error)
@@ -958,8 +961,22 @@ class DatabaseRW(Database):
             self.insert_text_embedding(rowid, index)
             self.insert_text_fts(rowid, index)
             
-            if sona and (sona_row := self.find_sona(sona)):
-                self.link_sona(sona_row.rowid, rowid)
+            for sona in memory.sonas or []:
+                # Link memory to sonas
+                # TODO: Could be more efficient by batching
+                if sona and (sona_row := self.find_sona(sona)):
+                    self.link_sona(sona_row.rowid, rowid)
+            
+            # Propagate the memory's importance
+            if memory.importance is not None:
+                cur.execute("""
+                    UPDATE memories AS m2
+                        SET importance = -- M2 <- M1
+                            (1 - e.weight) * ? + e.weight * m1.importance
+                    FROM edges e
+                        JOIN memories m1 ON e.src_id = m1.rowid
+                    WHERE m2.rowid = e.dst_id AND m1.rowid = ?
+                """, (memory.importance, rowid))
         elif cid:
             # Memory already exists
             rowid, = cur.execute("""

@@ -1,3 +1,8 @@
+'''
+Memoria is the immutable state which can't be advanced without external
+intervention.
+'''
+
 from datetime import datetime
 from typing import Iterable, Optional, overload
 from uuid import UUID
@@ -5,7 +10,7 @@ from uuid import UUID
 from ipld.cid import CIDv1
 
 from db import Database
-from models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, PartialMemory, RecallConfig, Sona, StopReason
+from models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, RecallConfig, Sona, StopReason
 from util import todo_list
 
 class Memoria:
@@ -24,14 +29,10 @@ class Memoria:
     def lookup_act(self, cid: CIDv1) -> Optional[ACThread]:
         return self.db.lookup_ipld_act(cid)
 
-    def insert(self,
-            memory: AnyMemory,
-            importance: Optional[float] = None,
-            sona: Optional[UUID|str] = None
-        ):
+    def insert(self, memory: AnyMemory):
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
-            db.insert_memory(memory, importance, sona)
+            db.insert_memory(memory)
     
     def propogate_importance(self, memory: CIDv1):
         with self.db.transaction() as db:
@@ -236,8 +237,8 @@ class Memoria:
             #  do we actually run recall on them.
             edges: list[Edge[CIDv1]] = []
             for e in db.backward_edges(memory_id):
-                prompt = e.target.to_incomplete().data.document()
-                for row, score in db.recall(sona, prompt, timestamp, config):
+                prompt = e.target.to_incomplete()
+                for row, score in db.recall(prompt, config):
                     if cid := row.cid:
                         edges.append(Edge(
                             target=CIDv1(cid),
@@ -297,7 +298,6 @@ class Memoria:
             db.update_memory_data(mr.rowid, data.model_dump_json())
 
     def recall(self,
-            sona: Optional[str],
             prompt: DraftMemory,
             config: Optional[RecallConfig]=None
         ) -> MemoryDAG:
@@ -305,9 +305,7 @@ class Memoria:
         return self.build_subgraph(
             prompt.edges + [
             Edge(target=row.cid, weight=score)
-                for row, score in self.db.recall(
-                    sona, prompt.document(), prompt.timestamp, config
-                )
+                for row, score in self.db.recall(prompt, config)
         ])
     
     def list_messages(self,

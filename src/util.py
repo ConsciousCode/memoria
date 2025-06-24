@@ -1,5 +1,5 @@
 import json
-from typing import Callable, Iterable, Mapping, Protocol, Self, Sequence, overload
+from typing import Callable, Iterable, Mapping, Optional, Protocol, Self, Sequence, overload
 import re
 from functools import wraps
 from heapq import heappop
@@ -106,6 +106,15 @@ class LeastT:
         return isinstance(other, LeastT)
 
 Least = LeastT.__new__(LeastT)
+
+@overload
+def ifnone[A](arg0: A, /) -> A: ...
+@overload
+def ifnone[A, B](arg0: Optional[A], arg1: B) -> A|B: ...
+@overload
+def ifnone[A, B, C](arg0: Optional[A], arg1: Optional[B], arg2: C) -> A|B|C: ...
+@overload
+def ifnone[A, B, C, D](arg0: Optional[A], arg1: Optional[B], arg2: Optional[C], arg3: D) -> A|B|C|D: ...
 
 def ifnone[*Ts](*args: *Ts): # type: ignore
     '''Return the first non-None argument, or None if all are None.'''

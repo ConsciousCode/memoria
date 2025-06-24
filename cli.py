@@ -6,15 +6,14 @@ from functools import cached_property
 import os
 from typing import TYPE_CHECKING, Any, Final, Iterable, Iterator, NoReturn, Optional, Sequence
 import inspect
-import readline
 
 from mcp.types import ModelHint, ModelPreferences
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
 
-from ipld.cid import CIDv1
-from models import AnyMemory, Chatlog, Memory, MemoryDAG, PartialMemory, RecallConfig
+from src.ipld.cid import CIDv1
+from src.models import AnyMemory, Chatlog, Memory, MemoryDAG, PartialMemory, RecallConfig
 
 if TYPE_CHECKING:
     # These can be pretty beefy, so put in a type check to avoid
