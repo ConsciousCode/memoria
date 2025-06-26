@@ -13,6 +13,8 @@ from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, PromptMessage, TextContent
 from pydantic import Field
 
+import memoria
+
 from ._common import mcp_context, lifespan
 from src.ipld import CIDv1
 from src.memoria import Memoria
@@ -261,7 +263,9 @@ def act_push(
     Insert a new memory into the sona, formatted for an ACT
     (Autonomous Cognitive Thread).
     '''
-    if u := mcp_context(ctx).act_push(sona, memories):
+    memoria = mcp_context(ctx)
+    emu = MCPEmulator(ctx, memoria)
+    if u := emu.act_push(sona, memories):
         return u
     raise ToolError("Sona not found or prompt memory not found.")
 

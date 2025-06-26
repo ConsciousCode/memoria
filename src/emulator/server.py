@@ -5,14 +5,81 @@ import json
 import re
 
 from mcp import CreateMessageResult, SamplingMessage
-from mcp.types import ModelPreferences, TextContent
+from mcp.types import ModelPreferences, Role, TextContent
 
-from ._common import Emulator, EdgeAnnotation, QueryResult, sampling_message, build_tags, serialize_dag
+from ._common import Emulator, EdgeAnnotation, QueryResult
 from src.prompts import ANNOTATE_EDGES
 from src.ipld import CIDv1
-from src.models import CompleteMemory, DraftMemory, IncompleteMemory, Memory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
+from src.models import AnyMemory, CompleteMemory, DraftMemory, IncompleteMemory, Memory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
 from src.memoria import Memoria
 from src.util import ifnone
+
+def build_tags(tags: list[str], timestamp: Optional[float|datetime]) -> str:
+    if timestamp is not None:
+        if not isinstance(timestamp, datetime):
+            timestamp = datetime.fromtimestamp(timestamp)
+        tags.append(timestamp.replace(microsecond=0).isoformat())
+    return f"[{'\t'.join(tags)}]\t"
+
+def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=False) -> tuple[Role, str]:
+    '''Render memory for the context.'''
+    
+    tags = []
+    if final: tags.append("final")
+    tags.append(
+        f"ref:{ref}" + (f"->{','.join(map(str, deps))}" if deps else "")
+    )
+
+    if (ts := memory.timestamp) is not None:
+        ts = datetime.fromtimestamp(ts)
+    
+    match memory.data:
+        case Memory.SelfData():
+            if name := memory.data.name:
+                tags.append(f"name:{name}")
+            if sr := memory.data.stop_reason:
+                if sr != "finish":
+                    tags.append(f"stop_reason:{sr}")
+            content = ''.join(p.content for p in memory.data.parts)
+            return ("assistant", build_tags(tags, ts) + content)
+        
+        case Memory.TextData():
+            tags.append("kind:raw_text")
+            return ("user", build_tags(tags, ts) + memory.data.content)
+        
+        case Memory.OtherData():
+            if name := memory.data.name:
+                tags.append(f"name:{name}")
+            return ("user", build_tags(tags, ts) + memory.data.content)
+        
+            '''
+        case "file":
+            return ConvoMessage(
+                EmbeddedResource(
+                    type="resource",
+                    resource=BlobResourceContents(
+                        uri=AnyUrl(f"memory://{memory.cid}"),
+                        mimeType=memory.data.mimeType or
+                            "application/octet-stream",
+                        blob=memory.data.content
+                    )
+                ),
+                role="user"
+            )
+        '''
+        
+        case _:
+            raise ValueError(f"Unknown memory kind: {memory.data.kind}")
+
+def sampling_message(role: Role, content: str) -> SamplingMessage:
+    '''Create a SamplingMessage from role and content.'''
+    return SamplingMessage(
+        role=role,
+        content=TextContent(
+            type="text",
+            text=content
+        )
+    )
 
 class ServerEmulator(Emulator):
     '''Emulator with direct access to memoria, sampling left unimplemented.'''
@@ -173,9 +240,27 @@ class ServerEmulator(Emulator):
         refs: dict[CIDv1, int] = {}
         chatlog: list[PartialMemory] = []
         messages: list[SamplingMessage] = []
-        for msg in serialize_dag(g, refs):
-            chatlog.append(msg.memory)
-            messages.append(msg.sampling_message(include_final=True))
+        #for msg in serialize_dag(g, refs):
+        for cid in g.invert().toposort(key=lambda v: v.timestamp):
+            # We need ids for each memory so their edges can be annotated later
+            ref = refs[cid] = len(refs) + 1
+            memory = g[cid]
+            chatlog.append(memory)
+            role, content = memory_to_message(
+                ref,
+                [refs[dst] for dst, _ in g.edges(cid)],
+                memory,
+                final=(ref >= len(refs))
+            )
+            messages.append(
+                SamplingMessage(
+                    role=role,
+                    content=TextContent(
+                        type="text",
+                        text=content
+                    )
+                )
+            )#msg.sampling_message(include_final=True))
         
         tag = f"ref:{len(messages)}"
         deps = [refs[e.target] for e in prompt.edges]
