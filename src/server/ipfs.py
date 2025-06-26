@@ -2,8 +2,8 @@ from typing import Annotated, Optional
 
 from fastapi import FastAPI, Header, Request, Response
 
-from ipld import dagcbor, CIDv1
 from ._common import mcp_context
+from src.ipld import dagcbor, CIDv1
 
 ipfs_app = FastAPI()
 

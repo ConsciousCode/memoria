@@ -7,13 +7,14 @@ import os
 from typing import TYPE_CHECKING, Any, Final, Iterable, Iterator, NoReturn, Optional, Sequence
 import inspect
 
-from mcp.types import ModelHint, ModelPreferences
+from mcp.types import ModelPreferences
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
 
-from src.ipld.cid import CIDv1
-from src.models import AnyMemory, Chatlog, Memory, MemoryDAG, PartialMemory, RecallConfig
+from src.ipld import CIDv1
+from src.models import AnyMemory, IncompleteMemory, Memory, MemoryDAG, PartialMemory, RecallConfig, SampleConfig
+from src.emulator.client import ClientEmulator
 
 if TYPE_CHECKING:
     # These can be pretty beefy, so put in a type check to avoid
@@ -75,7 +76,13 @@ class Config(BaseModel):
     sona: Optional[str] = None
     '''Default sona to use for chat.'''
     temperature: Optional[float] = None
+
     '''Default temperature for chat responses.'''
+    chat: SampleConfig = Field(default_factory=SampleConfig)
+    '''Configuration for chat sampling.'''
+    annotate: SampleConfig = Field(default_factory=SampleConfig)
+    '''Configuration for edge annotation sampling.'''
+    
     models: dict[str, dict[str, ModelConfig]] = Field(default_factory=dict)
     '''Model profiles for different AI models.'''
     purposes: dict[str, str] = Field(default_factory=dict)
@@ -522,50 +529,8 @@ class MemoriaApp:
         
         return Config(source=source, **data)
     
-    async def chatquery(self, tool: str, *argv: str):
-        from mcp.types import TextContent
-
-        config = self.get_config()
-        args, opts = argparse(argv, {
-            "-l,--list": False,
-            "-v,--verbose": False,
-            "-q,--quiet": False,
-        })
-        if len(args) > 1:
-            raise ValueError("Expected a single message argument.")
-        
-        message = args[0] if args else input("<user> ").strip()
-        
-        async with self.mcp() as client:
-            contents = await client.call_tool(
-                tool, {
-                    "sona": config.sona,
-                    "message": message,
-                    "model_preferences": ModelPreferences(
-                        hints=[ModelHint(purpose="chat")], # type: ignore
-                        intelligencePriority=0.8,
-                        speedPriority=0.4,
-                        costPriority=0.4
-                    )
-                }
-            )
-            
-            # Just dump the response
-            if not opts['list']:
-                print("".join(getattr(c, "text", "") for c in contents))
-                return
-            
-            for c in contents:
-                assert isinstance(c, TextContent)
-                chatlog = Chatlog.model_validate_json(c.text)
-                log = chatlog.chatlog + [chatlog.response]
-                return args, opts, log, {
-                    m.cid: i for i, m in enumerate(log, start=1)
-                }
-        
-        raise ValueError("No chat log found in response.")
-
     async def sampling_handler(self, msgs: list['SamplingMessage'], params: 'SamplingParams', ctx):
+        '''Used to implement MCP sampling.'''
         try:
             from pydantic_ai import Agent
             from pydantic_ai.settings import ModelSettings
@@ -645,7 +610,7 @@ class MemoriaApp:
             StreamableHttpTransport(config.server),
             sampling_handler=self.sampling_handler,
         ) as client:
-            yield client
+            yield ClientEmulator(client)
 
     async def subcmd_chat(self, *argv: str):
         '''
@@ -661,17 +626,42 @@ class MemoriaApp:
           -v,--verbose    Show the total context as seen by the agent.
           -q,--quiet      Do not print extra data, just the raw contents.
         '''
+
+        args, opts = argparse(argv, {
+            "-l,--list": False,
+            "-v,--verbose": False,
+            "-q,--quiet": False,
+        })
+        if len(args) > 1:
+            raise ValueError("Expected a single message argument.")
         
-        if (result := await self.chatquery("chat", *argv)) is None:
-            return
+        message = args[0] if args else input("<user> ").strip()
         
-        args, opts, log, refs = result
-        self.print_chatlog(
-            log, refs,
-            meta=bool(opts.get('meta')),
-            verbose=bool(opts.get('verbose')),
-            extra=not opts.get('quiet')
-        )
+        config = self.get_config()
+        async with self.mcp() as client:
+            chatlog = await client.chat(
+                prompt=IncompleteMemory(
+                    data=IncompleteMemory.TextData(content=message),
+                ),
+                system_prompt=SYSTEM_PROMPT,
+                recall_config=config.recall or RecallConfig(),
+                chat_config=config.chat or SampleConfig(),
+                annotate_config=config.annotate or SampleConfig()
+            )
+            
+            # Just dump the response
+            if not opts['list']:
+                print(chatlog[-1].document())
+                return
+            
+            self.print_chatlog(
+                chatlog, {
+                    m.cid: i for i, m in enumerate(chatlog, start=1)
+                },
+                meta=bool(opts.get('meta')),
+                verbose=bool(opts.get('verbose')),
+                extra=not opts.get('quiet')
+            )
 
     async def subcmd_query(self, *argv: str):
         '''
@@ -687,17 +677,42 @@ class MemoriaApp:
           -v,--verbose    Show the total context as seen by the agent.
           -q,--quiet      Do not print extra data, just the raw contents.
         '''
+
+        args, opts = argparse(argv, {
+            "-l,--list": False,
+            "-v,--verbose": False,
+            "-q,--quiet": False,
+        })
+        if len(args) > 1:
+            raise ValueError("Expected a single message argument.")
         
-        if (result := await self.chatquery("query", *argv)) is None:
-            return
+        message = args[0] if args else input("<user> ").strip()
         
-        args, opts, log, refs = result
-        self.print_chatlog(
-            log, refs,
-            meta=bool(opts.get('meta')),
-            verbose=bool(opts.get('verbose')),
-            extra=bool(opts.get('extra'))
-        )
+        config = self.get_config()
+        async with self.mcp() as client:
+            chatlog = await client.query(
+                prompt=IncompleteMemory(
+                    data=IncompleteMemory.TextData(content=message),
+                ),
+                system_prompt=SYSTEM_PROMPT,
+                recall_config=config.recall or RecallConfig(),
+                chat_config=config.chat or SampleConfig()
+            )
+            
+            # Just dump the response
+            if not opts['list']:
+                print(chatlog.response)
+                return
+            
+            log = chatlog.chatlog
+            self.print_chatlog(
+                log, {
+                    m.cid: i for i, m in enumerate(log, start=1)
+                },
+                meta=bool(opts.get('meta')),
+                verbose=bool(opts.get('verbose')),
+                extra=not opts.get('quiet')
+            )
 
     async def subcmd_recall(self, *argv: str):
         '''
@@ -726,30 +741,30 @@ class MemoriaApp:
         
         search = args[0] if args else input("search> ").strip()
 
+        config = self.get_config()
         async with self.mcp() as client:
             if (sona := opts.get('sona')) is None:
                 sona = self.get_config().sona
+
+            g = await client.recall(
+                prompt=IncompleteMemory(
+                    data=IncompleteMemory.TextData(content=search),
+                    sonas=[str(sona)]
+                ),
+                recall_config=config.recall or RecallConfig(),
+            )
+            log = []
+            refs: dict[CIDv1, int] = {}
+            for cid in g.invert().toposort(key=lambda m: m.timestamp):
+                assert g[cid].cid == cid
+                log.append(g[cid])
+                refs[cid] = len(log)
             
-            chatlog = await client.call_tool("recall", {
-                "sona": sona,
-                "prompt": search
-            })
-            for item in chatlog:
-                assert isinstance(item, TextContent)
-                d = TypeAdapter(dict[CIDv1, PartialMemory]).validate_json(item.text)
-                g = MemoryDAG(d)
-                log = []
-                refs: dict[CIDv1, int] = {}
-                for cid in g.invert().toposort(key=lambda m: m.timestamp):
-                    assert g[cid].cid == cid
-                    log.append(g[cid])
-                    refs[cid] = len(log)
-                
-                self.print_chatlog(
-                    log, refs,
-                    verbose=bool(opts.get('verbose')),
-                    extra=not opts.get('quiet')
-                )
+            self.print_chatlog(
+                log, refs,
+                verbose=bool(opts.get('verbose')),
+                extra=not opts.get('quiet')
+            )
     
     def subcmd_config(self, *argv: str):
         '''

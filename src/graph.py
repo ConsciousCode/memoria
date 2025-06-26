@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Callable, Iterable, Optional, overload, override
 from heapq import heapify, heappush
 
-from util import Least, Lexicographic, ifnone, todo_heap
+from src.util import Least, Lexicographic, ifnone, todo_heap
 
 _default = object()
 
@@ -159,7 +159,10 @@ class IGraph[K, E, V, Node](ABC):
         '''
 
         if key is None:
-            key = lambda v: None
+            key = lambda v: Least
+        else:
+            _oldkey = key
+            key = lambda v: ifnone(_oldkey(v), Least)
 
         indeg = SimpleGraph[K, int]()
         for src in self:
@@ -167,14 +170,14 @@ class IGraph[K, E, V, Node](ABC):
                 indeg.insert(src, 0)
             
             for dst, _ in self.edges(src):
-                if dst not in indeg:
-                    indeg.insert(dst, 1)
-                else:
+                if dst in indeg:
                     indeg[dst] += 1
+                else:
+                    indeg.insert(dst, 1)
                 indeg.add_edge(src, dst, None)
         
         sources = [
-            (ifnone(key(self[src]), Least), src)
+            (key(self[src]), src)
                 for src, deg in indeg.items()
                     if deg.value == 0
         ]

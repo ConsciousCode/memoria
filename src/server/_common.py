@@ -6,8 +6,7 @@ from typing import Optional
 from fastapi import Request
 from fastmcp import Context
 
-from db import Database
-from memoria import Memoria
+from src.memoria import Memoria, Database
 
 def mcp_context(ctx: Context|Request) -> Memoria:
     '''Get memoria from the FastAPI context.'''

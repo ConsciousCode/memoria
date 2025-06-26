@@ -3,11 +3,23 @@ from typing import Annotated, Iterable, Literal, Optional, overload, override
 from uuid import UUID
 
 from mcp.types import ModelPreferences
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler
+from pydantic_core import CoreSchema, core_schema
 
-from graph import IGraph
-from ipld import dagcbor
-from ipld.cid import CIDv1, cidhash
+from src.graph import IGraph
+from src.ipld import dagcbor, CIDv1, cidhash
+
+__all__ = (
+    'MemoryKind',
+    'StopReason',
+    'RecallConfig', 'SampleConfig',
+    'IPLDModel',
+    'Edge', 'BaseMemory', 'LeafMemory', 'NodeMemory',
+    'DraftMemory', 'IncompleteMemory', 'PartialMemory', 'Memory',
+    'CompleteMemory', 'AnyMemory',
+    'AnyACThread', 'IncompleteACThread', 'ACThread',
+    'Sona', 'MemoryDAG'
+)
 
 type MemoryKind = Literal["self", "other", "text", "image", "file"]
 type StopReason = Literal["endTurn", "stopSequence", "maxTokens"] | str
@@ -124,7 +136,7 @@ class BaseMemory(BaseModel):
         exclude=True,
         description="Importance of the memory, used for recall weighting."
     )
-    sonas: Optional[list[UUID]] = Field(
+    sonas: Optional[list[UUID|str]] = Field(
         default=None,
         exclude=True,
         description="Sonas the memory belongs to."
@@ -248,11 +260,6 @@ type CompleteMemory = PartialMemory | Memory
 '''A memory with a CID.'''
 type AnyMemory = IncompleteMemory | PartialMemory | Memory
 
-class Chatlog(BaseModel):
-    '''Data model for a single-turn chat as returned by the server.'''
-    chatlog: list[PartialMemory]
-    response: AnyMemory
-
 class IncompleteACThread(BaseModel):
     '''A thread of memories in the agent's context.'''
     cid: None = None # Incomplete threads can't have a cid
@@ -306,6 +313,28 @@ class MemoryDAG(IGraph[CIDv1, float, PartialMemory, PartialMemory]):
     def __init__(self, keys: dict[CIDv1, PartialMemory]|None = None):
         super().__init__()
         self.adj = keys or {}
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        adj_schema = handler(dict[CIDv1, PartialMemory])
+        return core_schema.json_or_python_schema(
+            json_schema=core_schema.chain_schema([
+                adj_schema,
+                core_schema.no_info_plain_validator_function(cls)
+            ]),
+            python_schema=core_schema.union_schema([
+                core_schema.is_instance_schema(cls),
+                core_schema.chain_schema([
+                    adj_schema,
+                    core_schema.no_info_plain_validator_function(cls)
+                ])
+            ]),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda instance: instance.adj
+            )
+        )
     
     @override
     def _node(self, value: PartialMemory) -> PartialMemory:

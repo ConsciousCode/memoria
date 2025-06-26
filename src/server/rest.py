@@ -6,9 +6,8 @@ from uuid import UUID
 
 from fastapi import FastAPI, Header, Query, Request, Response
 
-from ipld import dagcbor
-
 from ._common import mcp_context
+from src.ipld import dagcbor
 
 rest_app = FastAPI()
 

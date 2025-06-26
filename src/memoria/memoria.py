@@ -7,11 +7,15 @@ from datetime import datetime
 from typing import Iterable, Optional, overload
 from uuid import UUID
 
-from ipld.cid import CIDv1
+from .db import Database
 
-from db import Database
-from models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, RecallConfig, Sona, StopReason
-from util import todo_list
+from src.ipld import CIDv1
+from src.models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, RecallConfig, Sona, StopReason
+from src.util import todo_list
+
+__all__ = (
+    'Memoria',
+)
 
 class Memoria:
     '''
@@ -33,7 +37,7 @@ class Memoria:
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
             db.insert_memory(memory)
-    
+
     def propogate_importance(self, memory: CIDv1):
         with self.db.transaction() as db:
             db.propagate_importance(memory)
@@ -296,17 +300,23 @@ class Memoria:
                 db.finalize_act(thread.rowid)
             
             db.update_memory_data(mr.rowid, data.model_dump_json())
+    
+    def update_invalid(self) -> bool:
+        with self.db.transaction() as db:
+            return db.update_invalid()
 
     def recall(self,
             prompt: DraftMemory,
             config: Optional[RecallConfig]=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
-        return self.build_subgraph(
-            prompt.edges + [
-            Edge(target=row.cid, weight=score)
-                for row, score in self.db.recall(prompt, config)
-        ])
+        with self.db.transaction() as db:
+            return self.build_subgraph(
+                prompt.edges + [
+                    Edge(target=row.cid, weight=score)
+                        for row, score in db.recall(prompt, config)
+                ]
+            )
     
     def list_messages(self,
             page: int,

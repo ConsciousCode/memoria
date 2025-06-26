@@ -1,50 +1,66 @@
-from contextlib import asynccontextmanager, contextmanager
+'''
+MCP Server for Memoria
+'''
+
 from datetime import datetime
-import json
-import re
-from typing import Annotated, Iterable, Literal, Optional, Sequence, cast, override
+from contextlib import asynccontextmanager
+from typing import Annotated, Iterable, Optional, override
 from uuid import UUID
 
-from fastapi import FastAPI, Header, Request, Response
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ResourceError, ToolError
 from mcp import CreateMessageResult, SamplingMessage
-from mcp.types import ModelHint, ModelPreferences, PromptMessage, Role, TextContent
-from fastmcp import Context, FastMCP
-from fastmcp.prompts.prompt import Message
-from pydantic import BaseModel, Field
-
-from ipld import dagcbor, CIDv1
-from db import Edge
-from memoria import Database, Memoria
-from models import AnyMemory, Chatlog, CompleteMemory, DraftMemory, IncompleteMemory, Memory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig, StopReason
-from server.emulator import Emulator
+from mcp.types import ModelPreferences, PromptMessage, TextContent
+from pydantic import Field
 
 from ._common import mcp_context, lifespan
-from prompts import ANNOTATE_EDGES, CHAT_PROMPT, QUERY_PROMPT
+from src.ipld import CIDv1
+from src.memoria import Memoria
+from src.models import DraftMemory, Edge, IncompleteMemory, Memory, RecallConfig, SampleConfig, StopReason
+from src.prompts import CHAT_PROMPT, QUERY_PROMPT
+from src.emulator.server import ServerEmulator
 
-class MCPEmulator(Emulator):
+DEFAULT_RECALL_CONFIG = RecallConfig()
+
+DEFAULT_ANNOTATE_CONFIG = SampleConfig(
+    temperature=0,
+    max_tokens=1024,
+    model_preferences=ModelPreferences(
+        intelligencePriority=0.2,
+        speedPriority=0.8,
+        costPriority=0.1
+    )
+)
+
+DEFAULT_CHAT_CONFIG = SampleConfig(
+    temperature=1,
+    max_tokens=16384,
+    model_preferences=ModelPreferences(
+        intelligencePriority=0.8,
+        speedPriority=0.2,
+        costPriority=0.5
+    )
+)
+
+class MCPEmulator(ServerEmulator):
     def __init__(self, context: Context, memoria: Memoria):
         super().__init__(memoria)
         self.context = context
-    
+
     @override
-    async def sample(self, 
+    async def sample(self,
             messages: Iterable[SamplingMessage],
+            *,
             system_prompt: str,
             temperature: float = 0.7,
             max_tokens: Optional[int] = None,
             model_preferences: Optional[ModelPreferences | str | list[str]] = None
         ) -> CreateMessageResult:
-        '''Sample a response from the LLM using the MCP context.'''
-        
-        if max_tokens is None:
-            max_tokens = 512
-
         return await self.context.request_context.session.create_message(
-            list(messages),
+            messages=list(messages),
             system_prompt=system_prompt,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens or 16384,
             model_preferences=model_preferences
         )
 
@@ -102,11 +118,11 @@ async def insert(
         recall_config: Annotated[
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
-        ] = RecallConfig(),
+        ] = DEFAULT_RECALL_CONFIG,
         annotate_config: Annotated[
             SampleConfig,
             Field(description="Configuration for how to sample the response for edge annotation.")
-        ] = SampleConfig()
+        ] = DEFAULT_ANNOTATE_CONFIG
     ):
     '''Insert a new memory into the sona.'''
     emu = MCPEmulator(ctx, mcp_context(ctx))
@@ -118,22 +134,24 @@ async def insert(
         openWorldHint=False,
     )
 )
-def recall(
+async def recall(
         ctx: Context,
         prompt: Annotated[
             DraftMemory,
             Field(description="Prompt to base the recall on.")
         ],
-        config: Annotated[
+        recall_config: Annotated[
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
-        ] = RecallConfig()
+        ] = DEFAULT_RECALL_CONFIG
     ):
     '''
     Recall memories related to the prompt, including relevant included memories
     and their dependencies.
     '''
-    return dict(mcp_context(ctx).recall(prompt, config).items())
+    emu = MCPEmulator(ctx, mcp_context(ctx))
+    g = await emu.recall(prompt, recall_config)
+    return dict(g.items())
 
 @mcp.tool(
     annotations=dict(
@@ -147,33 +165,39 @@ async def query(
             IncompleteMemory,
             Field(description="Prompt for the chat. If `null`, use only the included memories.")
         ],
+        system_prompt: Annotated[
+            Optional[str],
+            Field(description="System prompt to use for the query. If `null`, uses the default query prompt.")
+        ] = None,
         recall_config: Annotated[
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
-        ] = RecallConfig(),
+        ] = DEFAULT_RECALL_CONFIG,
         chat_config: Annotated[
             SampleConfig,
             Field(description="Configuration for how to sample the response.")
-        ] = SampleConfig(),
+        ] = DEFAULT_CHAT_CONFIG
     ):
     '''Single-turn conversation returning the response.'''
     memoria = mcp_context(ctx)
     emu = MCPEmulator(ctx, memoria)
 
-    qr = await emu.query(prompt, QUERY_PROMPT, recall_config, chat_config)
+    qr = await emu.query(
+        prompt,
+        system_prompt or QUERY_PROMPT,
+        recall_config,
+        chat_config
+    )
     response = qr.response
     assert isinstance(response, TextContent)
 
-    return Chatlog(
-        chatlog=qr.chatlog,
-        response=IncompleteMemory(
-            timestamp=int(datetime.now().timestamp()),
-            data=Memory.SelfData(
-                parts=[Memory.SelfData.Part(content=response.text)],
-                stop_reason=qr.response.stopReason
-            )
+    return qr.chatlog + [IncompleteMemory(
+        timestamp=int(datetime.now().timestamp()),
+        data=Memory.SelfData(
+            parts=[Memory.SelfData.Part(content=response.text)],
+            stop_reason=qr.response.stopReason
         )
-    )
+    )]
 
 @mcp.tool(
     annotations=dict(
@@ -186,18 +210,22 @@ async def chat(
             IncompleteMemory,
             Field(description="Prompt for the chat. If `null`, use only the included memories.")
         ],
+        system_prompt: Annotated[
+            Optional[str],
+            Field(description="System prompt to use for the chat. If `null`, uses the default chat prompt.")
+        ] = None,
         recall_config: Annotated[
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
-        ] = RecallConfig(),
+        ] = DEFAULT_RECALL_CONFIG,
         chat_config: Annotated[
             SampleConfig,
             Field(description="Configuration for how to sample the response.")
-        ] = SampleConfig(),
+        ] = DEFAULT_CHAT_CONFIG,
         annotate_config: Annotated[
             SampleConfig,
             Field(description="Configuration for how to sample the response for edge annotation.")
-        ] = SampleConfig()
+        ] = DEFAULT_ANNOTATE_CONFIG
     ):
     '''
     Single-turn conversation returning the response. This is committed to memory.
@@ -206,7 +234,8 @@ async def chat(
     emu = MCPEmulator(ctx, memoria)
 
     return await emu.chat(
-        prompt, CHAT_PROMPT,
+        prompt,
+        system_prompt or CHAT_PROMPT,
         recall_config,
         chat_config,
         annotate_config
@@ -281,7 +310,7 @@ def act_next(
         chat_config: Annotated[
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
-        ] = RecallConfig()
+        ] = DEFAULT_RECALL_CONFIG
     ) -> Optional[list[PromptMessage]]:
     '''Get the prompt for the next step of an ACT (Autonomous Cognitive Thread).'''
     raise NotImplementedError()

@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from typing import Callable, Iterable, Optional, Protocol, cast, overload
 import sqlite3
 from uuid import UUID
+import os
 
 from pydantic import BaseModel
 from numpy import ndarray
@@ -10,9 +11,21 @@ import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
-from ipld.cid import CIDv1
-from models import ACThread, AnyACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, DraftMemory, Memory, MemoryKind, PartialMemory, RecallConfig
-from util import finite
+from src.ipld import CIDv1
+from src.models import ACThread, AnyACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, DraftMemory, Memory, MemoryKind, PartialMemory, RecallConfig
+from src.util import finite
+
+__all__ = (
+    'FileRow',
+    'MemoryRow', 'IncompleteMemoryRow', 'AnyMemoryRow',
+    'EdgeRow',
+    'SonaRow',
+    'ACThreadRow', 'IncompleteACThreadRow', 'AnyACThreadRow',
+    'Database'
+)
+
+with open(os.path.join(os.path.dirname(__file__), "schema.sql"), "r") as f:
+    SCHEMA = f.read()
 
 nomic_text = TextEmbedding(
     model_name="nomic-ai/nomic-embed-text-v1.5",
@@ -80,12 +93,12 @@ class MemoryRow(BaseMemoryRow):
     @classmethod
     def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'MemoryRow':
         '''Create a MemoryRow from a raw database row.'''
-        if not timestamp.is_integer():
+        if timestamp and not timestamp.is_integer():
             raise TypeError("Timestamp must be an integer.")
         return MemoryRow(
             rowid=rowid,
             cid=cid and CIDv1(cid),
-            timestamp=int(timestamp),
+            timestamp=timestamp,
             kind=kind,
             data=data,
             importance=importance
@@ -276,8 +289,7 @@ class Database:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
-        with open("schema.sql", "r") as f:
-            self.cursor().executescript(f.read())
+        self.cursor().executescript(SCHEMA)
         return self
     
     def __exit__(self, exc_type, exc_value, traceback):
@@ -491,19 +503,6 @@ class Database:
             SELECT rowid, uuid, active_id, pending_id
             FROM sonas WHERE uuid = ?
         """, (uuid.bytes,)).fetchone()
-    
-    def select_sona_uuid_embedding(self, uuid: UUID) -> Optional[ndarray]:
-        '''Select the embedding for a sona by its UUID.'''
-        cur = self.cursor()
-        cur.execute("""
-            SELECT embedding
-            FROM sona
-                JOIN sona_vss ON sona.rowid = sona_vss.sona_id
-            WHERE sona.rowid = ?
-        """, (uuid,))
-        if row := cur.fetchone():
-            return numpy.frombuffer(row[0], dtype=numpy.float32)
-        return None
 
     def ipld_memory_rowid(self, rowid: int) -> Optional[AnyMemory]:
         '''
@@ -690,6 +689,77 @@ class Database:
             LIMIT ? OFFSET ?
         """, (perpage, (page - 1) * perpage))
 
+class DatabaseRW(Database):
+    '''Provides mutating operations for the database.'''
+
+    @classmethod
+    def _construct(cls, db: Database):
+        self = DatabaseRW.__new__(DatabaseRW)
+        self.__dict__ = db.__dict__
+        return self
+
+    def file_lookup(self, mh: str, ext: str):
+        fn, x, yz, rest = mh[:2], mh[2], mh[3:5], mh[5:]
+        return f"{self.file_path}/{fn}/{x}/{yz}/{rest}{ext}"
+    
+    def index(self, memory_id: int, index: str):
+        '''Index a memory with a text embedding.'''
+        self.insert_text_embedding(memory_id, index)
+        self.insert_text_fts(memory_id, index)
+    
+    def update_invalid(self) -> bool:
+        '''
+        One iteration of updating invalid memories in the database. Returns
+        whether any invalid memories were found. For a complete update,
+        `while update_invalid(): commit()` will clear everything.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            SELECT im1.memory_id
+            FROM invalid_memories im1
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM edges e
+                    INNER JOIN invalid_memories im2
+                        ON e.dst_id = im2.memory_id
+                WHERE e.src_id = im1.memory_id
+            )
+        """)
+        mids: list[tuple[int]] = cur.fetchall()
+        if not mids:
+            return False
+        
+        cur.executemany("""
+            UPDATE memories SET cid = ?
+            WHERE rowid = ?
+        """, (
+            (cid.buffer, rowid)
+            for (rowid,) in mids
+                if (m := self.select_memory_rowid(rowid))
+                    if (cid := m.cid)
+        ))
+        cur.executemany("""
+            DELETE FROM invalid_memories WHERE memory_id = ?
+        """, mids)
+
+        return True
+    
+    def find_sona_embedding(self, sona: UUID|str) -> Optional[ndarray]:
+        '''Select the embedding for a sona by its UUID.'''
+        if isinstance(sona, str):
+            sona = UUID(bytes=self.find_sona(sona).uuid)
+        
+        cur = self.cursor()
+        cur.execute("""
+            SELECT embedding
+            FROM sona
+                JOIN sona_vss ON sona.rowid = sona_vss.sona_id
+            WHERE sona.rowid = ?
+        """, (sona,))
+        if row := cur.fetchone():
+            return numpy.frombuffer(row[0], dtype=numpy.float32)
+        return None
+
     def recall(self,
             prompt: DraftMemory,
             config: Optional[RecallConfig]=None
@@ -701,7 +771,7 @@ class Database:
         s = numpy.zeros(1536, dtype=numpy.float32)
         if ps := prompt.sonas:
             for sona in ps:
-                if (se := self.select_sona_uuid_embedding(sona)) is None:
+                if (se := self.find_sona_embedding(sona)) is None:
                     raise ValueError(f"Sona with rowid {sona} does not exist.")
                 s += se
             s /= len(ps)
@@ -744,8 +814,10 @@ class Database:
                 LEFT JOIN mvss ON mvss.memory_id = m.rowid
                 LEFT JOIN svss ON svss.sona_id = sm.sona_id
             WHERE
-                m.cid IS NOT NULL AND -- Don't recall incomplete memories
-                m.timestamp <= :timestamp -- Don't recall future memories
+                m.cid IS NOT NULL AND ( -- Don't recall incomplete memories
+                    :timestamp IS NULL OR
+                    m.timestamp <= :timestamp -- Don't recall future memories
+                )
             ORDER BY score DESC
             LIMIT :k
         """, {
@@ -761,27 +833,8 @@ class Database:
             "k": int(config.k),
             "decay": finite(config.decay)
         })
-
         for row in cur:
             yield MemoryRow.factory(*row[:-1]), row[-1]
-
-class DatabaseRW(Database):
-    '''Provides mutating operations for the database.'''
-
-    @classmethod
-    def _construct(cls, db: Database):
-        self = DatabaseRW.__new__(DatabaseRW)
-        self.__dict__ = db.__dict__
-        return self
-
-    def file_lookup(self, mh: str, ext: str):
-        fn, x, yz, rest = mh[:2], mh[2], mh[3:5], mh[5:]
-        return f"{self.file_path}/{fn}/{x}/{yz}/{rest}{ext}"
-    
-    def index(self, memory_id: int, index: str):
-        '''Index a memory with a text embedding.'''
-        self.insert_text_embedding(memory_id, index)
-        self.insert_text_fts(memory_id, index)
     
     def finalize_memory(self, rowid: int) -> Memory:
         '''

@@ -6,7 +6,7 @@ from heapq import heappop
 
 from pydantic import BaseModel
 
-from ipld.cid import CID
+from src.ipld import CID
 
 class JSONStructure(Protocol):
     def __json__(self) -> "json_t": ...

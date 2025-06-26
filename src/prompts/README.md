@@ -1,0 +1,1 @@
+This directory acts as a submodule for accessing prompts used in the project.

@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS memories (
 );
 
 /**
+ * Memories marked as requiring updates in the merkledag.
+**/
+CREATE TABLE IF NOT EXISTS invalid_memories (
+    memory_id INTEGER PRIMARY KEY REFERENCES memories(rowid) ON DELETE CASCADE,
+);
+
+/**
  * Memory dependencies which enable grounding and context for memories.
 **/
 CREATE TABLE IF NOT EXISTS edges (
