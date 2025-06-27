@@ -45,7 +45,8 @@ class EdgeAnnotation(BaseModel):
         
         for ref, weight in self.rel.items():
             if weight < 0: continue
-            memory.insert_edge(ref, weight / 10)
+            if not memory.has_edge(ref):
+                memory.insert_edge(ref, weight / 10)
         
         # Add importance scores as metadata
         if self.imp:

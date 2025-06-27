@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS memories (
  * Memories marked as requiring updates in the merkledag.
 **/
 CREATE TABLE IF NOT EXISTS invalid_memories (
-    memory_id INTEGER PRIMARY KEY REFERENCES memories(rowid) ON DELETE CASCADE,
+    memory_id INTEGER PRIMARY KEY REFERENCES memories(rowid) ON DELETE CASCADE
 );
 
 /**
@@ -119,7 +119,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(content);
 **/
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_vss USING vec0 (
     memory_id INTEGER NOT NULL REFERENCES memories(rowid) ON DELETE CASCADE,
-    embedding FLOAT[1536]
+    embedding FLOAT[768]
 );
 
 /**
@@ -127,5 +127,5 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_vss USING vec0 (
 **/
 CREATE VIRTUAL TABLE IF NOT EXISTS sona_vss USING vec0(
     sona_id INTEGER PRIMARY KEY REFERENCES sonas(rowid) ON DELETE CASCADE,
-    embedding FLOAT[1536]
+    embedding FLOAT[768]
 );

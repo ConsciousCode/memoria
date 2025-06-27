@@ -768,7 +768,7 @@ class DatabaseRW(Database):
         
         index = prompt.document()
         e, = nomic_text.embed(index)
-        s = numpy.zeros(1536, dtype=numpy.float32)
+        s = numpy.zeros(768, dtype=numpy.float32)
         if ps := prompt.sonas:
             for sona in ps:
                 if (se := self.find_sona_embedding(sona)) is None:
@@ -801,7 +801,10 @@ class DatabaseRW(Database):
                 m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance,
                 (
                     IFNULL(:w_importance * m.importance, 0) +
-                    IFNULL(:w_recency * POWER(:decay, :timestamp - m.timestamp), 0) +
+                    IFNULL(:w_recency * POWER(
+                        :timestamp - m.timestamp,
+                        -:decay * IFNULL(EXP(-POWER(m.importance, 2)), 1)
+                    ), 0) +
                     IFNULL(:w_fts *
                         (fts.score - MIN(fts.score) OVER())
                         / (MAX(fts.score) OVER() - MIN(fts.score) OVER()), 0) +
@@ -822,8 +825,8 @@ class DatabaseRW(Database):
             LIMIT :k
         """, {
             "index": index,
-            "vss_e": e.tobytes(),
-            "sona_e": s.tobytes(),
+            "vss_e": e.astype(numpy.float32),
+            "sona_e": s.astype(numpy.float32),
             "timestamp": prompt.timestamp,
             "w_importance": finite(config.importance),
             "w_recency": finite(config.recency),
@@ -932,7 +935,7 @@ class DatabaseRW(Database):
             )
 
         e, = nomic_text.embed(name)
-        ebs = e.tobytes()
+        ebs = e.astype(numpy.float32)
         cur.execute("""
             SELECT rowid, uuid, active_id, pending_id
             FROM sona_vss
@@ -972,14 +975,14 @@ class DatabaseRW(Database):
         cur.execute("""
             SELECT rowid FROM memory_vss
             WHERE embedding = ?
-        """, (e,))
+        """, (e.astype(numpy.float32),))
         if cur.fetchone():
             return
         # Insert the embedding
         cur.execute("""
             INSERT INTO memory_vss (memory_id, embedding)
             VALUES (?, ?)
-        """, (memory_id, e.tobytes()))
+        """, (memory_id, e.astype(numpy.float32)))
 
     def insert_text_fts(self, memory_id: int, index: str):
         '''Index a memory by inserting it into the full-text search index.'''
@@ -1034,7 +1037,7 @@ class DatabaseRW(Database):
             # Memory already exists
             rowid, = cur.execute("""
                 SELECT rowid FROM memories WHERE cid = ?
-            """, (cid,)).fetchone()
+            """, (cid.buffer,)).fetchone()
         else:
             raise RuntimeError(
                 "Failed to insert memory, it may already exist."

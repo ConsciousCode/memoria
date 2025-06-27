@@ -271,7 +271,7 @@ class ServerEmulator(Emulator):
         # model can figure out the grounding.
         messages.append(sampling_message(
             "user", build_tags(
-                ["final", tag], prompt.timestamp
+                ["final", tag], prompt.timestamp or int(datetime.now().timestamp())
             ) + prompt.document()
         ))
 

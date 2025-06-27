@@ -23,8 +23,6 @@ class ClientEmulator(Emulator):
         self.client = client
         self.timeout = None#timedelta(seconds=5)
 
-    # async def sample(...): raise NotImplemented()
-
     async def progresss_handler(self,
             progress: float,
             total: Optional[float] = None,

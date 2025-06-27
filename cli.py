@@ -7,13 +7,14 @@ import os
 from typing import TYPE_CHECKING, Any, Final, Iterable, Iterator, NoReturn, Optional, Sequence
 import inspect
 
-from mcp.types import ModelPreferences
+from mcp.types import ModelPreferences, TextContent
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
+from tqdm import tqdm
 
 from src.ipld import CIDv1
-from src.models import AnyMemory, IncompleteMemory, Memory, MemoryDAG, PartialMemory, RecallConfig, SampleConfig
+from src.models import AnyMemory, Edge, IncompleteMemory, InsertConvo, InsertMemory, Memory, RecallConfig, SampleConfig
 from src.emulator.client import ClientEmulator
 
 if TYPE_CHECKING:
@@ -544,7 +545,8 @@ class MemoriaApp:
             for prov, name in select_model(config, prefs):
                 settings: ModelSettings = {}
                 if v := params.maxTokens:
-                    settings["max_tokens"] = v
+                    if v < 4096:
+                        settings["max_tokens"] = v
                 if v := params.stopSequences:
                     settings["stop_sequences"] = v
                 
@@ -562,6 +564,7 @@ class MemoriaApp:
                     model = name
 
                 print("Model", model if isinstance(model, str) else model.model_name)
+                print(msgs)
                 agent = Agent(
                     model, instructions=params.systemPrompt or SYSTEM_PROMPT
                 )
@@ -578,6 +581,7 @@ class MemoriaApp:
                     else:
                         raise ValueError(f"Unknown role {m.role!r} in message {m!r}")
 
+                print(history)
                 result = await agent.run(
                     message_history=history,
                     model_settings=settings
@@ -611,6 +615,115 @@ class MemoriaApp:
             sampling_handler=self.sampling_handler,
         ) as client:
             yield ClientEmulator(client)
+
+    async def subcmd_insert(self, *argv: str):
+        '''
+        [-s sona] [file]
+
+        Insert a message into the agent's memory.
+
+        parameters:
+          file           File containing the messages to insert, or STDIN. Follows this schema:
+
+        \x1b[2m```
+        InsertMemory | [InsertMemory] | InsertConvo
+        InsertMemory = {{
+            kind: "self"|"other",
+            name?: str,
+            timestamp: float|iso8601,
+            content: str
+        }}
+        InsertConvo = {{
+            sona?: (UUID|str)?,
+            prev?: CIDv1?,
+            chatlog: [InsertMemory]
+        }}
+        ```\x1b[m
+
+        options:
+          -s,--sona       The sona to insert the message into. If not specified, the
+                           default chat sona is used.
+          -v,--verbose    Show the total context as seen by the agent.
+          -q,--quiet      Do not print extra data, just the raw contents.
+        '''
+
+        args, opts = argparse(argv, {
+            "-s,--sona": str,
+            "-v,--verbose": False,
+            "-q,--quiet": False,
+        })
+        
+        if len(args) > 1:
+            raise ValueError("Expected a single message argument.")
+        
+        if args and args[0] != "-":
+            with open(args[0], "r") as f:
+                data = f.read()
+        else:
+            data = input()
+        
+        convo = TypeAdapter[list[InsertMemory] | InsertMemory | InsertConvo](
+            list[InsertMemory] | InsertMemory | InsertConvo
+        ).validate_json(data)
+
+        match convo:
+            case list(): sona = prev = None
+            case InsertMemory():
+                sona = prev = None
+                convo = [convo]
+            case InsertConvo():
+                sona = convo.sona
+                prev = convo.prev
+                convo = convo.chatlog
+            
+            case _: raise RuntimeError(f"Unknown {type(convo)}")
+        
+        if sona is None:
+            if s := opts.get('sona'):
+                sona = str(s)
+            else:
+                sona = self.get_config().sona
+
+        config = self.get_config()
+        recall_config = config.recall or RecallConfig()
+        annotate_config = config.annotate or SampleConfig()
+
+        async with self.mcp() as client:
+            if opts.get('verbose'):
+                convo = tqdm(convo, desc="Inserting messages", unit="msg")
+                progress = convo
+            else:
+                progress = None
+            
+            for msg in convo:
+                match msg.kind:
+                    case "self":
+                        md = IncompleteMemory.SelfData(
+                            name=msg.name,
+                            parts=[IncompleteMemory.SelfData.Part(content=msg.content)]
+                        )
+                    case "other":
+                        md = IncompleteMemory.OtherData(
+                            name=msg.name,
+                            content=msg.content
+                        )
+                    
+                    case _: raise NotImplementedError(msg.kind)
+                
+                ts = msg.timestamp
+                memory = await client.insert(
+                    IncompleteMemory(
+                        data=md,
+                        timestamp=None if ts is None else int(ts.timestamp()),
+                        sonas=[sona] if sona else None,
+                        edges=[Edge(target=prev, weight=1.0)] if prev else []
+                    ),
+                    recall_config=recall_config,
+                    annotate_config=annotate_config
+                )
+                prev = memory.cid
+                if progress:
+                    progress.write(str(prev))
 
     async def subcmd_chat(self, *argv: str):
         '''
@@ -704,15 +817,24 @@ class MemoriaApp:
                 print(chatlog.response)
                 return
             
+            meta=bool(opts.get('meta'))
+            verbose=bool(opts.get('verbose'))
+            extra=not opts.get('quiet')
+
             log = chatlog.chatlog
             self.print_chatlog(
                 log, {
                     m.cid: i for i, m in enumerate(log, start=1)
                 },
-                meta=bool(opts.get('meta')),
-                verbose=bool(opts.get('verbose')),
-                extra=not opts.get('quiet')
+                meta=meta,
+                verbose=verbose,
+                extra=extra
             )
+            if verbose:
+                print("<user>", message)
+                content = chatlog.response.content
+                assert isinstance(content, TextContent)
+                print("<assistant>", content.text)
 
     async def subcmd_recall(self, *argv: str):
         '''

@@ -12,8 +12,7 @@ from fastmcp.exceptions import ResourceError, ToolError
 from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, PromptMessage, TextContent
 from pydantic import Field
-
-import memoria
+from pydantic_ai import Agent
 
 from ._common import mcp_context, lifespan
 from src.ipld import CIDv1
@@ -184,19 +183,19 @@ async def query(
     memoria = mcp_context(ctx)
     emu = MCPEmulator(ctx, memoria)
 
-    qr = await emu.query(
+    return await emu.query(
         prompt,
         system_prompt or QUERY_PROMPT,
         recall_config,
         chat_config
     )
-    response = qr.response
-    assert isinstance(response, TextContent)
+    content = qr.response.content
+    assert isinstance(content, TextContent)
 
     return qr.chatlog + [IncompleteMemory(
         timestamp=int(datetime.now().timestamp()),
         data=Memory.SelfData(
-            parts=[Memory.SelfData.Part(content=response.text)],
+            parts=[Memory.SelfData.Part(content=content.text)],
             stop_reason=qr.response.stopReason
         )
     )]

@@ -4,5 +4,5 @@ fastembed-gpu
 pydantic
 pydantic-ai
 mcp
-ipld
-py-cid
+fastmcp
+tqdm

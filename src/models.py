@@ -1,8 +1,9 @@
+from datetime import datetime
 from functools import cached_property
 from typing import Annotated, Iterable, Literal, Optional, overload, override
 from uuid import UUID
 
-from mcp.types import ModelPreferences
+from mcp.types import ModelPreferences, Role
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
 
@@ -69,6 +70,43 @@ class SampleConfig(BaseModel):
         Optional[ModelPreferences | str | list[str]],
         Field(description="List of preferred models to use for the response. If `null`, uses the default model.")
     ] = None
+
+class InsertMemory(BaseModel):
+    '''Individual request to insert a memory into the system.'''
+    
+    kind: MemoryKind = Field(
+        description='Role of the memory, e.g. "user", "assistant".'
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description='Name of the memory, if available.'
+    )
+    model: Optional[str] = Field(
+        default=None,
+        description='Model used to generate the memory, if available.'
+    )
+    timestamp: Optional[datetime] = Field(
+        default=None,
+        description='Timestamp of the memory, if available.'
+    )
+    content: str = Field(
+        description='Content of the memory. Right now just text.'
+    )
+
+class InsertConvo(BaseModel):
+    '''Request to insert a sequence of memories.'''
+
+    sona: Optional[UUID|str] = Field(
+        default=None,
+        description="Sona to insert the memories into."
+    )
+    prev: Optional[CIDv1] = Field(
+        default=None,
+        description="CID of the previous memory in the thread, if any."
+    )
+    chatlog: list[InsertMemory] = Field(
+        description="Chatlog to insert into the system."
+    )
 
 class IPLDModel(BaseModel):
     '''Base model for IPLD objects.'''
@@ -186,6 +224,9 @@ class NodeMemory(BaseMemory):
             if edge.target == target:
                 return edge
         return None
+
+    def has_edge(self, target: CIDv1):
+        return any(target == e.target for e in self.edges)
 
     def insert_edge(self, target: CIDv1, weight: float):
         '''Insert an edge to the target memory with the given weight.'''

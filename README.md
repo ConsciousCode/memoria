@@ -153,3 +153,11 @@ python3 cli.py
 - **ACT Chain** - A linear sequence of ACTs that are linked together, where each ACT is a continuation of the previous one. This allows for a continuous flow of thought and memory recall within sona.
 - **Agent** - The totality of a system which uses a Memoria MCP server, consisting of one or more ACTs.
 - **Self** - The totality of an agent's subjective memories stored in a database and directory of multimodal files.
+
+## TODO
+- Better compartmentalize embeddings so that they're actually kind of interchangeable and not baked in (especially against fastembed's nasty network calls).
+- ACT workflows
+  - `push` - Big one, makes sense to keep as a separate tool to push new information to the agent
+  - `advance` - Combine `act_next` and `act_stream` into a single `advance` call which returns the next prompt and streams the response.
+  - ACT continuations and tools for talking back to the user
+- Use MCP logging messages to route logging from the server to the client
