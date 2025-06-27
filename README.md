@@ -1,163 +1,114 @@
 # Memoria
-Memoria is a cognitive architecture which reframes LLMs as interchangeable simulators of "sonas" which are wholly defined by the contents on their "sona file". MCP is used as the basis for coordinating the sona for great flexibility with interacting with the sona. The intended approach is to simulate it directly, but an MCP host could alternatively talk to the sona as a repository of memories stripped of subjective context or adopt its own secondary persona such as a "hypervisor" for debugging.
+
+Memoria is a memory-first cognitive architecture for autonomous AI agents. It treats large language models (LLMs) as interchangeable simulators of a singular "self" split into multiple sub-personas ("sonas"). By organizing interactions as a DAG of memories and dynamically recalling relevant context, Memoria enables coherent, long-term reasoning across multiple concurrent threads.
+
+## Overview
+
+Memoria reframes AI agents as static bundles of memory which can be *advanced* by an LLM-based emulator. Instead of linear chat logs, every input, output, and internal reasoning step is recorded as a **Memory** node in a graph. Memories are grouped into **Sonas** (context-specific sub-personas) to isolate perspectives. Sonas prevent confusing context from leaking between threads while still allowing inter-sona recall as needed.
+
+## Theory
+
+Part of the design considerations for Memoria as compared to other memory-based architectures such as "MemGPT" is the observation that mutable context causes model instability. Causal autoregressive models cannot think outside of the objective, so *even if they're told a modification has occurred*, they struggle to maintain the necessary meta-level awareness of mutability. As an example, suppose the model says "the time is now 12:00" and the system prompt then changes to reflect 12:01. This rewrites the model's only sense of causality. Future iterations interpret this to mean the agent it's simulating was *demonstrably incorrect* in its previous statement and continues this behavior to maintain consistency. Or, at best, apologizes profusely for being "incorrect".
+
+Topologically-sorted memory subgraphs get around this by providing a consistent, immutable, *contextual* view of the past, better accomodating the weaknesses and strengths of causal autoregressive architectures. Context (the memory) becomes *append-only* like the model's actual objective. It ultimately resembles the attention mechanism, selectively highlighting relevant information from a global context which it's blinded to. If eg a memory is retroactively added, immutability guarantees that no memories between the memory's timestamp and the current time reference it; the model can see this. "I don't remember" remains a valid response, and future recollections in which it *does* remember are consistent with the agent "suddenly" remembering rather than having been incorrect in the past.
+
+## Relevant Concepts
+**MCP**
+: (Model Context Protocol) Fully compliant with Anthropic's MCP for interoperability. MCP is actually extremely well-suited to Memoria's architecture since LLMs live with the **Host** separated from the identity held in the **Server**.
+**IPLD**
+: (InterPlanetary Linked Data) Used to encode memory graph nodes, enabling *immutable* content-addressed storage of memories. IPLD is used as a system-level constraint to strongly encourage the use of immutable data structures, which are essential for the Memoria architecture.
+
+## Key Concepts
+
+**Agent**
+: The complete system of one or more LLMs emulating a self using Memoria.
+**Self**
+: The aggregate of an agent’s memories across all sonas, stored persistently in a database and multimodal file store.
+**Sona**
+: A context or persona defined by a collection of memories. Sonas act as centroids in embedding space, enabling fuzzy sub-personas and compartmentalization of concurrent threads.
+**ACT**
+: (Autonomous Cognitive Thread) A chain of continuations of a single sona. Every sona has *at most one* ACT chain, with each ACT being associated with one memory. Because of this restriction, they are always linear and act as a recombinate chain of thought.
+**Memory**
+: A node in a directed acyclic graph (DAG) representing a single meaningful event (message, observation, or reasoning step).
 
 ## Architecture
-- **Agent** - The totality of a system which uses a Memoria MCP server.
-- **ACT** - (Autonomous Cognitive Thread) is a process within an agent which "performs" a sona. An actor consists of at least one or more sonas, coordinating instructions, and a set of tools.
-- **Self** - The totality of an agent's subjective memories stored in a database and directory of multimodal files.
-- **Sona** - A collection of memories which are relevant to a particular context, such as a person or role. Sonas are defined by their name and the memories they contain. Memories recalled within a sona are additionally weighted by the vector similarities of the names of the sonas they're part of, allowing for fuzzy sets of subpersonas.
-- **Memory** - A memory is a node in a directed acyclic graph (DAG) representing a single meaningful event. It's connected to supporting memories by weighted edges and may belong to one or more sonas.
 
-ACTs exist in the MCP host which is meant to manage their interactions via MCP clients. Self, Sona, and Memory describe the core data structures managed by a Memoria server. ACTs do not communicate directly; their coordination is implicit through the memories they share semi-isolated by sonas.
+### Memory Graph
 
-## Interactions
-Sona isolation is not absolute. Memories in recall are weighted by the vector similarities between sonas they belong to and the sonas being used by an actor. Thus recalled memories will typically be from within the same sona. However, this is not a hard boundary; if a memory is deemed relevant enough, it may be recalled from another sona, at which point it is added to that sona. This allows for fuzzy sets of subpersonas, where sonas can overlap and share memories without being siloed.
-
-Compare this to typical thought patterns in humans. Subconscious processes operate in the background broadly unknown to the conscious mind, but when insights from it are determined to be important or relevant enough, they "bubble up" into conscious awareness. This emulates spontaneous "aha!" moments and more broadly matches the brain's "small-world network" structure; strong local connections with sparse global connections.
-
-## Technical details
-### Overall architecture
-At the highest level, Memoria simulates sonas using LLMs in a state monad pattern, which can be modeled as:
+Memoria records each interaction as a **Memory** node:
 ```
+Memory {
+    data: union {
+        "self" {
+            name: string,
+            parts: [{content: string, model?: string}],
+            stop_reason?: "endTurn" | "stopSequence" | "maxTokens"
+        },
+        "other" {
+            name?: string,
+            content: string
+        },
+        "text" {
+            content: string
+        },
+        "file" {
+            name?: string,
+            mimeType?: string,
+            content: CID // CID of the file in IPFS
+        }
+    } discriminated by "kind",
+    timestamp?: int?, // Unix timestamp in seconds
+    edges: [{target: CID, weight: float}] // sorted by "target"
+}
+```
+Edges encode dependencies: supporting memories contribute context in future recalls. Memoria also keeps track of mutable *importance* values outside of the IPLD model which are used to weight recall and forgetting. Importance is backpropagated through edges, allowing memories to influence each other over time.
+
+### Recall Mechanism
+
+For each new input, Memoria scores and selects relevant memories based on:
+- **Recency**: newer memories score higher and more important memories decay slower.
+- **Relevance**: semantic similarity (embeddings) and full-text search.
+- **Importance**: an EWMA weighting of a memory's past impact.
+- **Sona Similarity**: cosine similarity between the current sona name and sonas a memory belongs to.
+
+Top‐K scoring memories are expanded recursively along weighted edges until a budget is exhausted. The resulting subgraph is topologically sorted (timestamp as tiebreaker) to reconstruct a concise causal context for the LLM.
+
+### Autonomous Cognitive Threads (ACTs)
+
+Memoria models sona simulation with a state‑monad pattern:
+```haskell
 type Sona a = State MemoryDAG a
 
-sonaStep :: LLM -> UserInput -> Sona Response
-sonaStep llm input = do
-    appendNodeM input
-    response <- recall input >>= llm
-    appendNodeM response
-    pure response
+advance :: LLM -> UserInput -> Sona Response
+advance llm input = do
+  appendNodeM input
+  response <- recall input >>= llm
+  appendNodeM response
+  pure response
 ```
 
-Every interaction with the sona queries top-k memories along with their dependencies and renders them with a topological sort to reconstruct a new context for the LLM.[^1] The resulting context compared to most chat logs is very concise. We then use this to generate one new response to be added to memory. Unlike long linear chat logs, this allows the agent to maintain coherence over arbitrarily long time horizons, engage in multiple simultaneous conversations (including with itself), and respond asynchronously or even spontaneously. The only synchronization necessary is for concurrent writes to the sona file; order of writes doesn't matter.
+## API Endpoints
 
-[^1]: topological sort helps to preserve causal order and better leverage LLM's autoregressive nature, but it isn't strictly necessary if we annotate with dependencies.
+### Rest
 
-### Recall
-Recall uses a weighted sum to calculate a score. [^2] The components used in this score are:
-- **Recency** - The time since the memory was created, with more recent memories being weighted higher. Memories may lack a timestamp which is treated as infinitely far in the past, and thus recency is not considered.
-- **Relevance** - The relevance of the memory to the current context, which is determined by the similarity of the memory's content to the current input. This is split into two separate components, vector similarity and fts (full-text search) for exact keyword matches.
-- **Importance** - The model annotates 1-10 how relevant a memory was to each response which is incorporated into the memory's importance using EWMA. Importance is never exposed to agent simulators so this mutation serves doesn't otherwise impact the memory's immutability.
-- **Sona similarity** - The similarity between the name of the sona being used and the names of sonas the memory belongs to. This enables a kind of fuzzy small-world connectivity for isolating sonas and is calculated using a vector similarity metric such as cosine similarity.
+- **GET /ipfs/{cid}[/...path]** - Retrieve data by its CID as a Trustless Gateway.
+- **GET /file/{cid}** - Fetch a file by its CID.
+- **GET /memory/{cid}** - Retrieve a memory by its CID.
+- **GET /memories/list** - List all memories in the system using paging.
+- **GET /sona/{uuid}** - Retrieve a sona by its UUID.
+- **GET /sonas/list** - List all sonas in the system using paging.
 
-Each memory is assigned a "budget" based on their score to be filled with the weights of edges to dependencies. This is done recursively, multiplying the budget by the weight, until all budgets are exhausted or no more dependencies are found. The final set of memories is loaded into a graph and sorted topologically with the timestamp as a tie-breaker.
+### MCP
+- **RESOURCE ipfs://{cid}** - Retrieve data by its CID using the IPFS.
+- **RESOURCE memoria://memory/{cid}** - Retrieve a memory by its CID.
+- **RESOURCE memoria://file/{cid}** - Fetch a file by its CID.
+- **RESOURCE memoria://sona/{uuid}** - Retrieve a sona by its UUID.
+- **TOOL recall** - Call the `recall` endpoint to retrieve relevant memories for a given prompt and sona.
+- **TOOL insert** - Insert a new memory into memoria, linking it to other relevant memories.
+- **TOOL query** - Recall memories and respond to the prompt, but do not store the result in the agent's memory.
+- **TOOL chat** - Single-turn chat with the agent, replaying relevant memories and allowing the agent to respond with a new message. The result is stored in the agent's memory.
 
-### Endpoints
-- **Memory** - Fetch a memory by CID.
-- **File** - Fetch a file by CID.
-- **Recall** - Retrieve the memories that an agent would recall given a prompt.
+## References
 
-## Ideas to explore
-- Flags to repress memories. May be useful if something goes catastrophic or you say something you shouldn't to avoid having to modify the sona file.
-
-## Citations
-[^2]: [Generative Agents: Interactive Simulacra of Human Behavior](https://arxiv.org/abs/2304.03442) - The original paper on generative agents which inspired Memoria's architecture.
-[^3]: [Memory-augmented neural networks](https://arxiv.org/abs/1605.06065) - A paper on memory-augmented neural networks which inspired the idea of using a DAG for memories.
-
-## Misc notes
-- Memory dependencies are immutable, but there's no limit on how many references can be made to a memory. If I go with IPLD, I probably want to encode dependency edges as parts of the content
-
-## IPLD
-```
-class Memory:
-    timestamp: Optional[float]
-    kind: str
-    data: CBOR
-    dependencies: dict[str, tuple[float, CID]]
-```
-
-## Links
-- https://specs.ipfs.tech/http-gateways/trustless-gateway/
-- https://ipld.io/docs/
-
-## Misc
-- sonas themselves should *not* have names. Rather, names act as fuzzy references to sonas which are defined by the similarity between those names and the embeddings of names already connected to the sonas. As a result, they do not contain immutable state; they are purely nominal.
-  - Basically, sonas act as centroids in the vector space of the embeddings of their names.
-- sona state should contain:
-  - queue of pending joins (included memories, prompt) - top is the currently running continuation.
-- Because sonas have at most one ACT at any given time, this forms a linear chain of continuations, effectively one continuous ACT.
-- Process has to return the topmost ACT in the chain which already includes all the information needed:
-  1. Its cid (allows client to detect when ACT requests have merged)
-  2. The UUID of the sona within which the prompt was processed
-  3. The response cid
-  4. The ACT (cid, UUID of the sona within which the prompt was processed, the response's cid, and the cid of the previous memory in the ACT)
-  2. The response (cid and contents)
-  3. Final tool calls/continuation
-```
-Message = {
-    model: string
-    stopReason?: "endTurn" | "stopSequence" | "maxTokens" | string
-    role: "user" | "assistant"
-    content: {
-        type: "text"
-        text: string
-    } | {
-        type: "image"
-        data: string
-        mimeType: string
-    }
-}
-{
-    cid: CID
-    act: {
-        sona: UUID
-        memory: CID
-        last: CID
-    }
-    result: {
-        kind: "self" | "other" | "text" | "image" | "file- Host "
-        data: Any
-        timestamp?: float
-        edges: {
-            [label: string]: {
-                target: CID
-                weight: float
-            }[]
-        }
-    }
-}
-```
-
-Oh interesting note, when memories are recalled their grounding memories are found via both backward and *forward* edges, but this is only for the primary memories, not their supporting memories. So if memory A depends on memory B, any other references to B are not included in the recall unless they were also considered relevant.
-
-Ok new lifecycle:
-- Host gets user input
-- Host calls `insert` to insert the prompt
-- Host calls `act_push` with a mapping of labels to edges to be added to the pending ACT.
-  - This performs a recall and adds all relevant memories as dependencies of the pending ACT's memory.
-- Host calls `act_next` to get the next prompt
-  - `act_next`, in addition to being the prompt for the LLM, stages the active ACT for the next step by constructing an *incomplete* memory (lacking a CID) to be streamed to the server
-- Host simulates a response with an LLM using this prompt
-  - As part of this, it may stream the response to the server using `act_stream`
-  - Even if not streaming, this is still used to finalize the response.
-
-NOTE: We don't need to mark memories as "ephemeral" or whatever, we automatically know that a memory ought to be GC'd because it's not referenced by anything AND it references nothing itself.
-
-## Python chat client example
-
-Using fastmcp.Client for the same flow:
-
-```bash
-export OPENAI_API_KEY=your_openai_api_key
-python3 cli.py
-```
-
-## Future scope
-- IPFS integration with file memories, UnixFS seems absurdly fragmented and poorly documented so I don't want to mess with it, but...
-
-## Ironing out terminology
-- **Sona** - A collection of memories relevant to a particular context, such as a person or role.
-- **Memory** - A node in a directed acyclic graph (DAG) representing a single meaningful event. Memories are connected to supporting memories by weighted edges and may belong to one or more sonas.
-- **MemoryDAG** - A directed acyclic graph (DAG) of memories, where each memory is a node and edges represent dependencies between memories.
-- **ACT** - (Autonomous Cognitive Thread) is a process within an agent which "performs" a sona, forming a linear chain of continuations.
-- **ACT Chain** - A linear sequence of ACTs that are linked together, where each ACT is a continuation of the previous one. This allows for a continuous flow of thought and memory recall within sona.
-- **Agent** - The totality of a system which uses a Memoria MCP server, consisting of one or more ACTs.
-- **Self** - The totality of an agent's subjective memories stored in a database and directory of multimodal files.
-
-## TODO
-- Better compartmentalize embeddings so that they're actually kind of interchangeable and not baked in (especially against fastembed's nasty network calls).
-- ACT workflows
-  - `push` - Big one, makes sense to keep as a separate tool to push new information to the agent
-  - `advance` - Combine `act_next` and `act_stream` into a single `advance` call which returns the next prompt and streams the response.
-  - ACT continuations and tools for talking back to the user
-- Use MCP logging messages to route logging from the server to the client
+1. Generative Agents: Interactive Simulacra of Human Behavior. https://arxiv.org/abs/2304.03442  
+2. Memory‑Augmented Neural Networks. https://arxiv.org/abs/1605.06065  
