@@ -1,28 +1,32 @@
-from typing import Literal, Optional, Protocol, Self
+from abc import ABC, abstractmethod
+from typing import Literal, Optional
 import math
 
 __all__ = (
     'Codec', 'IdCodec', 'BitpackCodec', 'BaseCodec', 'ReservedBase',
     'Encoding', 'codec', 'is_encoded', 'encode', 'decode',
     'encode_identity', 'decode_identity', 'codec_of',
-    'identity', 'base2', 'base8', 'base10', 'base16',
-    'base16upper', 'base32hex', 'base32hexupper', 'base32hexpad',
-    'base32hexpadupper', 'base32', 'base32upper', 'base32pad',
-    'base32padupper', 'base32z', 'base36', 'base36upper', 'base45',
-    'base58', 'base58btc', 'base58flickr', 'base64', 'base64pad',
-    'base64url', 'base64urlpad'
+    'identity', 'base2', 'base8', 'base10', 'base16', 'base16upper',
+    'base32hex', 'base32hexupper', 'base32hexpad', 'base32hexpadupper',
+    'base32', 'base32upper', 'base32pad', 'base32padupper', 'base32z',
+    'base36', 'base36upper', 'base45', 'base58', 'base58btc', 'base58flickr',
+    'base64', 'base64pad', 'base64url', 'base64urlpad'
 )
 
-class Codec(Protocol):
+class Codec(ABC):
     code: str
 
+    def __call__(self, x: bytes, /) -> str:
+        """Encodes the given bytes into a string representation."""
+        return self.encode(x)
+
+    @abstractmethod
     def encode(self, x: bytes, /) -> str:
         """Encodes the given bytes into a string representation."""
-        ...
 
+    @abstractmethod
     def decode(self, x: str, /) -> bytes:
         """Decodes the given string representation back into bytes."""
-        ...
 
 class IdCodec:
     code = '\0'
@@ -113,7 +117,7 @@ class BaseCodec(DigitCodec):
         # Convert the integer back to bytes
         return x.to_bytes((x.bit_length() + 7) // 8, byteorder='big')
 
-class ReservedBase:
+class ReservedBase(Codec):
     def __init__(self, code: str, name: str):
         assert len(code) == 1, 'code must be a single byte'
         self.code = code
@@ -147,8 +151,6 @@ _abc = 'abcdefghijklmnopqrstuvwxyz'
 _ABC = _abc.upper()
 _b58 = 'abcdefghijkmnopqrstuvwxyz'
 _B58 = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
-_x32 = _b10 + _abc[:22]
-_b32 = _abc + _b10[2:8]
 _b64 = _ABC + _abc + _b10
 
 identity = IdCodec()
@@ -157,11 +159,11 @@ base8 = BaseCodec('7', _b10[:8])
 base10 = BaseCodec('9', _b10)
 base16 = BitpackCodec('f', 4, _b16)
 base16upper = _upper(base16)
-base32hex = BitpackCodec('v', 4, _x32)
+base32hex = BitpackCodec('v', 4, _b10 + _abc[:22])
 base32hexupper = _upper(base32hex)
 base32hexpad = _pad('t', base32hex, '='*8)
 base32hexpadupper = _upper(base32hexpad)
-base32 = BitpackCodec('b', 5, _b32)
+base32 = BitpackCodec('b', 5, _abc + _b10[2:8])
 base32upper = _upper(base32)
 base32pad = _pad('c', base32, '=' * 8)
 base32padupper = _upper(base32pad)
@@ -231,12 +233,11 @@ ENCODINGS: dict[str, Codec] = {
 CODES = {codec.code: codec for codec in ENCODINGS.values()}
 
 type Encoding = Literal[
-    'base2', 'base8', 'base10', 'base16',
-    'base16upper', 'base32hex', 'base32hexupper', 'base32hexpad',
-    'base32hexpadupper', 'base32', 'base32upper', 'base32pad',
-    'base32padupper', 'base32z', 'base36', 'base36upper', 'base45',
-    'base58btc', 'base58flickr', 'base64', 'base64pad', 'base64url',
-    'base64urlpad'
+    'base2', 'base8', 'base10', 'base16', 'base16upper',
+    'base32hex', 'base32hexupper', 'base32hexpad', 'base32hexpadupper',
+    'base32', 'base32upper', 'base32pad', 'base32padupper', 'base32z',
+    'base36', 'base36upper', 'base45', 'base58btc', 'base58flickr',
+    'base64', 'base64pad', 'base64url', 'base64urlpad'
 ]
 
 def codec(name: Encoding) -> Codec:
