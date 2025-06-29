@@ -39,9 +39,7 @@ class CID(Immutable):
     __match_args__ = ("version", "codec", "multihash")
 
     @overload
-    def __new__(cls, cid: 'CIDv0', /) -> 'CIDv0': ...
-    @overload
-    def __new__(cls, cid: 'CIDv1', /) -> 'CIDv1': ...
+    def __new__[T: CID](cls, cid: T, /) -> T: ...
     @overload
     def __new__(cls, data: str|bytes, /) -> AnyCID: ...
     @overload
@@ -130,7 +128,12 @@ class CID(Immutable):
         return f"{type(self).__name__}(version={self.version}, codec={self.codec}, multihash={self.multihash!r})"
 
     def __eq__(self, other):
-        if not isinstance(other, CID):
+        if isinstance(other, (str, bytes)):
+            try:
+                other = CID(other)
+            except ValueError:
+                return NotImplemented
+        elif not isinstance(other, CID):
             return NotImplemented
         return self.buffer == other.buffer
     
@@ -201,7 +204,7 @@ class CID(Immutable):
             return False
 
     @staticmethod
-    def parse(raw: 'str|bytes|BaseMultihash|CIDv0|CIDv1') -> tuple[Version, Codec, bytes]:
+    def parse(raw: 'str|bytes|BaseMultihash|CID') -> tuple[Version, Codec, bytes]:
         """
         Parses a CID string and returns a CID object.
 
@@ -215,6 +218,8 @@ class CID(Immutable):
                 return 0, CIDv0.CODEC, raw.buffer
             case CIDv1():
                 return 1, raw.codec, raw.multihash.buffer
+            case CID():
+                raise NotImplementedError(f"Unknown CID type {type(raw)}")
             case BaseMultihash():
                 return 0, CIDv0.CODEC, raw.buffer
             
@@ -265,7 +270,7 @@ class CID(Immutable):
         return b'\1' + multicodec.add_prefix(codec, multihash)
     
     @classmethod
-    def normalize(cls, cid: "str|bytes|BaseMultihash|CIDv0|CIDv1") -> bytes:
+    def normalize(cls, cid: "str|bytes|BaseMultihash|CID") -> bytes:
         """
         Normalizes a CID string or bytes to its canonical byte representation.
 
@@ -279,7 +284,7 @@ class CIDv0(CID):
 
     CODEC = 'dag-pb'
 
-    def __new__(cls, data: 'str|bytes|BaseMultihash|CIDv0|CIDv1', /) -> 'CIDv0':
+    def __new__(cls, data: 'str|bytes|BaseMultihash|CID', /) -> 'CIDv0':
         if isinstance(data, BaseMultihash):
             return super().__new__(cls, 0, "dag-pb", data.buffer)
         else:
@@ -364,7 +369,7 @@ class CIDv1(CID):
     """ CID version 1 object """
 
     @overload
-    def __new__(cls, data: 'str|bytes|CIDv0|CIDv1', /) -> Self: ...
+    def __new__(cls, data: str|bytes|CID, /) -> Self: ...
     @overload
     def __new__(cls, /, codec: Codec, multihash: str|bytes|BaseMultihash) -> Self: ...
 
@@ -375,11 +380,11 @@ class CIDv1(CID):
         raise TypeError(f"Expected CIDv1, got CIDv0")
 
     @overload
-    def __init__(self, data: 'str|bytes|CIDv0|CIDv1', /): ...
+    def __init__(self, data: str|bytes|CID, /): ...
     @overload
-    def __init__(self, codec: Codec, multihash: str|bytes|Multihash): ...
+    def __init__(self, codec: Codec, multihash: str|bytes|BaseMultihash): ...
     
-    def __init__(self, codec: 'str|bytes|CIDv0|CIDv1', multihash: Optional[str|bytes|BaseMultihash] = None):
+    def __init__(self, codec: str|bytes|CID, multihash: Optional[str|bytes|BaseMultihash] = None):
         """
         :param codec: codec for the CID
         :param multihash: multihash for the CID, if not provided, it is cidexpected that `codec` is a multibase encoded string

@@ -8,7 +8,7 @@ from . import ipld
 from .dagpb import PBLink, PBNode
 from .unixfs import Data
 from .multihash import multihash
-from .cid import CID, CIDv0
+from .cid import CID, CIDv0, CIDv1, Codec
 from .car import CARv2Index, carv1_iter, carv2_iter
 
 class CIDResolveError(Exception):
@@ -16,12 +16,20 @@ class CIDResolveError(Exception):
     def __init__(self, cid: CID):
         super().__init__(str(cid))
 
+class RawBlockLink:
+    def __init__(self, cid: CID, filesize: int):
+        self.cid = cid
+        self.size = filesize
+    
+    def ByteSize(self):
+        return self.size
+
 class DAGPBNode(PBNode):
-    filesize: int
+    size: int
 
     @cached_property
     def cid(self):
-        return CIDv0(multihash("sha2-256").update(self.SerializeToString()))
+        return CIDv0(multihash("sha2-256", self.SerializeToString()))
 
 class FileLeaf(DAGPBNode):
     '''Leaf of an IPFS UnixFS file.'''
@@ -30,18 +38,18 @@ class FileLeaf(DAGPBNode):
             Links=[],
             Data=Data(Type=Data.File, Data=data).SerializeToString()
         )
-        self.filesize = len(data)
+        self.size = len(data)
 
 class FileNode(DAGPBNode):
     '''Root of an IPFS UnixFS file, containing multiple leaves.'''
 
-    def __init__(self, nodes: Iterable['FileLeaf|FileNode']):
-        filesize = 0
+    def __init__(self, nodes: Iterable[RawBlockLink|DAGPBNode]):
+        size = 0
         blocksizes: list[int] = []
         links: list[PBLink] = []
         for node in nodes:
-            filesize += node.filesize
-            blocksizes.append(node.filesize)
+            size += node.size
+            blocksizes.append(node.size)
             links.append(PBLink(
                 Name="",
                 Hash=node.cid.buffer,
@@ -53,10 +61,10 @@ class FileNode(DAGPBNode):
             Data=Data(
                 Type=Data.File,
                 blocksizes=blocksizes,
-                filesize=filesize
+                filesize=size
             ).SerializeToString()
         )
-        self.filesize = filesize
+        self.size = size
 
 class Blocksource(ABC):
     @abstractmethod
@@ -118,22 +126,15 @@ class Blocksource(ABC):
             for link in node.Links:
                 yield from self.ipfs_cat(CIDv0(link.Hash))
 
-class Blockstore(Blocksource):
-    @abstractmethod
-    def dag_put(self, block: bytes) -> CID:
-        """Store a block in the IPFS DAG and return its CID."""
-        pass
-    
-    def ipfs_add(self, stream: IO[bytes], chunk_size: int=256*1024) -> CID:
-        """Add a file to the IPFS DAG from a stream."""
-        
-        # Use a generator so we can GC while building the links
-        def iter_links():
-            while data := stream.read(chunk_size):
-                yield (leaf := FileLeaf(data))
-                self.dag_put(leaf.SerializeToString())
-        
-        return self.dag_put(FileNode(iter_links()).SerializeToString())
+type ChunkingStrategy = Callable[[IO[bytes]], Iterable[bytes]]
+"""Strategy for chunking a stream into smaller parts."""
+
+def chunker_size(size: int=256*1024):
+    def chunking_strategy(stream: IO[bytes]) -> Iterable[bytes]:
+        """Chunk the stream into fixed-size chunks."""
+        while chunk := stream.read(size):
+            yield chunk
+    return chunking_strategy
 
 type ShardingStrategy = Callable[[CID], str]
 """Determine the sharded path for a given CID."""
@@ -145,6 +146,27 @@ def shard_last2(cid: CID) -> str:
     """
     enc = str(cid)
     return f"{enc[-2:]}/{enc}"
+
+class Blockstore(Blocksource):
+    @abstractmethod
+    def dag_put(self, block: bytes, *, codec: Codec='dag-cbor', function: str='sha2-256') -> CID:
+        """Store a block in the IPFS DAG and return its CID."""
+        pass
+    
+    def ipfs_put(self, data: bytes) -> RawBlockLink|DAGPBNode:
+        """
+        Given a raw block, store it in the IPFS DAG and return its CID.
+        This allows subclasses to override the behavior of how blocks are
+        stored in IPFS. Use raw-leaves by default.
+        """
+        return RawBlockLink(self.dag_put(data, codec='dag-pb'), len(data))
+
+    def ipfs_add(self, stream: IO[bytes], *, chunker: ChunkingStrategy=chunker_size()) -> CID:
+        """Add a file to the IPFS DAG from a stream."""
+        
+        return self.dag_put(FileNode(
+            map(self.ipfs_put, chunker(stream))
+        ).SerializeToString())
 
 class FlatfsBlockstore(Blockstore):
     def __init__(self, root: str, sharding: ShardingStrategy = shard_last2):
@@ -161,10 +183,13 @@ class FlatfsBlockstore(Blockstore):
         return os.path.exists(self.build_path(cid))
 
     @override
-    def dag_put(self, block: bytes) -> CIDv0:
+    def dag_put(self, block: bytes, *, codec: Codec='dag-cbor', function: str='sha2-256') -> CID:
         """Store a block in the flatfs and return its CID."""
-        cid = CIDv0(multihash("sha2-256").update(block))
-        with open(self.build_path(cid), "wb") as f:
+        mh = multihash(function, block)
+        cid = CIDv0(mh) if codec == 'dag-pb' else CIDv1(codec, mh)
+        path = self.build_path(cid)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
             f.write(block)
         return cid
 
@@ -176,3 +201,20 @@ class FlatfsBlockstore(Blockstore):
                 return f.read()
         except FileNotFoundError:
             return None
+
+class CompositeBlocksource(Blocksource):
+    def __init__(self, *sources: Blocksource):
+        self.sources = sources
+    
+    @override
+    def dag_has(self, cid: CID) -> bool:
+        """Check if any source has the block."""
+        return any(src.dag_has(cid) for src in self.sources)
+
+    @override
+    def dag_get(self, cid: CID) -> Optional[bytes]:
+        """Retrieve a block from the first source that has it."""
+        for source in self.sources:
+            if (block := source.dag_get(cid)) is not None:
+                return block
+        return None

@@ -1,4 +1,4 @@
-from .ipfs import ipfs_app
+from .ipfs import ipfs_gateway
 from .rest import rest_app
 from .mcp import mcp
 

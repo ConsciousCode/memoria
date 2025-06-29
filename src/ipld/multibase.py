@@ -1,7 +1,8 @@
-from typing import Literal, Optional, Protocol
+from typing import Literal, Optional, Protocol, Self
+import math
 
 __all__ = (
-    'Codec', 'IdCodec', 'BaseCodec', 'ReservedBase',
+    'Codec', 'IdCodec', 'BitpackCodec', 'BaseCodec', 'ReservedBase',
     'Encoding', 'codec', 'is_encoded', 'encode', 'decode',
     'encode_identity', 'decode_identity', 'codec_of',
     'identity', 'base2', 'base8', 'base10', 'base16',
@@ -16,15 +17,11 @@ class Codec(Protocol):
     code: str
 
     def encode(self, x: bytes, /) -> str:
-        """
-        Encodes the given bytes into a string representation.
-        """
+        """Encodes the given bytes into a string representation."""
         ...
 
     def decode(self, x: str, /) -> bytes:
-        """
-        Decodes the given string representation back into bytes.
-        """
+        """Decodes the given string representation back into bytes."""
         ...
 
 class IdCodec:
@@ -33,20 +30,68 @@ class IdCodec:
     def encode(self, x: bytes) -> bytes: return x
     def decode(self, x: bytes) -> bytes: return x
 
-class BaseCodec(Codec):
+class DigitCodec(Codec):
+    digits: str
+    padding: str
+
+class BitpackCodec(DigitCodec):
+    """Codec for encoding bytes into a bit-packed string."""
+    
+    def __init__(self, code: str, bits: int, digits: str, padding: str = ''):
+        assert len(code) == 1, 'code must be a single byte'
+        self.code = code
+        self.bits = bits
+        self.digits = digits
+        self.group = math.lcm(8, bits) // bits
+        self.padding = padding
+    
+    def encode(self, bs: bytes) -> str:
+        """Encodes bytes into a bit-packed string."""
+        mask = (1 << self.bits) - 1
+        bits = 0
+        value = 0
+        res = ''
+        for byte in bs:
+            value = (value << 8) | byte
+            bits += 8
+            while bits >= self.bits:
+                bits -= self.bits
+                res += self.digits[(value >> bits) & mask]
+        
+        # Get the last bits
+        if bits > 0:
+            res += self.digits[(value << (self.bits - bits)) & mask]
+        
+        if self.padding:
+            return res + self.padding[len(res) % len(self.padding):]
+        return res
+    
+    def decode(self, s: str) -> bytes:
+        """Decodes a bit-packed string back into bytes."""
+        out = bytearray()
+        value = 0
+        bits = 0
+        for digit in s.rstrip(self.padding[:1]):
+            try:
+                value = (value << self.bits) | self.digits.index(digit)
+                bits += self.bits
+                if bits >= 8:
+                    bits -= 8
+                    out.append(value >> bits)
+                    value &= (1 << bits) - 1
+            except ValueError:
+                raise ValueError(f'invalid digit "{digit}"') from None
+        
+        return bytes(out)
+
+class BaseCodec(DigitCodec):
+    """Straightforward base codec for encoding and decoding bytes."""
+
     def __init__(self, code: str, digits: str, padding: str = ""):
         assert len(code) == 1, 'code must be a single byte'
         self.code = code
         self.digits = digits
         self.padding = padding
-    
-    def _upper(self) -> 'BaseCodec':
-        """Returns a new codec with uppercase digits."""
-        return BaseCodec(self.code, self.digits.upper(), self.padding)
-    
-    def _pad(self, padding: str) -> 'BaseCodec':
-        """Returns a new codec with specified padding."""
-        return BaseCodec(self.code, self.digits, padding)
     
     def encode(self, bs: bytes) -> str:
         x = int.from_bytes(bs, byteorder='big', signed=False)
@@ -60,10 +105,10 @@ class BaseCodec(Codec):
     
     def decode(self, s: str) -> bytes:
         x = 0
-        for digit in s:
+        for digit in s.rstrip(self.padding[:1]):
             try: x = x * len(self.digits) + self.digits.index(digit)
             except ValueError:
-                raise ValueError(f'invalid digit "{digit}"')
+                raise ValueError(f'invalid digit "{digit}"') from None
         
         # Convert the integer back to bytes
         return x.to_bytes((x.bit_length() + 7) // 8, byteorder='big')
@@ -80,13 +125,21 @@ class ReservedBase:
     def decode(self, s: str) -> bytes:
         raise NotImplementedError(f"{self.name} does not support decoding")
 
-def _upper(codec: BaseCodec) -> BaseCodec:
+def _upper[T: DigitCodec](codec: T) -> T:
     """Returns a new codec with uppercase digits."""
-    return BaseCodec(codec.code.upper(), codec.digits.upper(), codec.padding)
+    nc = codec.__new__(type(codec))
+    nc.__dict__.update(codec.__dict__)
+    nc.code = codec.code.upper()
+    nc.digits = codec.digits.upper()
+    return codec
 
-def _pad(code: str, codec: BaseCodec, padding: str) -> BaseCodec:
+def _pad[T: DigitCodec](code: str, codec: T, padding: str) -> T:
     """Returns a new codec with specified padding."""
-    return BaseCodec(code, codec.digits, padding)
+    nc = codec.__new__(type(codec))
+    nc.__dict__.update(codec.__dict__)
+    nc.code = code
+    nc.padding = padding
+    return nc
 
 _b16 = '0123456789abcdef'
 _b10 = _b16[:10]
@@ -102,25 +155,25 @@ identity = IdCodec()
 base2 = BaseCodec('0', '01')
 base8 = BaseCodec('7', _b10[:8])
 base10 = BaseCodec('9', _b10)
-base16 = BaseCodec('f', _b16)
+base16 = BitpackCodec('f', 4, _b16)
 base16upper = _upper(base16)
-base32hex = BaseCodec('v', _x32)
+base32hex = BitpackCodec('v', 4, _x32)
 base32hexupper = _upper(base32hex)
 base32hexpad = _pad('t', base32hex, '='*8)
 base32hexpadupper = _upper(base32hexpad)
-base32 = BaseCodec('b', _b32)
+base32 = BitpackCodec('b', 5, _b32)
 base32upper = _upper(base32)
-base32pad = BaseCodec('c', _b32, '=' * 8)
+base32pad = _pad('c', base32, '=' * 8)
 base32padupper = _upper(base32pad)
-base32z = BaseCodec('h', 'ybndrfg8ejkmcpqxot1uwisza345h769')
+base32z = BitpackCodec('h', 5, 'ybndrfg8ejkmcpqxot1uwisza345h769')
 base36 = BaseCodec('k', _b10 + _abc)
 base36upper = _upper(base36)
 base45 = BaseCodec('R', f"{_b10}{_ABC} $%*+-./:")
 base58btc = BaseCodec('z', _b10[1:] + _B58 + _b58)
 base58flickr = BaseCodec('Z', _b10[1:] + _b58 + _B58)
-base64 = BaseCodec('m', f'{_b64}+/')
+base64 = BitpackCodec('m', 6, f'{_b64}+/')
 base64pad = _pad('M', base64, '='*2)
-base64url = BaseCodec('u', f'{_b64}-_')
+base64url = BitpackCodec('u', 6, f'{_b64}-_')
 base64urlpad = _pad('U', base64url, '='*2)
 
 # Aliases

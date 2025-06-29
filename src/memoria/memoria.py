@@ -51,11 +51,13 @@ class Memoria(Blocksource):
         
         return data.as_block()
     
-    def lookup_memory(self, cid: CIDv1) -> Optional[Memory]:
-        return self.db.lookup_ipld_memory(cid)
+    def lookup_memory(self, cid: CID) -> Optional[Memory]:
+        if isinstance(cid, CIDv1):
+            return self.db.lookup_ipld_memory(cid)
     
-    def lookup_act(self, cid: CIDv1) -> Optional[ACThread]:
-        return self.db.lookup_ipld_act(cid)
+    def lookup_act(self, cid: CID) -> Optional[ACThread]:
+        if isinstance(cid, CIDv1):
+            return self.db.lookup_ipld_act(cid)
 
     def insert(self, memory: AnyMemory):
         '''Append a memory to the sona file.'''

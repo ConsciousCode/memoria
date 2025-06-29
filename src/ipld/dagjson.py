@@ -47,7 +47,7 @@ def marshal(data: IPLData) -> str:
     """
     return json.dumps(_dagjson_encode(data), sort_keys=True)
 
-def unmarshal(data: str) -> IPLData:
+def unmarshal(data: str|bytes) -> IPLData:
     """
     Convert DAG-JSON format data back to its original form.
     
@@ -57,4 +57,6 @@ def unmarshal(data: str) -> IPLData:
     Returns:
         The original data structure.
     """
+    if isinstance(data, bytes):
+        data = data.decode('utf-8')
     return _dagjson_decode(json.loads(data))
