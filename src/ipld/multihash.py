@@ -1,12 +1,16 @@
 from io import BytesIO
-from typing import Literal, Self, overload
+from typing import Literal, Optional, Self, overload
 import hashlib
 
+from . import varint, multibase
 from ._common import Immutable
 
-from . import varint, multibase
-
-__all__ = ("HASH_CODES", "CODE_HASHES", 'Multihash', 'multihash')
+__all__ = (
+    "HASH_CODES", "CODE_HASHES",
+    'Multihash',
+    'MultihashBuilder',
+    'multihash'
+)
 
 HASH_CODES: dict[str, int] = {
     'id': 0,
@@ -61,15 +65,75 @@ CODE_HASHES: dict[int, str] = {
 def _pack_mh(function: int, digest: bytes) -> bytes:
     return varint.encode(function) + varint.encode(len(digest)) + digest
 
-class Multihash(Immutable):
-    '''A hash with a function code and digest.'''
-    # Unlike CID, we can't store just the buffer because the function is
-    #  a varint, so there otherwise can't be O(1) access to these.
-    __slots__ = ("function", "digest")
-    __match_args__ = ("function", "digest")
+class BaseMultihash(Immutable):
+    '''Base class for multihashes with a function code and digest.'''
 
     function: int
     digest: bytes
+
+    def __len__(self): return len(self.buffer)
+    def __hash__(self): return hash(self.buffer)
+    def __bytes__(self): return self.buffer
+    def __str__(self): return self.encode()
+    
+    def __iter__(self):
+        yield self.function
+        yield self.digest
+    
+    def __eq__(self, other):
+        if isinstance(other, BaseMultihash):
+            return (
+                self.function == other.function and
+                self.digest == other.digest
+            )
+        elif isinstance(other, bytes):
+            return self.buffer == other
+        return NotImplemented
+    
+    def __lt__(self, other):
+        if isinstance(other, BaseMultihash):
+            return self.buffer < other.buffer
+        elif isinstance(other, bytes):
+            return self.buffer < other
+        return NotImplemented
+
+    @property
+    def function_name(self) -> str:
+        return CODE_HASHES.get(self.function, "<unknown>")
+
+    @property
+    def buffer(self):
+        """
+        Returns the multihash buffer as bytes
+        """
+        return _pack_mh(self.function, self.digest)
+
+    def hex(self):
+        """
+        Returns the multihash buffer as a hex string
+        """
+        return self.buffer.hex()
+
+    def encode(self, codec: Literal['hex', 'b58'] = 'b58') -> str:
+        """
+        Encode the multihash to a string using the specified codec
+
+        :param codec: The codec to use for encoding, either 'hex' or 'b58'
+        :return: Encoded multihash string
+        :rtype: str
+        """
+        match codec:
+            case 'hex': return self.buffer.hex()
+            case 'b58': return multibase.base58.encode(self.buffer)
+            case _:
+                raise ValueError(f"Unsupported codec: {codec}")
+
+class Multihash(BaseMultihash):
+    '''A hash with a function code and digest.'''
+    # Unlike CID, we can't store just the buffer because the function is
+    #  a varint, so there otherwise can't be O(1) access to these.
+    __slots__ = ("function", "digest") # type: ignore[assignment]
+    __match_args__ = ("function", "digest")
 
     def __new__(cls, function: 'int|str|bytes|Multihash', digest: str|bytes|None = None) -> 'Multihash':
         if isinstance(function, Multihash):
@@ -81,12 +145,12 @@ class Multihash(Immutable):
     @overload
     def __init__(self, function: int|str, digest: str|bytes): ...
     @overload
-    def __init__(self, buffer: 'bytes|Multihash'): ...
+    def __init__(self, buffer: bytes|BaseMultihash): ...
     
     def __init__(self, *args, **kwargs):
         # Types of function, digest, and buffer are interlinked, we need to
         # combine them into a single tuple to match against.
-        parts: tuple[int|str, str|bytes, None]|tuple[None, None, bytes|Multihash]
+        parts: tuple[int|str, str|bytes, None]|tuple[None, None, bytes|BaseMultihash]
         match args:
             case (int(function)|str(function), bytes(digest)):
                 parts = (function, digest, None)
@@ -163,6 +227,15 @@ class Multihash(Immutable):
         object.__setattr__(self, 'function', function)
         object.__setattr__(self, 'digest', digest)
     
+    def __copy__(self) -> Self:
+        return self
+    
+    def __deepcopy__(self, memo) -> Self:
+        return self
+    
+    def __repr__(self):
+        return f"Multihash({self.function_name!r}, digest={self.digest.hex()!r})"
+    
     @classmethod
     def from_hex(cls, hex_string: str) -> Self:
         """
@@ -197,65 +270,39 @@ class Multihash(Immutable):
 
         return True
 
-    def __len__(self):
-        return len(self.buffer)
-    
-    def __hash__(self):
-        return hash(self.buffer)
-    
-    def __iter__(self):
-        yield self.function
-        yield self.digest
-    
-    def __str__(self):
-        return self.encode()
-    
-    def __repr__(self):
-        return f"Multihash({CODE_HASHES[self.function]!r}, digest={self.digest.hex()!r})"
-
-    @property
-    def function_name(self) -> str:
-        return CODE_HASHES.get(self.function, "<unknown>")
-
-    @property
-    def buffer(self):
-        """
-        Returns the multihash buffer as bytes
-        """
-        return _pack_mh(self.function, self.digest)
-
-    @property
-    def length(self):
-        return len(self.digest)
-    
-    def encode(self, codec: Literal['hex', 'b58'] = 'b58') -> str:
-        """
-        Encode the multihash to a string using the specified codec
-
-        :param codec: The codec to use for encoding, either 'hex' or 'b58'
-        :return: Encoded multihash string
-        :rtype: str
-        """
-        match codec:
-            case 'hex': return self.buffer.hex()
-            case 'b58': return multibase.base58.encode(self.buffer)
-            case _:
-                raise ValueError(f"Unsupported codec: {codec}")
-
-class multihash:
+class MultihashBuilder(BaseMultihash):
     """A class to handle multihashing with a specific hash function."""
+
+    __slots__ = ("function", "hash")
 
     def __init__(self, name: str):
         if name not in HASH_CODES:
             raise ValueError(f"Unknown hash function: {name}")
-        self.name = name
-        self.hash = hashlib.new(name)
+        object.__setattr__(self, 'function', HASH_CODES[name])
+        object.__setattr__(self, 'hash', hashlib.new(name))
 
     def update(self, data: bytes):
         """Update the hash with the given data."""
         self.hash.update(data)
         return self
     
-    def digest(self) -> Multihash:
+    @property
+    def digest(self) -> bytes: # type: ignore[override]
         """Return the digest as a Multihash."""
-        return Multihash(self.name, self.hash.digest())
+        return self.hash.digest()
+    
+    def __repr__(self):
+        return f"MultihashBuilder({self.function_name!r}, digest={self.digest.hex()!r})"
+
+def multihash(name: str, data: Optional[bytes]=None) -> MultihashBuilder:
+    """
+    Create a multihash for the given data using the specified hash function.
+
+    :param name: Name of the hash function (e.g., 'sha2-256')
+    :param data: Data to update the hash
+    :return: Multihash object
+    """
+    builder = MultihashBuilder(name)
+    if data is not None:
+        builder.update(data)
+    return builder

@@ -9,12 +9,12 @@ __all__ = (
     'carv1_iter', 'carv2_iter', 'carv1', 'carv2',
 )
 
-INDEX_CODECS = {
+type CARv2Index = Literal['car-index-sorted', 'car-multihash-index-sorted']
+
+INDEX_CODECS: dict[CARv2Index, int] = {
     'car-index-sorted': 0x0400,
     'car-multihash-index-sorted': 0x0401,
 }
-
-type CARv2Index = Literal['car-index-sorted', 'car-multihash-index-sorted']
 
 def _car_block(cid: CIDv1, data: bytes) -> Iterable[bytes]:
     yield varint.encode(len(cid) + len(data))
@@ -173,7 +173,7 @@ def carv2_iter(
 
     ##[[ Header ]]##
     # [pragma]
-    yield b"\xa1\x67\x76\x65\x72\x73\x69\x6f\x6e\x02"
+    yield b"\xa1\x67version\x02"
     
     # [feature bitfield]
     yield (fully_indexed << 127).to_bytes(16, 'big')

@@ -1,6 +1,6 @@
 type Edge struct {
     target &Memory
-    weight int
+    weight float
 }
 
 type Memory struct {

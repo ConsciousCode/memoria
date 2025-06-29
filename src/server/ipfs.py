@@ -1,11 +1,25 @@
+'''
+Implement the IPFS Trustless Gateway specification and any IPFS-related utilities.
+'''
+
+from contextlib import asynccontextmanager
 from typing import Annotated, Optional
 
 from fastapi import FastAPI, Header, Request, Response
 
 from ._common import mcp_context
 from src.ipld import dagcbor, CIDv1
+from src.ipld.ipfs import FlatfsBlockstore
 
-ipfs_app = FastAPI()
+ROOT = "private/blocks"
+
+@asynccontextmanager
+async def ipfs_lifespan(app: FastAPI):
+    yield {"blockstore": FlatfsBlockstore(ROOT)}
+
+ipfs_app = FastAPI(
+    lifespan=ipfs_lifespan
+)
 
 @ipfs_app.get("/bafkqaaa")
 def get_ipfs_empty():

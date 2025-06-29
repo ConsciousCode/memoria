@@ -6,7 +6,7 @@ from pydantic_core import core_schema
 
 from ._common import Immutable
 
-from .multihash import Multihash, multihash
+from .multihash import BaseMultihash, Multihash, multihash
 from . import multibase, multicodec
 
 __all__ = (
@@ -45,17 +45,17 @@ class CID(Immutable):
     @overload
     def __new__(cls, data: str|bytes, /) -> AnyCID: ...
     @overload
-    def __new__(cls, /, version: Literal[0], codec: Literal['dag-pb'], multihash: str|bytes|Multihash) -> 'CIDv0': ...
+    def __new__(cls, /, version: Literal[0], codec: Literal['dag-pb'], multihash: str|bytes|BaseMultihash) -> 'CIDv0': ...
     @overload
-    def __new__(cls, /, version: Literal[0], multihash: str|bytes|Multihash) -> 'CIDv0': ...
+    def __new__(cls, /, version: Literal[0], multihash: str|bytes|BaseMultihash) -> 'CIDv0': ...
     @overload
-    def __new__(cls, /, version: Literal[1], codec: Codec, multihash: str|bytes|Multihash) -> 'CIDv1': ...
+    def __new__(cls, /, version: Literal[1], codec: Codec, multihash: str|bytes|BaseMultihash) -> 'CIDv1': ...
     @overload
-    def __new__(cls, /, version: int, multihash: str|bytes|Multihash) -> AnyCID: ...
+    def __new__(cls, /, version: int, multihash: str|bytes|BaseMultihash) -> AnyCID: ...
     @overload
-    def __new__(cls, /, version: int, codec: Codec, multihash: str|bytes|Multihash) -> AnyCID: ...
+    def __new__(cls, /, version: int, codec: Codec, multihash: str|bytes|BaseMultihash) -> AnyCID: ...
     @overload
-    def __new__(cls, /, codec: Codec, multihash: str|bytes|Multihash) -> 'CIDv1': ...
+    def __new__(cls, /, codec: Codec, multihash: str|bytes|BaseMultihash) -> 'CIDv1': ...
 
     def __new__(cls, *args, **kwargs) -> AnyCID:
         # Subclass fast path
@@ -144,6 +144,20 @@ class CID(Immutable):
     
     def __str__(self):
         return self.encode()
+    
+    def __bytes__(self):
+        """
+        Returns the raw byte representation of the CID.
+        This is useful for serialization and storage.
+        """
+        return self.buffer
+    
+    def hex(self) -> str:
+        """
+        Returns the hexadecimal representation of the CID.
+        This is useful for debugging and logging.
+        """
+        return self.buffer.hex()
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -187,7 +201,7 @@ class CID(Immutable):
             return False
 
     @staticmethod
-    def parse(raw: 'str|bytes|Multihash|CIDv0|CIDv1') -> tuple[Version, Codec, bytes]:
+    def parse(raw: 'str|bytes|BaseMultihash|CIDv0|CIDv1') -> tuple[Version, Codec, bytes]:
         """
         Parses a CID string and returns a CID object.
 
@@ -201,10 +215,8 @@ class CID(Immutable):
                 return 0, CIDv0.CODEC, raw.buffer
             case CIDv1():
                 return 1, raw.codec, raw.multihash.buffer
-            case Multihash():
-                if raw.function == 'base58btc':
-                    return 0, CIDv0.CODEC, raw.buffer
-                raise ValueError(f'Bare multihash requires CIDv0 which is base58btc-only. Got {raw.function}')
+            case BaseMultihash():
+                return 0, CIDv0.CODEC, raw.buffer
             
             case str():
                 if multibase.is_encoded(raw):
@@ -231,7 +243,7 @@ class CID(Immutable):
         return version, codec, multihash
     
     @classmethod
-    def build(cls, version: Version, codec: Codec, multihash: str|bytes|Multihash) -> bytes:
+    def build(cls, version: Version, codec: Codec, multihash: str|bytes|BaseMultihash) -> bytes:
         """
         Constructs a CID byte string from its components.
 
@@ -240,7 +252,7 @@ class CID(Immutable):
         :param multihash: Multihash for the CID
         :return: CID byte string
         """
-        if isinstance(multihash, Multihash):
+        if isinstance(multihash, BaseMultihash):
             multihash = multihash.buffer
 
         if version == 0 and codec == CIDv0.CODEC:
@@ -253,7 +265,7 @@ class CID(Immutable):
         return b'\1' + multicodec.add_prefix(codec, multihash)
     
     @classmethod
-    def normalize(cls, cid: "str|bytes|Multihash|CIDv0|CIDv1") -> bytes:
+    def normalize(cls, cid: "str|bytes|BaseMultihash|CIDv0|CIDv1") -> bytes:
         """
         Normalizes a CID string or bytes to its canonical byte representation.
 
@@ -267,8 +279,8 @@ class CIDv0(CID):
 
     CODEC = 'dag-pb'
 
-    def __new__(cls, data: 'str|bytes|Multihash|CIDv0|CIDv1', /) -> 'CIDv0':
-        if isinstance(data, Multihash):
+    def __new__(cls, data: 'str|bytes|BaseMultihash|CIDv0|CIDv1', /) -> 'CIDv0':
+        if isinstance(data, BaseMultihash):
             return super().__new__(cls, 0, "dag-pb", data.buffer)
         else:
             self = super().__new__(cls, data)
@@ -276,7 +288,7 @@ class CIDv0(CID):
                 return self
         raise TypeError(f"Expected CIDv0, got {type(self).__name__}")
     
-    def __init__(self, data: 'str|bytes|Multihash|CIDv0|CIDv1', /):
+    def __init__(self, data: 'str|bytes|BaseMultihash|CIDv0|CIDv1', /):
         if isinstance(data, CIDv0):
             # CIDv0(c := CIDv0()) is c
             if not hasattr(self, 'buffer'):
@@ -313,7 +325,7 @@ class CIDv0(CID):
         )
     
     @classmethod
-    def build(cls, version: Version, codec: Codec, multihash: str|bytes|Multihash) -> bytes:
+    def build(cls, version: Version, codec: Codec, multihash: str|bytes|BaseMultihash) -> bytes:
         """
         Constructs a CIDv0 byte string from its components.
 
@@ -354,7 +366,7 @@ class CIDv1(CID):
     @overload
     def __new__(cls, data: 'str|bytes|CIDv0|CIDv1', /) -> Self: ...
     @overload
-    def __new__(cls, /, codec: Codec, multihash: str|bytes|Multihash) -> Self: ...
+    def __new__(cls, /, codec: Codec, multihash: str|bytes|BaseMultihash) -> Self: ...
 
     def __new__(cls, *args, **kwargs) -> Self:
         self = super().__new__(cls, *args, **kwargs)
@@ -367,7 +379,7 @@ class CIDv1(CID):
     @overload
     def __init__(self, codec: Codec, multihash: str|bytes|Multihash): ...
     
-    def __init__(self, codec: 'str|bytes|CIDv0|CIDv1', multihash: Optional[str|bytes|Multihash] = None):
+    def __init__(self, codec: 'str|bytes|CIDv0|CIDv1', multihash: Optional[str|bytes|BaseMultihash] = None):
         """
         :param codec: codec for the CID
         :param multihash: multihash for the CID, if not provided, it is cidexpected that `codec` is a multibase encoded string
@@ -445,7 +457,7 @@ class CIDv1(CID):
         return json_schema
 
     @classmethod
-    def build(cls, version: Version, codec: Codec, multihash: str|bytes|Multihash) -> bytes:
+    def build(cls, version: Version, codec: Codec, multihash: str|bytes|BaseMultihash) -> bytes:
         """
         Constructs a CIDv1 byte string from its components.
 
@@ -492,4 +504,4 @@ def cidhash(data: bytes, *, function: str = 'sha2-256', codec: Codec='dag-cbor')
     :param name: The name of the hash function to use.
     :return: A Multihash object.
     """
-    return CIDv1(codec, multihash(function).update(data).digest().buffer)
+    return CIDv1(codec, multihash(function, data).digest)

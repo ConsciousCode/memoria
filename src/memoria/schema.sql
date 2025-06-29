@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS acthreads (
     prev_id INTEGER REFERENCES acthreads(rowid) ON DELETE CASCADE
 );
 
+/**
+ * Root CIDs of the IPFS files stored in the flatfs blockstore.
+**/
+CREATE TABLE IF NOT EXISTS ipfs_files (
+    cid BLOB PRIMARY KEY
+);
+
 -------------
 -- Indices --
 -------------

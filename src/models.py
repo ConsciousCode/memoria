@@ -110,9 +110,14 @@ class InsertConvo(BaseModel):
 
 class IPLDModel(BaseModel):
     '''Base model for IPLD objects.'''
+
+    def as_block(self) -> bytes:
+        '''Return the object as an IPLD block.'''
+        return dagcbor.marshal(self.model_dump())
+
     @cached_property
     def cid(self):
-        return cidhash(dagcbor.marshal(self.model_dump()))
+        return cidhash(self.as_block())
 
 class Edge[T](BaseModel):
     '''Edge from one memory to another.'''
@@ -280,12 +285,11 @@ class Memory(NodeMemory, IPLDModel):
 
     model_config = ConfigDict(frozen=True)
 
-    @cached_property
     @override
-    def cid(self) -> CIDv1:
+    def as_block(self) -> bytes:
         # Edges must be sorted by target CID to ensure deterministic ordering
         self.edges.sort(key=lambda e: e.target)
-        return super().cid
+        return super().as_block()
     
     def partial(self):
         '''Return a PartialMemory with the same data and edges, but without the CID.'''

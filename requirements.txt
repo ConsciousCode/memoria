@@ -6,3 +6,5 @@ pydantic-ai
 mcp
 fastmcp
 tqdm
+protobuf
+libp2p

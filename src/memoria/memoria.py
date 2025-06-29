@@ -4,20 +4,23 @@ intervention.
 '''
 
 from datetime import datetime
-from typing import Iterable, Optional, overload
+from typing import Iterable, Optional, overload, override
 from uuid import UUID
+
+from ipld.cid import CID
 
 from .db import Database
 
 from src.ipld import CIDv1
 from src.models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, RecallConfig, Sona, StopReason
 from src.util import todo_list
+from src.ipld.ipfs import Blocksource
 
 __all__ = (
     'Memoria',
 )
 
-class Memoria:
+class Memoria(Blocksource):
     '''
     Wraps all memoria-related functionality to abstract away the details
     of the underlying database, but doesn't implement the MCP server.
@@ -26,6 +29,27 @@ class Memoria:
     def __init__(self, db: Database):
         super().__init__()
         self.db = db
+    
+    @override
+    def dag_has(self, cid: CID) -> bool:
+        """
+        Check if the block exists in the database. Does not include files.
+        """
+        return isinstance(cid, CIDv1) and self.db.has_cid(cid)
+
+    @override
+    def dag_get(self, cid: CID) -> Optional[bytes]:
+        """
+        Retrieve a block from the IPFS DAG by its CID. Does not fetch files.
+        """
+        if not isinstance(cid, CIDv1):
+            return None
+        
+        data = self.lookup_memory(cid) or self.lookup_act(cid)
+        if data is None:
+            return None
+        
+        return data.as_block()
     
     def lookup_memory(self, cid: CIDv1) -> Optional[Memory]:
         return self.db.lookup_ipld_memory(cid)

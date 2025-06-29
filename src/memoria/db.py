@@ -326,6 +326,23 @@ class Database:
             self.rollback()
             raise
     
+    def has_cid(self, cid: CIDv1) -> bool:
+        '''Check if the database has a CID.'''
+        cur = self.cursor()
+        cur.execute("""
+            SELECT 1 FROM memories WHERE cid = ?
+        """, (cid.buffer,))
+        if cur.fetchone():
+            return True
+        
+        cur.execute("""
+            SELECT 1 FROM acthreads WHERE cid = ?
+        """, (cid.buffer,))
+        if cur.fetchone():
+            return True
+        
+        return False
+    
     def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory]:
         '''Lookup an IPLD memory object by CID, returning its IPLD model.'''
         cur = self.cursor(MemoryRow)

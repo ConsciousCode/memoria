@@ -11,7 +11,7 @@
             }
           },
           "weight": {
-            "type": "int"
+            "type": "float"
           }
         },
         "representation": {
