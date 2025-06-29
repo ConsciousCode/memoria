@@ -3,7 +3,6 @@ MCP Server for Memoria
 '''
 
 from datetime import datetime
-from contextlib import asynccontextmanager
 from typing import Annotated, Iterable, Optional, override
 from uuid import UUID
 
@@ -12,9 +11,8 @@ from fastmcp.exceptions import ResourceError, ToolError
 from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, PromptMessage, TextContent
 from pydantic import Field
-from pydantic_ai import Agent
 
-from ._common import mcp_context, lifespan
+from ._common import AppState, mcp_lifespan
 from src.ipld import CIDv1
 from src.memoria import Memoria
 from src.models import DraftMemory, Edge, IncompleteMemory, Memory, RecallConfig, SampleConfig, StopReason
@@ -65,23 +63,21 @@ class MCPEmulator(ServerEmulator):
             model_preferences=model_preferences
         )
 
-@asynccontextmanager
-async def mcp_lifespan(server: FastMCP):
-    '''Lifespan context for the FastAPI app.'''
-    with lifespan() as memoria:
-        yield memoria
-
-mcp = FastMCP("memoria",
+mcp = FastMCP[Memoria]("memoria",
     """Coordinates a "sona" representing a cohesive identity and memory.""",
     lifespan=mcp_lifespan,
     #log_level="DEBUG"
 )
 
+def mcp_state(ctx: Context) -> AppState:
+    '''Get the application state from the context.'''
+    return ctx.request_context.lifespan_context
+
 @mcp.resource("ipfs://{cid}")
 def ipfs_resource(ctx: Context, cid: CIDv1):
     '''IPFS resource handler.'''
-    memoria = mcp_context(ctx)
-    if (m := memoria.lookup_memory(cid)) is None:
+    state = mcp_state(ctx)
+    if (m := state.memoria.lookup_memory(cid)) is None:
         raise ResourceError("Memory not found")
     
     if m.data.kind != "file":
@@ -92,15 +88,16 @@ def ipfs_resource(ctx: Context, cid: CIDv1):
 @mcp.resource("memoria://sona/{uuid}")
 def sona_resource(ctx: Context, uuid: UUID):
     '''Sona resource handler.'''
-    memoria = mcp_context(ctx)
-    if m := memoria.find_sona(uuid):
+    state = mcp_state(ctx)
+    if m := state.memoria.find_sona(uuid):
         return m
     raise ResourceError("Sona not found")
 
 @mcp.resource("memoria://memory/{cid}")
-def memory_resource(ctx: Context, cid: str):
+def memory_resource(ctx: Context, cid: CIDv1):
     '''Memory resource handler.'''
-    if m := mcp_context(ctx).lookup_memory(CIDv1(cid)):
+    state = mcp_state(ctx)
+    if m := state.memoria.lookup_memory(cid):
         return m
     raise ResourceError("Memory not found")
 
@@ -126,7 +123,8 @@ async def insert(
         ] = DEFAULT_ANNOTATE_CONFIG
     ):
     '''Insert a new memory into the sona.'''
-    emu = MCPEmulator(ctx, mcp_context(ctx))
+    state = mcp_state(ctx)
+    emu = MCPEmulator(ctx, state.memoria)
     return await emu.insert(memory, recall_config, annotate_config)
 
 @mcp.tool(
@@ -150,7 +148,8 @@ async def recall(
     Recall memories related to the prompt, including relevant included memories
     and their dependencies.
     '''
-    emu = MCPEmulator(ctx, mcp_context(ctx))
+    state = mcp_state(ctx)
+    emu = MCPEmulator(ctx, state.memoria)
     g = await emu.recall(prompt, recall_config)
     return dict(g.items())
 
@@ -180,8 +179,8 @@ async def query(
         ] = DEFAULT_CHAT_CONFIG
     ):
     '''Single-turn conversation returning the response.'''
-    memoria = mcp_context(ctx)
-    emu = MCPEmulator(ctx, memoria)
+    state = mcp_state(ctx)
+    emu = MCPEmulator(ctx, state.memoria)
 
     return await emu.query(
         prompt,
@@ -231,9 +230,8 @@ async def chat(
     '''
     Single-turn conversation returning the response. This is committed to memory.
     '''
-    memoria = mcp_context(ctx)
-    emu = MCPEmulator(ctx, memoria)
-
+    state = mcp_state(ctx)
+    emu = MCPEmulator(ctx, state.memoria)
     return await emu.chat(
         prompt,
         system_prompt or CHAT_PROMPT,
@@ -262,8 +260,8 @@ def act_push(
     Insert a new memory into the sona, formatted for an ACT
     (Autonomous Cognitive Thread).
     '''
-    memoria = mcp_context(ctx)
-    emu = MCPEmulator(ctx, memoria)
+    state = mcp_state(ctx)
+    emu = MCPEmulator(ctx, state.memoria)
     if u := emu.act_push(sona, memories):
         return u
     raise ToolError("Sona not found or prompt memory not found.")
@@ -296,8 +294,8 @@ def act_stream(
     Stream tokens from the LLM to the sona to be committed to memory in case
     the LLM is interrupted or the session ends unexpectedly.
     '''
-    memoria = mcp_context(ctx)
-    return memoria.act_stream(sona, delta, model, stop_reason)
+    state = mcp_state(ctx)
+    return state.memoria.act_stream(sona, delta, model, stop_reason)
 
 @mcp.prompt()
 def act_next(

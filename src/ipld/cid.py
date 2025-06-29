@@ -128,7 +128,7 @@ class CID(Immutable):
         return f"{type(self).__name__}(version={self.version}, codec={self.codec}, multihash={self.multihash!r})"
 
     def __eq__(self, other):
-        if isinstance(other, (str, bytes)):
+        if isinstance(other, str|bytes):
             try:
                 other = CID(other)
             except ValueError:

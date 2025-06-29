@@ -6,10 +6,14 @@ from uuid import UUID
 
 from fastapi import FastAPI, Header, Query, Request, Response
 
-from ._common import mcp_context
+from ._common import AppState, subapp_lifespan
 from src.ipld import dagcbor
 
-rest_app = FastAPI()
+rest_app = FastAPI(
+    title="Memoria REST API",
+    description="A RESTful API for the Memoria system.",
+    lifespan=subapp_lifespan
+)
 
 @rest_app.get("/memories/list")
 def list_memories(
@@ -25,8 +29,8 @@ def list_memories(
         accept: Annotated[Optional[list[str]], Header()] = None
     ):
     '''List messages in the Memoria system.'''
-    memoria = mcp_context(request)
-    messages = memoria.list_messages(page, perpage)
+    state: AppState = request.app.state
+    messages = state.memoria.list_messages(page, perpage)
     accept = accept or []
     if "application/cbor" in accept:
         return dagcbor.marshal(messages)
@@ -43,8 +47,8 @@ def get_sona(
     except (ValueError, TypeError):
         pass
 
-    memoria = mcp_context(request)
-    if sona := memoria.find_sona(uuid):
+    state: AppState = request.app.state
+    if sona := state.memoria.find_sona(uuid):
         accept = accept or []
         if "application/cbor" in accept:
             return dagcbor.marshal(sona)
@@ -57,6 +61,10 @@ def get_sona(
 @rest_app.get("/sonas/list")
 def list_sonas(
         request: Request,
+        accept: Annotated[
+            list[str],
+            Header(default_factory=list)
+        ],
         page: Annotated[
             int,
             Query(description="Page number to return.")
@@ -64,12 +72,11 @@ def list_sonas(
         perpage: Annotated[
             int,
             Query(description="Number of sonas to return per page.")
-        ] = 100,
-        accept: Annotated[Optional[list[str]], Header()] = None
+        ] = 100
     ):
     '''List sonas in the Memoria system.'''
-    memoria = mcp_context(request)
-    sonas = memoria.list_sonas(page, perpage)
+    state: AppState = request.app.state
+    sonas = state.memoria.list_sonas(page, perpage)
     accept = accept or []
     if "application/cbor" in accept:
         return dagcbor.marshal(sonas)

@@ -178,9 +178,13 @@ class ServerEmulator(Emulator):
                 if v < 0: continue
                 if m := re.match(r"\d+", k):
                     ki = int(m[0])
-                    if ki == 0: continue
+                    if ki == 0: continue # Some models output 0 key???
                     ki -= 1 # Convert to 0-based index
-                    if not isinstance(v, (int, float)):
+                    if isinstance(v, int):
+                        # Here we're pedantic about the type because it's going
+                        # into IPLD which can distinguish between int and float
+                        v = float(v)
+                    elif not isinstance(v, float):
                         raise ValueError(
                             f"Edge relevance score must be a number, got {type(v)}: {v}"
                         )
