@@ -6,10 +6,8 @@ from uuid import UUID
 
 from fastapi import FastAPI, Header, Query, Request, Response, UploadFile
 
-from ipld.cid import CIDv1
-
 from ._common import AppState, subapp_lifespan
-from src.ipld import dagcbor
+from src.ipld import dagcbor, CIDv1
 
 rest_api = FastAPI(
     title="Memoria REST API",
@@ -100,32 +98,23 @@ def list_sonas(
 @rest_api.post("/file")
 async def upload_file(
         request: Request,
-        content_type: str = Header(),
-        ctime: Optional[int] = Query(
+        file: UploadFile,
+        timestamp: Optional[int] = Query(
             None,
             description="Creation time of the file in seconds since epoch."
         )
     ):
     '''Upload a file to the Memoria system.'''
-    if not content_type.startswith("multipart/form-data"):
-        return Response(
-            status_code=415,
-            content="Content-Type must be multipart/form-data."
-        )
-    
-    form = await request.form()
-    for name, value in form.multi_items():
-        if isinstance(value, str):
-            value.filename
+    if file.content_type is None:
+        raise ValueError("Content-Type header is required")
     
     state: AppState = request.app.state
     fstream = file.file
-    created, cid = state.upload_file(
+    created, size, cid = state.upload_file(
         fstream,
         file.filename,
         file.content_type,
-        file.size or fstream.tell(),
-        ctime
+        timestamp
     )
     
     return Response(

@@ -7,11 +7,9 @@ from datetime import datetime
 from typing import Iterable, Optional, overload, override
 from uuid import UUID
 
-from ipld.cid import CID
-
 from .db import Database, FileRow
 
-from src.ipld import CIDv1
+from src.ipld import CIDv1, CID
 from src.models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, RecallConfig, Sona, StopReason
 from src.util import todo_list
 from src.ipld.ipfs import Blocksource

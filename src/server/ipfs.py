@@ -2,15 +2,14 @@
 Implement the IPFS Trustless Gateway specification and any IPFS-related utilities.
 '''
 import json
-from typing import Annotated, Literal, Optional
+from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
-from ipld.ipfs import CIDResolveError, dag_dump
-
 from ._common import AddParameters, AppState, subapp_lifespan, depend_appstate
 from src.ipld import CID
+from src.ipld.ipfs import CIDResolveError, dag_dump
 
 ROOT = "private/blocks"
 
@@ -119,7 +118,7 @@ ipfs_api = FastAPI(
 ## Root commands ##
 
 @ipfs_api.post("/add")
-async def add_files(
+async def ipfs_add(
         request: Request,
         params: AddParameters = Depends(AddParameters),
         state: AppState = depend_appstate

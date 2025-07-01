@@ -10,11 +10,10 @@ from fastmcp import FastMCP
 from pydantic import BaseModel, Field, GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
 
-from ipld.cid import CID, Codec
-from ipld.ipfs import Blocksource, Blockstore, CIDResolveError, CompositeBlocksource, FlatfsBlockstore
-from models import Memory
+from src.ipld.cid import CID, Codec
+from src.ipld.ipfs import Blocksource, Blockstore, CompositeBlocksource, FlatfsBlockstore
+from src.models import Memory
 from src.memoria import Memoria, Database
-from src.ipld import dagcbor, dagjson, dagpb
 
 class UnsupportedError(NotImplementedError):
     pass

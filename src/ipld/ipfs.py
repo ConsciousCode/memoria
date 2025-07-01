@@ -3,17 +3,14 @@ from functools import cached_property
 from typing import IO, Callable, Iterable, Literal, Optional, override
 import os
 
-from ipld import dagcbor, dagjson
-from ipld._common import IPLData
+from . import ipld, multibase, dagpb, dagcbor, dagjson
 
-from . import ipld, multibase
-
+from ._common import IPLData
 from .dagpb import PBLink, PBNode
 from .unixfs import Data
 from .multihash import multihash
 from .cid import CID, CIDv0, CIDv1, Codec
 from .car import CARv2Index, carv1_iter, carv2_iter
-from ipld import dagpb
 
 class CIDResolveError(Exception):
     """Raised when a CID cannot be resolved to a node."""
@@ -33,7 +30,7 @@ class DAGPBNode(PBNode):
 
     @cached_property
     def cid(self):
-        return CIDv0(multihash("sha2-256", self.SerializeToString()))
+        return CIDv0(multihash("sha2-256", self.dump()))
 
 class FileLeaf(DAGPBNode):
     '''Leaf of an IPFS UnixFS file.'''
@@ -82,7 +79,7 @@ def dag_load(codec: Codec, block: bytes) -> IPLData:
                 'Links': [{
                     'Name': link.Name,
                     'Hash': CID(link.Hash),
-                    'Size': link.ByteSize()
+                    'Tsize': link.Tsize
                 } for link in node.Links],
                 'Data': node.Data
             }
@@ -166,18 +163,14 @@ class Blocksource(ABC):
         if length is not None and length <= 0:
             return
 
-        node_data = self.block_get(cid)
-        if node_data is None:
+        if (node_data := self.block_get(cid)) is None:
             raise CIDResolveError(cid)
         
-        node = PBNode()
-        node.ParseFromString(node_data)
+        node = dagpb.unmarshal(node_data)
         data = Data()
         data.ParseFromString(node.Data)
         
-        if node.HasField('Data'):
-            yield node.Data[offset:][:length]
-        else:
+        if node.Links:
             for size, link in zip(data.blocksizes, node.Links):
                 # Skip until we reach the offset
                 if offset >= size:
@@ -194,6 +187,8 @@ class Blocksource(ABC):
                     length -= size
                     if length <= 0:
                         break # Early break when we're done
+        else:
+            yield node.Data[offset:][:length]
 
 type ChunkingStrategy = Callable[[IO[bytes]], Iterable[bytes]]
 """Strategy for chunking a stream into smaller parts."""
@@ -251,7 +246,7 @@ class Blockstore(Blocksource):
         
         return self.block_put(FileNode(
             map(self.ipfs_put, chunker(stream))
-        ).SerializeToString())
+        ).dump())
 
 class FlatfsBlockstore(Blockstore):
     def __init__(self, root: str, sharding: ShardingStrategy = ShardLast(2)):

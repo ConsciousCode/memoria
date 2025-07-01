@@ -3,13 +3,12 @@ from functools import cached_property
 from typing import Annotated, Iterable, Literal, Optional, overload, override
 from uuid import UUID
 
-from mcp.types import ModelPreferences, Role
+from mcp.types import ModelPreferences
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
 
-from ipld.cid import CID
 from src.graph import IGraph
-from src.ipld import dagcbor, CIDv1, cidhash
+from src.ipld import dagcbor, CIDv1, cidhash, CID
 
 __all__ = (
     'MemoryKind',

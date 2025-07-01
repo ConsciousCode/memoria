@@ -1,6 +1,6 @@
 from .._common import IPLData
 from ..cid import CID
-from .dagpb_pb2 import PBLink, PBNode
+from .wrap import PBNode, PBLink
 
 __all__ = (
     'PBLink',
@@ -19,7 +19,7 @@ def _encode_pblink(link) -> PBLink:
             )
     raise ValueError(f"Invalid PBLink: {link}")
 
-def _encode_pbnode(node: IPLData) -> PBNode:
+def _encode_pbnode(node) -> PBNode:
     match node:
         case dict({"Links": list(links), "Data": bytes(data)}):
             if nk := node.keys() - {"Links", "Data"}:
@@ -33,9 +33,7 @@ def _encode_pbnode(node: IPLData) -> PBNode:
 def marshal(data: PBNode|IPLData) -> bytes:
     if not isinstance(data, PBNode):
         data = _encode_pbnode(data)
-    return data.SerializeToString()
+    return data.dump()
 
 def unmarshal(data: bytes) -> PBNode:
-    node = PBNode()
-    node.ParseFromString(data)
-    return node
+    return PBNode.load(data)

@@ -11,8 +11,7 @@ import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
-from ipld.cid import CID
-from src.ipld import CIDv1
+from src.ipld import CIDv1, CID
 from src.models import ACThread, AnyACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, DraftMemory, Memory, MemoryKind, PartialMemory, RecallConfig
 from src.util import finite
 

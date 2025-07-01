@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Literal, Optional
+from typing import Literal, Optional, overload
 import math
 
 __all__ = (
@@ -14,6 +14,8 @@ __all__ = (
 )
 
 class Codec(ABC):
+    """Abstract base class for multibase codecs."""
+    __name__: str
     code: str
 
     def __call__(self, x: bytes, /) -> str:
@@ -27,12 +29,34 @@ class Codec(ABC):
     @abstractmethod
     def decode(self, x: str, /) -> bytes:
         """Decodes the given string representation back into bytes."""
+    
+    def __repr__(self):
+        return f"Codec({self.__name__})"
 
 class IdCodec:
+    """
+    Identity codec, must be handled specially because it's the only codec
+    which doesn't encode to a string but rather returns the bytes as-is.
+    """
+    __name__ = 'identity'
     code = '\0'
 
-    def encode(self, x: bytes) -> bytes: return x
-    def decode(self, x: bytes) -> bytes: return x
+    @overload
+    def encode(self, x: str) -> str: ...
+    @overload
+    def encode(self, x: bytes) -> bytes: ...
+
+    def encode(self, x): return x
+
+    @overload
+    def decode(self, x: str) -> str: ...
+    @overload
+    def decode(self, x: bytes) -> bytes: ...
+
+    def decode(self, x): return x
+
+    def __repr__(self):
+        return "Codec(identity)"
 
 class DigitCodec(Codec):
     digits: str
@@ -118,6 +142,7 @@ class BaseCodec(DigitCodec):
         return x.to_bytes((x.bit_length() + 7) // 8, byteorder='big')
 
 class ReservedBase(Codec):
+    """Base class for reserved multibase codes."""
     def __init__(self, code: str, name: str):
         assert len(code) == 1, 'code must be a single byte'
         self.code = code
@@ -230,7 +255,11 @@ ENCODINGS: dict[str, Codec] = {
 
     # base256emoji is experimental and has no definitive mapping
 }
-CODES = {codec.code: codec for codec in ENCODINGS.values()}
+CODES = {}
+for _n, _c in ENCODINGS.items():
+    CODES[_c.code] = _c
+    _c.__name__ = _n
+    del _n, _c
 
 type Encoding = Literal[
     'base2', 'base8', 'base10', 'base16', 'base16upper',
@@ -241,15 +270,24 @@ type Encoding = Literal[
 ]
 '''Valid multibase encodings.'''
 
-def codec(name: Encoding) -> Codec:
+@overload
+def codec(name: Literal['identity']) -> IdCodec: ...
+@overload
+def codec(name: Encoding) -> Codec: ...
+
+def codec(name: str) -> Codec|IdCodec:
     """Returns the codec used to encode the given data"""
+    if name == 'identity':
+        return identity
     if enc := ENCODINGS.get(name):
         return enc
     raise ValueError(f'Cannot determine encoding for {name}')
 
-def codec_of(data: str) -> Codec:
+def codec_of(data: str) -> Codec|IdCodec:
     """Returns the codec used to encode the given data"""
-    try: return CODES[data[0]]
+    try:
+        c = data[0]
+        return identity if c == '\0' else CODES[c]
     except (IndexError, KeyError):
         raise ValueError(f'Cannot determine encoding for {data}') from None
 
@@ -259,10 +297,12 @@ def is_encoded(data: str) -> bool:
 
 def encode_identity(data: bytes) -> bytes:
     """Encodes data using the identity encoding."""
-    return b'\x00' + data
+    return b'\0' + data
 
 def decode_identity(data: bytes) -> Optional[bytes]:
     """Decodes data that was encoded using the identity encoding."""
+    if data[0] != 0:
+        raise ValueError('Data is not encoded with identity encoding.')
     return data[1:] if data else None
 
 def encode(encoding: Encoding|Codec, data: bytes) -> str:
@@ -277,4 +317,7 @@ def encode(encoding: Encoding|Codec, data: bytes) -> str:
 
 def decode(data: str) -> bytes:
     """Decode the multibase-encoded data."""
-    return codec_of(data).decode(data[1:])
+    codec = codec_of(data)
+    if isinstance(codec, IdCodec):
+        return identity.decode(data[1:]).encode('utf-8')
+    return codec.decode(data[1:])

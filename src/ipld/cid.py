@@ -163,31 +163,6 @@ class CID(Immutable):
         return self.buffer.hex()
 
     @classmethod
-    def __get_pydantic_core_schema__(
-        cls, source_type: Any, handler: GetCoreSchemaHandler
-    ) -> core_schema.CoreSchema:
-        """
-        Integrates the CID class with Pydantic's validation and serialization,
-        correctly handling the factory pattern where __new__ returns subclasses.
-        """
-        def validate_cid(value: Any) -> 'CID':
-            """Validate and convert input to a CID object."""
-            if isinstance(value, CID):
-                return value
-            try:
-                return cls(value)
-            except Exception as e:
-                raise ValueError(f"Invalid CID: {value!r}") from e
-
-        return core_schema.no_info_plain_validator_function(
-            validate_cid,
-            serialization=core_schema.plain_serializer_function_ser_schema(
-                lambda instance: str(instance),
-                return_schema=core_schema.str_schema(),
-            ),
-        )
-
-    @classmethod
     def is_cid(cls, cidstr: str|bytes) -> bool:
         """
         Checks if a given input string is valid encoded CID or not.
@@ -279,6 +254,65 @@ class CID(Immutable):
         """
         return cls.build(*CID.parse(cid))
 
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        """
+        Integrates the CID class with Pydantic's validation and serialization,
+        correctly handling the factory pattern where __new__ returns subclasses.
+        """
+        def validate_cid(value: Any) -> 'CID':
+            """Validate and convert input to a CID object."""
+            if isinstance(value, CID):
+                return value
+            try:
+                return cls(value)
+            except Exception as e:
+                raise ValueError(f"Invalid CID: {value!r}") from e
+
+        return core_schema.union_schema([
+            # Accept existing CID objects
+            core_schema.is_instance_schema(CIDv1),
+            # Accept strings that can be converted to CID
+            core_schema.no_info_after_validator_function(
+                validate_cid, core_schema.str_schema()
+            )
+        ], serialization=core_schema.plain_serializer_function_ser_schema(
+            str, return_schema=core_schema.str_schema(),
+        ))
+    
+    @classmethod
+    def __get_pydantic_json_schema__(
+            cls, core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+        ) -> JsonSchemaValue:
+        """
+        Modifies the JSON schema for MCP compatibility.
+        This method is called by Pydantic when generating JSON schemas.
+        """
+        try:
+            json_schema = handler(core_schema)
+            json_schema.update({
+                'type': 'string',
+                'format': 'cid',
+                'pattern': r'^(Qm[1-9A-HJ-NP-Za-km-z]+|b[a-z2-7]+)$',
+                'minLength': 46,
+                'maxLength': 46,
+                'description': 'Content Identifier (CID) of any version - a self-describing content-addressed identifier',
+                'examples': [
+                    'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+                    'bagaaiera5fltyykmoa6jfwfzgq54z42hs7vygbbvgkdkdimwvg7zzx5s7h5bq'
+                ],
+                'title': 'CID'
+            })
+            return json_schema
+        except:
+            print("Hello", core_schema)
+            import traceback
+            traceback.print_exc()
+            print("Here")
+            raise
+
 class CIDv0(CID):
     """ CID version 0 object """
 
@@ -303,31 +337,6 @@ class CIDv0(CID):
 
     def __repr__(self):
         return f"CIDv0({self.multihash!r})"
-
-    @classmethod
-    def __get_pydantic_core_schema__(
-        cls, source_type, handler: GetCoreSchemaHandler
-    ) -> core_schema.CoreSchema:
-        """
-        Integrates the CID class with Pydantic's validation and serialization,
-        correctly handling the factory pattern where __new__ returns subclasses.
-        """
-        def validate_cidv0(value) -> 'CIDv0':
-            """Validate and convert input to a CIDv1 object."""
-            try:
-                match cid := CID(value):
-                    case CIDv1(): return CIDv0(cid)
-                    case CIDv0(): return cid
-                    case _: raise ValueError(f"Invalid CIDv0 input: {value}")
-            except Exception as e:
-                raise ValueError(f"Invalid CIDv0: {e}") from e
-
-        return core_schema.no_info_plain_validator_function(
-            validate_cidv0,
-            serialization=core_schema.plain_serializer_function_ser_schema(
-                str, return_schema=core_schema.str_schema(),
-            )
-        )
     
     @classmethod
     def build(cls, version: Version, codec: Codec, multihash: str|bytes|BaseMultihash) -> bytes:
@@ -364,6 +373,64 @@ class CIDv0(CID):
         if encoding != "base58btc":
             raise ValueError('CIDv0 does not support encoding, use CIDv1 instead')
         return multibase.base58.encode(self.buffer)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        """
+        Integrates the CID class with Pydantic's validation and serialization,
+        correctly handling the factory pattern where __new__ returns subclasses.
+        """
+        def validate_cidv0(value) -> 'CIDv0':
+            """Validate and convert input to a CIDv1 object."""
+            try:
+                match cid := CID(value):
+                    case CIDv1(): return CIDv0(cid)
+                    case CIDv0(): return cid
+                    case _: raise ValueError(f"Invalid CIDv0 input: {value}")
+            except Exception as e:
+                raise ValueError(f"Invalid CIDv0: {e}") from e
+
+        return core_schema.union_schema([
+            # Accept existing CIDv0 objects
+            core_schema.is_instance_schema(CIDv1),
+            # Accept strings that can be converted to CIDv0
+            core_schema.no_info_after_validator_function(
+                validate_cidv0,
+                core_schema.str_schema(
+                    pattern=r'^Qm[1-9A-HJ-NP-Za-km-z]+$',
+                    min_length=46,
+                    max_length=46,
+                )
+            )
+        ], serialization=core_schema.plain_serializer_function_ser_schema(
+            str, return_schema=core_schema.str_schema(),
+        ))
+    
+    @classmethod
+    def __get_pydantic_json_schema__(
+            cls, core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+        ) -> JsonSchemaValue:
+        """
+        Modifies the JSON schema for MCP compatibility.
+        This method is called by Pydantic when generating JSON schemas.
+        """
+        json_schema = handler(core_schema)
+        json_schema.update({
+            'type': 'string',
+            'format': 'cidv0',
+            'pattern': r'^Qm[1-9A-HJ-NP-Za-km-z]+$',
+            'minLength': 46,
+            'maxLength': 46,
+            'description': 'Content Identifier (CID) version 0 - a self-describing content-addressed identifier',
+            'examples': [
+                'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+                'QmRgR7Bpa9xDMUNGiKaARvFL9MmnoFyd86rF817EZyfdGE'
+            ],
+            'title': 'CIDv0'
+        })
+        return json_schema
 
 class CIDv1(CID):
     """ CID version 1 object """
@@ -407,60 +474,6 @@ class CIDv1(CID):
     def __repr__(self):
         return f"CIDv1({self.codec!r}, {self.multihash!r})"
 
-    @classmethod    
-    def __get_pydantic_core_schema__(
-        cls, source_type, handler: GetCoreSchemaHandler
-    ) -> core_schema.CoreSchema:
-        """
-        Integrates the CIDv1 class with Pydantic's validation and serialization.
-        """
-        def validate_cidv1(value) -> 'CIDv1':
-            """Validate and convert input to a CIDv1 object."""
-            match cid := CID(value):
-                case CIDv1(): return cid
-                case CIDv0(): return CIDv1(cid)
-                case _: raise ValueError(f"Invalid CIDv1 input: {value}")
-        
-        return core_schema.union_schema([
-            # Accept existing CIDv1 objects
-            core_schema.is_instance_schema(CIDv1),
-            # Accept strings that can be converted to CIDv1
-            core_schema.no_info_after_validator_function(
-                validate_cidv1,
-                core_schema.str_schema(
-                    pattern=r'^[a-zA-Z0-9+/=-]+$',
-                    min_length=10,
-                    max_length=200,
-                )
-            )
-        ], serialization=core_schema.plain_serializer_function_ser_schema(
-            str, return_schema=core_schema.str_schema(),
-        ))
-    
-    @classmethod
-    def __get_pydantic_json_schema__(
-            cls, core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
-        ) -> JsonSchemaValue:
-        """
-        Modifies the JSON schema for MCP compatibility.
-        This method is called by Pydantic when generating JSON schemas.
-        """
-        json_schema = handler(core_schema)
-        json_schema.update({
-            'type': 'string',
-            'format': 'cid',
-            'pattern': r'^[a-zA-Z0-9+/=-]+$',
-            'minLength': 10,
-            'maxLength': 200,
-            'description': 'Content Identifier (CID) version 1 - a self-describing content-addressed identifier',
-            'examples': [
-                'zb2rhe5P4gXftAwvA4eXQ5HJwsER2owDyS9sKaQRRVQPn93bA',
-                'bagaaiera5fltyykmoa6jfwfzgq54z42hs7vygbbvgkdkdimwvg7zzx5s7h5bq'
-            ],
-            'title': 'CIDv1'
-        })
-        return json_schema
-
     @classmethod
     def build(cls, version: Version, codec: Codec, multihash: str|bytes|BaseMultihash) -> bytes:
         """
@@ -500,6 +513,60 @@ class CIDv1(CID):
         :return: encoded raw representation with the given encoding
         """
         return multibase.encode(encoding, self.buffer)
+
+    @classmethod    
+    def __get_pydantic_core_schema__(
+        cls, source_type, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        """
+        Integrates the CIDv1 class with Pydantic's validation and serialization.
+        """
+        def validate_cidv1(value) -> 'CIDv1':
+            """Validate and convert input to a CIDv1 object."""
+            match cid := CID(value):
+                case CIDv1(): return cid
+                case CIDv0(): return CIDv1(cid)
+                case _: raise ValueError(f"Invalid CIDv1 input: {value}")
+        
+        return core_schema.union_schema([
+            # Accept existing CIDv1 objects
+            core_schema.is_instance_schema(CIDv1),
+            # Accept strings that can be converted to CIDv1
+            core_schema.no_info_after_validator_function(
+                validate_cidv1,
+                core_schema.str_schema(
+                    pattern=r'^b[a-z2-7]+$',
+                    min_length=62,
+                    max_length=64,
+                )
+            )
+        ], serialization=core_schema.plain_serializer_function_ser_schema(
+            str, return_schema=core_schema.str_schema(),
+        ))
+    
+    @classmethod
+    def __get_pydantic_json_schema__(
+            cls, core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+        ) -> JsonSchemaValue:
+        """
+        Modifies the JSON schema for MCP compatibility.
+        This method is called by Pydantic when generating JSON schemas.
+        """
+        json_schema = handler(core_schema)
+        json_schema.update({
+            'type': 'string',
+            'format': 'cidv1',
+            'pattern': r'^b[a-z2-7]+$',
+            'minLength': 62,
+            'maxLength': 64,
+            'description': 'Content Identifier (CID) version 1 - a self-describing content-addressed identifier',
+            'examples': [
+                'zb2rhe5P4gXftAwvA4eXQ5HJwsER2owDyS9sKaQRRVQPn93bA',
+                'bagaaiera5fltyykmoa6jfwfzgq54z42hs7vygbbvgkdkdimwvg7zzx5s7h5bq'
+            ],
+            'title': 'CIDv1'
+        })
+        return json_schema
 
 def cidhash(data: bytes, *, function: str = 'sha2-256', codec: Codec='dag-cbor') -> CIDv1:
     """

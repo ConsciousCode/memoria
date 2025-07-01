@@ -3,6 +3,7 @@ MCP Server for Memoria
 '''
 
 from datetime import datetime
+from io import BytesIO
 from typing import Annotated, Iterable, Optional, override
 from uuid import UUID
 import base64
@@ -15,6 +16,7 @@ from pydantic import Field
 
 from ._common import AppState, mcp_lifespan
 from src.ipld import CIDv1
+from src.ipld.ipfs import CIDResolveError
 from src.memoria import Memoria
 from src.models import DraftMemory, Edge, IncompleteMemory, Memory, RecallConfig, SampleConfig, StopReason
 from src.prompts import CHAT_PROMPT, QUERY_PROMPT
@@ -79,13 +81,10 @@ def mcp_state(ctx: Context) -> AppState:
 def ipfs_resource(ctx: Context, cid: CIDv1):
     '''IPFS resource handler.'''
     state = mcp_state(ctx)
-    if (m := state.memoria.lookup_memory(cid)) is None:
-        raise ResourceError("Memory not found")
-    
-    if m.data.kind != "file":
-        raise ResourceError("Memory is not a file")
-    
-    return m.data.content
+    try:
+        return state.dag_get(cid)
+    except CIDResolveError:
+        raise ResourceError(f"CID {cid} not found in IPFS blockstore")
 
 @mcp.resource("memoria://sona/{uuid}")
 def sona_resource(ctx: Context, uuid: UUID):
@@ -129,8 +128,11 @@ async def upload(
     '''
     state = mcp_state(ctx)
     emu = MCPEmulator(ctx, state)
-    return emu.state.memoria.upload_file(
-        base64.b64decode(file)
+    return emu.state.upload_file(
+        BytesIO(base64.b64decode(file)),
+        filename=filename,
+        mimetype=content_type or "application/octet-stream",
+        timestamp=int(datetime.now().timestamp())
     )
 
 @mcp.tool(
