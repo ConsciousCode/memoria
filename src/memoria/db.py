@@ -11,6 +11,7 @@ import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extensions import uuid7
 
+from ipld.cid import CID
 from src.ipld import CIDv1
 from src.models import ACThread, AnyACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, DraftMemory, Memory, MemoryKind, PartialMemory, RecallConfig
 from src.util import finite
@@ -43,27 +44,23 @@ class Factory(Protocol):
     factory: Callable
 
 class FileRow(BaseModel):
-    type PrimaryKey = int
+    type PrimaryKey = bytes
 
-    rowid: PrimaryKey
-    cid: bytes
+    cid: PrimaryKey
     filename: Optional[str]
     mimetype: str
-    metadata: Optional[JSONB]
-    size: int
-    content: Optional[bytes]
+    filesize: int
+    overhead: int
 
     @classmethod
-    def factory(cls, rowid, cid, filename, mimetype, metadata, size, content) -> 'FileRow':
+    def factory(cls, cid, filename, mimetype, filesize, overhead) -> 'FileRow':
         '''Create a FileRow from a raw database row.'''
         return cls(
-            rowid=rowid,
             cid=cid,
             filename=filename,
             mimetype=mimetype,
-            metadata=metadata,
-            size=size,
-            content=content
+            filesize=filesize,
+            overhead=overhead
         )
 
 class BaseMemoryRow(BaseModel):
@@ -405,6 +402,21 @@ class Database:
             #or self.lookup_file(cid)
             #or self.lookup_sona(cid)
         )
+    
+    def lookup_ipld_file(self, cid: CID) -> Optional[FileRow]:
+        '''
+        Lookup an IPLD file by CID, returning its FileRow. The Database
+        doesn't handle block storage so this is naturally only useful for
+        metadata purposes.
+        '''
+        cur = self.cursor(FileRow)
+        row = cur.execute("""
+            SELECT cid, filename, mimetype, filesize, overhead
+            FROM files WHERE cid = ?
+        """, (cid.buffer,)).fetchone()
+        if row is None:
+            return None
+        return FileRow.factory(*row)
 
     def select_sona_aliases(self, rowid: int) -> list[str]:
         '''Select all aliases for a sona by its rowid.'''
@@ -417,7 +429,7 @@ class Database:
     def select_act(self, rowid: int) -> Optional[AnyACThread]:
         '''Select an act thread by its rowid.'''
         cur = self.cursor(ACThreadRow)
-        row: AnyACThreadRow = cur.execute("""
+        row: Optional[AnyACThreadRow] = cur.execute("""
             SELECT rowid, cid, sona_id, memory_id, prev_id
             FROM acthreads WHERE rowid = ?
         """, (rowid,)).fetchone()
@@ -784,7 +796,10 @@ class DatabaseRW(Database):
         config = config or RecallConfig()
         
         index = prompt.document()
-        e, = nomic_text.embed(index)
+        if index:
+            e, = nomic_text.embed(index)
+        else:
+            e = numpy.zeros(768, dtype=numpy.float32)
         s = numpy.zeros(768, dtype=numpy.float32)
         if ps := prompt.sonas:
             for sona in ps:
@@ -1012,13 +1027,14 @@ class DatabaseRW(Database):
 
     def insert_memory(self, memory: AnyMemory) -> int:
         cid = memory.cid
+        cid = cid and cid.buffer
         cur = self.cursor()
         cur.execute("""
             INSERT OR IGNORE INTO memories
                 (cid, timestamp, kind, data, importance)
                     VALUES (?, ?, ?, JSONB(?), ?)
         """, (
-            cid and cid.buffer,
+            cid,
             memory.timestamp,
             memory.data.kind,
             memory.data.model_dump_json(exclude={"kind"}),
@@ -1030,9 +1046,9 @@ class DatabaseRW(Database):
             # Continue insertion
             self.link_memory_edges(rowid, memory.edges or [])
 
-            index = memory.document()
-            self.insert_text_embedding(rowid, index)
-            self.insert_text_fts(rowid, index)
+            if index := memory.document():
+                self.insert_text_embedding(rowid, index)
+                self.insert_text_fts(rowid, index)
             
             for sona in memory.sonas or []:
                 # Link memory to sonas
@@ -1054,7 +1070,7 @@ class DatabaseRW(Database):
             # Memory already exists
             rowid, = cur.execute("""
                 SELECT rowid FROM memories WHERE cid = ?
-            """, (cid.buffer,)).fetchone()
+            """, (cid,)).fetchone()
         else:
             raise RuntimeError(
                 "Failed to insert memory, it may already exist."
@@ -1062,6 +1078,28 @@ class DatabaseRW(Database):
         
         return rowid
     
+    def register_file(self, 
+            cid: CID,
+            filename: str, 
+            mimetype: str,
+            filesize: int,
+            overhead: int
+        ) -> int:
+        '''
+        Insert a file into the database. This is used for files that are not
+        linked to any memory, such as images or other media.
+        '''
+        cur = self.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO files (
+                cid, filename, mimetype, filesize, overhead
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (cid, filename, mimetype, filesize, overhead))
+        
+        if rowid := cur.lastrowid:
+            return rowid
+        raise RuntimeError("Failed to insert file, it may already exist.")
+
     def insert_act(self,
             cid: Optional[CIDv1],
             sona_id: int,

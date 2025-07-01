@@ -3,13 +3,17 @@ from functools import cached_property
 from typing import IO, Callable, Iterable, Literal, Optional, override
 import os
 
-from . import ipld
+from ipld import dagcbor, dagjson
+from ipld._common import IPLData
+
+from . import ipld, multibase
 
 from .dagpb import PBLink, PBNode
 from .unixfs import Data
 from .multihash import multihash
 from .cid import CID, CIDv0, CIDv1, Codec
 from .car import CARv2Index, carv1_iter, carv2_iter
+from ipld import dagpb
 
 class CIDResolveError(Exception):
     """Raised when a CID cannot be resolved to a node."""
@@ -66,16 +70,58 @@ class FileNode(DAGPBNode):
         )
         self.size = size
 
+def dag_load(codec: Codec, block: bytes) -> IPLData:
+    """
+    Parse a block of data into its IPLD model based on the codec.
+    If a CID is provided, it will be used to determine the codec.
+    """
+    match codec:
+        case 'dag-pb':
+            node = dagpb.unmarshal(block)
+            return {
+                'Links': [{
+                    'Name': link.Name,
+                    'Hash': CID(link.Hash),
+                    'Size': link.ByteSize()
+                } for link in node.Links],
+                'Data': node.Data
+            }
+        case 'dag-cbor': return dagcbor.unmarshal(block)
+        case 'dag-json': return dagjson.unmarshal(block)
+
+        case _:
+            raise NotImplementedError(f"Unsupported codec: {codec}")
+
+def dag_dump(codec: Codec, node: IPLData) -> str|bytes:
+    """
+    Serialize an IPLD node into bytes based on the codec.
+    If a CID is provided, it will be used to determine the codec.
+    """
+    
+    match codec:
+        case 'dag-pb': return dagpb.marshal(node)
+        case 'dag-cbor': return dagcbor.marshal(node)
+        case 'dag-json': return dagjson.marshal(node)
+
+        case _:
+            raise NotImplementedError(f"Unsupported codec: {codec}")
+
 class Blocksource(ABC):
     @abstractmethod
-    def dag_has(self, cid: CID) -> bool:
+    def block_has(self, cid: CID) -> bool:
         """Check if the node has a local copy of the block."""
         pass
 
     @abstractmethod
-    def dag_get(self, cid: CID) -> Optional[bytes]:
+    def block_get(self, cid: CID) -> Optional[bytes]:
         """Retrieve a block from the IPFS DAG by its CID."""
         pass
+
+    def dag_get(self, cid: CID) -> IPLData:
+        """Retrieve a DAG node by its CID and return its IPLD model."""
+        if (block := self.block_get(cid)) is None:
+            raise CIDResolveError(cid)
+        return dag_load(cid.codec, block)
 
     def dag_export(self,
             cid: CID,
@@ -88,7 +134,7 @@ class Blocksource(ABC):
 
         # Iterate over *whole blocks* rather than just the data as in dag_cat
         def iter_blocks(cid: CID):
-            if (block := self.dag_get(cid)) is None:
+            if (block := self.block_get(cid)) is None:
                 raise CIDResolveError(cid)
             
             yield block
@@ -108,23 +154,46 @@ class Blocksource(ABC):
         else:
             raise ValueError("Unsupported CAR version, must be 1 or 2")
     
-    def ipfs_cat(self, cid: CID) -> Iterable[bytes]:
+    def ipfs_cat(self,
+            cid: CID,
+            offset: int=0,
+            length: Optional[int]=None
+        ) -> Iterable[bytes]:
         """
         Concatenate the data of a FileNode from its CID. This yields whole
         blocks of data, not arbitrary chunks.
         """
-        node_data = self.dag_get(cid)
+        if length is not None and length <= 0:
+            return
+
+        node_data = self.block_get(cid)
         if node_data is None:
             raise CIDResolveError(cid)
         
-        node = DAGPBNode()
+        node = PBNode()
         node.ParseFromString(node_data)
+        data = Data()
+        data.ParseFromString(node.Data)
         
         if node.HasField('Data'):
-            yield node.Data
+            yield node.Data[offset:][:length]
         else:
-            for link in node.Links:
-                yield from self.ipfs_cat(CIDv0(link.Hash))
+            for size, link in zip(data.blocksizes, node.Links):
+                # Skip until we reach the offset
+                if offset >= size:
+                    offset -= size
+                    continue
+                
+                yield from self.ipfs_cat(CID(link.Hash), offset, length)
+                
+                # No more offset from this point
+                offset = 0
+
+                # Length upkeep
+                if length is not None:
+                    length -= size
+                    if length <= 0:
+                        break # Early break when we're done
 
 type ChunkingStrategy = Callable[[IO[bytes]], Iterable[bytes]]
 """Strategy for chunking a stream into smaller parts."""
@@ -136,54 +205,70 @@ def chunker_size(size: int=256*1024):
             yield chunk
     return chunking_strategy
 
-type ShardingStrategy = Callable[[CID], str]
-"""Determine the sharded path for a given CID."""
+class ShardingStrategy(ABC):
+    @abstractmethod
+    def name(self) -> str:
+        """Return the name of the sharding strategy."""
 
-def shard_last2(cid: CID) -> str:
+    @abstractmethod
+    def shard(self, cid: CID) -> str:
+        """Determine the sharded path for a given CID."""
+
+class ShardLast(ShardingStrategy):
     """
-    Sharding strategy that uses the last two characters of the CID's hex
+    Sharding strategy that uses the next-to-last N characters of the CID's
     representation to determine the path.
     """
-    enc = str(cid)
-    return f"{enc[-2:]}/{enc}"
+    def __init__(self, last: int = 2, encoding: multibase.Encoding = 'base32padupper'):
+        self.last = last
+        self.encoding: multibase.Encoding = encoding
+    
+    def name(self) -> str:
+        return f"/next-to-last/{self.last}"
+    
+    def shard(self, cid: CID) -> str:
+        # Since Kubo v0.12 only the multihash is sharded
+        enc = multibase.encode(self.encoding, cid.multihash.buffer)
+        # [:-1] because next-to-last, not last (better entropy in base32)
+        return f"{enc[:-1][-self.last:]}/{enc}.data"
 
 class Blockstore(Blocksource):
     @abstractmethod
-    def dag_put(self, block: bytes, *, codec: Codec='dag-cbor', function: str='sha2-256') -> CID:
+    def block_put(self, block: bytes, *, codec: Codec='dag-cbor', function: str='sha2-256') -> CID:
         """Store a block in the IPFS DAG and return its CID."""
         pass
     
     def ipfs_put(self, data: bytes) -> RawBlockLink|DAGPBNode:
         """
-        Given a raw block, store it in the IPFS DAG and return its CID.
+        Given a raw block, store it in the IPFS DAG and return its block.
         This allows subclasses to override the behavior of how blocks are
-        stored in IPFS. Use raw-leaves by default.
+        stored in IPFS. Uses raw-leaves by default.
         """
-        return RawBlockLink(self.dag_put(data, codec='dag-pb'), len(data))
+        return RawBlockLink(self.block_put(data, codec='dag-pb'), len(data))
 
     def ipfs_add(self, stream: IO[bytes], *, chunker: ChunkingStrategy=chunker_size()) -> CID:
         """Add a file to the IPFS DAG from a stream."""
         
-        return self.dag_put(FileNode(
+        return self.block_put(FileNode(
             map(self.ipfs_put, chunker(stream))
         ).SerializeToString())
 
 class FlatfsBlockstore(Blockstore):
-    def __init__(self, root: str, sharding: ShardingStrategy = shard_last2):
+    def __init__(self, root: str, sharding: ShardingStrategy = ShardLast(2)):
         self.root = root
         self.sharding = sharding
     
     def build_path(self, cid: CID) -> str:
         """Build the full path for a CID in the flatfs."""
-        return os.path.join(self.root, self.sharding(cid))
+        return os.path.join(self.root, self.sharding.shard(cid))
     
     @override
-    def dag_has(self, cid: CID) -> bool:
+    def block_has(self, cid: CID) -> bool:
         """Check if the block with the given CID exists in the flatfs."""
         return os.path.exists(self.build_path(cid))
 
     @override
-    def dag_put(self, block: bytes, *, codec: Codec='dag-cbor', function: str='sha2-256') -> CID:
+    def block_put(self, block: bytes, *, codec: Codec='dag-cbor', function: str='sha2-256') -> CID:
         """Store a block in the flatfs and return its CID."""
         mh = multihash(function, block)
         cid = CIDv0(mh) if codec == 'dag-pb' else CIDv1(codec, mh)
@@ -194,7 +279,7 @@ class FlatfsBlockstore(Blockstore):
         return cid
 
     @override
-    def dag_get(self, cid: CID) -> Optional[bytes]:
+    def block_get(self, cid: CID) -> Optional[bytes]:
         """Retrieve a block from the flatfs by its CID."""
         try:
             with open(self.build_path(cid), "rb") as f:
@@ -207,14 +292,14 @@ class CompositeBlocksource(Blocksource):
         self.sources = sources
     
     @override
-    def dag_has(self, cid: CID) -> bool:
+    def block_has(self, cid: CID) -> bool:
         """Check if any source has the block."""
-        return any(src.dag_has(cid) for src in self.sources)
+        return any(src.block_has(cid) for src in self.sources)
 
     @override
-    def dag_get(self, cid: CID) -> Optional[bytes]:
+    def block_get(self, cid: CID) -> Optional[bytes]:
         """Retrieve a block from the first source that has it."""
         for source in self.sources:
-            if (block := source.dag_get(cid)) is not None:
+            if (block := source.block_get(cid)) is not None:
                 return block
         return None

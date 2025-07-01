@@ -1,8 +1,9 @@
-from src.server import app, ipfs_gateway, ipfs_api, rest_app, mcp
+from src.server import app, ipfs_gateway, ipfs_api, rest_api, mcp
 
 mcp_app = mcp.http_app()
 app.mount("/ipfs", ipfs_gateway)
-app.mount("/api", rest_app)
+app.mount("/api/v0", ipfs_api)
+app.mount("/api", rest_api)
 
 # Nothing can be mounted after this
 app.mount("", mcp_app)

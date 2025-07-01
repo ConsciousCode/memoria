@@ -108,7 +108,11 @@ CREATE TABLE IF NOT EXISTS acthreads (
  * Root CIDs of the IPFS files stored in the flatfs blockstore.
 **/
 CREATE TABLE IF NOT EXISTS ipfs_files (
-    cid BLOB PRIMARY KEY
+    cid BLOB PRIMARY KEY,
+    filename TEXT, /* filename at time of upload */
+    mimetype TEXT NOT NULL,
+    filesize INTEGER NOT NULL,
+    overhead INTEGER NOT NULL /* Total size of the file including IPFS overhead */
 );
 
 -------------

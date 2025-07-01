@@ -112,3 +112,6 @@ advance llm input = do
 
 1. Generative Agents: Interactive Simulacra of Human Behavior. https://arxiv.org/abs/2304.03442  
 2. Memory‑Augmented Neural Networks. https://arxiv.org/abs/1605.06065  
+
+## TODO
+- Eventually need to implement bitswap to give IPFS nodes access to memories.

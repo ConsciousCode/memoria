@@ -5,6 +5,7 @@ MCP Server for Memoria
 from datetime import datetime
 from typing import Annotated, Iterable, Optional, override
 from uuid import UUID
+import base64
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ResourceError, ToolError
@@ -42,9 +43,10 @@ DEFAULT_CHAT_CONFIG = SampleConfig(
 )
 
 class MCPEmulator(ServerEmulator):
-    def __init__(self, context: Context, memoria: Memoria):
-        super().__init__(memoria)
+    def __init__(self, context: Context, state: AppState):
+        super().__init__(state.memoria)
         self.context = context
+        self.state = state
 
     @override
     async def sample(self,
@@ -107,6 +109,36 @@ def memory_resource(ctx: Context, cid: CIDv1):
         openWorldHint=False
     )
 )
+async def upload(
+        ctx: Context,
+        file: Annotated[
+            str,
+            Field(description="File to upload encoded as a base64 string.")
+        ],
+        filename: Annotated[
+            Optional[str],
+            Field(description="Filename to use for the uploaded file. If `null`, uses the default filename.")
+        ] = None,
+        content_type: Annotated[
+            Optional[str],
+            Field(description="Content type of the file.")
+        ] = None
+    ):
+    '''
+    Upload a file to the local block store and return its CID.
+    '''
+    state = mcp_state(ctx)
+    emu = MCPEmulator(ctx, state)
+    return emu.state.memoria.upload_file(
+        base64.b64decode(file)
+    )
+
+@mcp.tool(
+    annotations=dict(
+        idempotentHint=True,
+        openWorldHint=False
+    )
+)
 async def insert(
         ctx: Context,
         memory: Annotated[
@@ -124,7 +156,7 @@ async def insert(
     ):
     '''Insert a new memory into the sona.'''
     state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state.memoria)
+    emu = MCPEmulator(ctx, state)
     return await emu.insert(memory, recall_config, annotate_config)
 
 @mcp.tool(
@@ -149,7 +181,7 @@ async def recall(
     and their dependencies.
     '''
     state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state.memoria)
+    emu = MCPEmulator(ctx, state)
     g = await emu.recall(prompt, recall_config)
     return dict(g.items())
 
@@ -180,7 +212,7 @@ async def query(
     ):
     '''Single-turn conversation returning the response.'''
     state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state.memoria)
+    emu = MCPEmulator(ctx, state)
 
     return await emu.query(
         prompt,
@@ -231,7 +263,7 @@ async def chat(
     Single-turn conversation returning the response. This is committed to memory.
     '''
     state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state.memoria)
+    emu = MCPEmulator(ctx, state)
     return await emu.chat(
         prompt,
         system_prompt or CHAT_PROMPT,
@@ -261,7 +293,7 @@ def act_push(
     (Autonomous Cognitive Thread).
     '''
     state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state.memoria)
+    emu = MCPEmulator(ctx, state)
     if u := emu.act_push(sona, memories):
         return u
     raise ToolError("Sona not found or prompt memory not found.")

@@ -135,7 +135,7 @@ def _upper[T: DigitCodec](codec: T) -> T:
     nc.__dict__.update(codec.__dict__)
     nc.code = codec.code.upper()
     nc.digits = codec.digits.upper()
-    return codec
+    return nc
 
 def _pad[T: DigitCodec](code: str, codec: T, padding: str) -> T:
     """Returns a new codec with specified padding."""
@@ -239,6 +239,7 @@ type Encoding = Literal[
     'base36', 'base36upper', 'base45', 'base58btc', 'base58flickr',
     'base64', 'base64pad', 'base64url', 'base64urlpad'
 ]
+'''Valid multibase encodings.'''
 
 def codec(name: Encoding) -> Codec:
     """Returns the codec used to encode the given data"""

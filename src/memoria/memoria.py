@@ -9,7 +9,7 @@ from uuid import UUID
 
 from ipld.cid import CID
 
-from .db import Database
+from .db import Database, FileRow
 
 from src.ipld import CIDv1
 from src.models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, RecallConfig, Sona, StopReason
@@ -31,26 +31,34 @@ class Memoria(Blocksource):
         self.db = db
     
     @override
-    def dag_has(self, cid: CID) -> bool:
-        """
-        Check if the block exists in the database. Does not include files.
-        """
+    def block_has(self, cid: CID) -> bool:
         return isinstance(cid, CIDv1) and self.db.has_cid(cid)
 
     @override
-    def dag_get(self, cid: CID) -> Optional[bytes]:
-        """
-        Retrieve a block from the IPFS DAG by its CID. Does not fetch files.
-        """
+    def block_get(self, cid: CID) -> Optional[bytes]:
         if not isinstance(cid, CIDv1):
             return None
-        
-        data = self.lookup_memory(cid) or self.lookup_act(cid)
-        if data is None:
-            return None
-        
-        return data.as_block()
+        data = (
+            self.db.lookup_ipld_memory(cid) or
+            self.db.lookup_ipld_act(cid)
+        )
+        return data and data.as_block()
     
+    def register_file(self,
+            cid: CID,
+            filename: str,
+            mimetype: str,
+            filesize: int,
+            overhead: int
+        ):
+        '''
+        Register a file in the database.
+        
+        This is used to register files that are uploaded to the system.
+        '''
+        with self.db.transaction() as db:
+            db.register_file(cid, filename, mimetype, filesize, overhead)
+
     def lookup_memory(self, cid: CID) -> Optional[Memory]:
         if isinstance(cid, CIDv1):
             return self.db.lookup_ipld_memory(cid)
@@ -58,6 +66,9 @@ class Memoria(Blocksource):
     def lookup_act(self, cid: CID) -> Optional[ACThread]:
         if isinstance(cid, CIDv1):
             return self.db.lookup_ipld_act(cid)
+
+    def lookup_file(self, cid: CID) -> Optional[FileRow]:
+        return self.db.lookup_ipld_file(cid)
 
     def insert(self, memory: AnyMemory):
         '''Append a memory to the sona file.'''

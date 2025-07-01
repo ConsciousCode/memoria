@@ -7,6 +7,7 @@ from mcp.types import ModelPreferences, Role
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
 
+from ipld.cid import CID
 from src.graph import IGraph
 from src.ipld import dagcbor, CIDv1, cidhash
 
@@ -156,16 +157,13 @@ class BaseMemory(BaseModel):
     
     class FileData(BaseModel):
         kind: Literal["file"] = "file"
-        name: Annotated[Optional[str],
-            Field(description="Name of the file at time of upload, if available.")
-        ] = None
-        content: Annotated[str,
-            Field(description="Base64 encoded file contents.")
-        ]
-        mimeType: Optional[str] = None
+        file: CID
+        filename: Optional[str] = None
+        mimetype: str
+        filesize: int
 
-        def document(self):
-            return self.content
+        def document(self): # ???
+            return None# self.content
     
     type MemoryData = Annotated[
         SelfData | OtherData | TextData | FileData,
@@ -185,7 +183,7 @@ class BaseMemory(BaseModel):
         description="Sonas the memory belongs to."
     )
 
-    def document(self) -> str:
+    def document(self) -> Optional[str]:
         return self.data.document()
 
     @overload
