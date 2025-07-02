@@ -1,7 +1,7 @@
 from typing import Iterable
 
 from . import dagcbor, dagjson, dagpb
-from ._common import IPLData
+from ._common_ipld import IPLData
 from .cid import CID
 
 def iter_python_links(data: IPLData) -> Iterable[CID]:

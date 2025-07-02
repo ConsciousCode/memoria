@@ -7,7 +7,7 @@ import re
 from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, Role, TextContent
 
-from ._common import Emulator, EdgeAnnotation, QueryResult
+from ._common_emu import Emulator, EdgeAnnotation, QueryResult
 from src.prompts import ANNOTATE_EDGES
 from src.ipld import CIDv1
 from src.models import AnyMemory, CompleteMemory, DraftMemory, IncompleteMemory, Memory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig

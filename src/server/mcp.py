@@ -14,7 +14,7 @@ from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, PromptMessage, TextContent
 from pydantic import Field
 
-from ._common import AppState, mcp_lifespan
+from ._common_server import AppState, mcp_lifespan
 from src.ipld import CIDv1
 from src.ipld.ipfs import CIDResolveError
 from src.memoria import Memoria

@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS memories (
     timestamp REAL,
     kind TEXT NOT NULL CHECK (kind IN ('self', 'other', 'text', 'file')),
     data JSONB NOT NULL,
+    metadata JSONB,
     importance REAL
 );
 

@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import FastAPI, Header, Query, Request, Response, UploadFile
 
-from ._common import AppState, subapp_lifespan
+from ._common_server import AppState, subapp_lifespan
 from src.ipld import dagcbor, CIDv1
 
 rest_api = FastAPI(

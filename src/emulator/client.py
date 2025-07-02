@@ -10,7 +10,7 @@ from fastmcp.client.client import Client
 from mcp.types import TextContent
 from pydantic import BaseModel, TypeAdapter
 
-from ._common import EdgeAnnotation, Emulator, QueryResult
+from ._common_emu import EdgeAnnotation, Emulator, QueryResult
 from src.models import CompleteMemory, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
 
 class ClientEmulator(Emulator):

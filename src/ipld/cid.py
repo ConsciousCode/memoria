@@ -4,7 +4,7 @@ from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import core_schema
 
-from ._common import Immutable
+from ._common_ipld import Immutable
 
 from .multihash import BaseMultihash, Multihash, multihash
 from . import multibase, multicodec
@@ -266,8 +266,7 @@ class CID(Immutable):
             """Validate and convert input to a CID object."""
             if isinstance(value, CID):
                 return value
-            try:
-                return cls(value)
+            try: return cls(value)
             except Exception as e:
                 raise ValueError(f"Invalid CID: {value!r}") from e
 
@@ -321,10 +320,9 @@ class CIDv0(CID):
     def __new__(cls, data: 'str|bytes|BaseMultihash|CID', /) -> 'CIDv0':
         if isinstance(data, BaseMultihash):
             return super().__new__(cls, 0, "dag-pb", data.buffer)
-        else:
-            self = super().__new__(cls, data)
-            if isinstance(self, CIDv0):
-                return self
+        self = super().__new__(cls, data)
+        if isinstance(self, CIDv0):
+            return self
         raise TypeError(f"Expected CIDv0, got {type(self).__name__}")
     
     def __init__(self, data: 'str|bytes|BaseMultihash|CIDv0|CIDv1', /):
@@ -332,8 +330,8 @@ class CIDv0(CID):
             # CIDv0(c := CIDv0()) is c
             if not hasattr(self, 'buffer'):
                 super().__init__(data.buffer)
-            return
-        super().__init__(self.normalize(data))
+        else:
+            super().__init__(self.normalize(data))
 
     def __repr__(self):
         return f"CIDv0({self.multihash!r})"
@@ -533,12 +531,7 @@ class CIDv1(CID):
             core_schema.is_instance_schema(CIDv1),
             # Accept strings that can be converted to CIDv1
             core_schema.no_info_after_validator_function(
-                validate_cidv1,
-                core_schema.str_schema(
-                    pattern=r'^b[a-z2-7]+$',
-                    min_length=62,
-                    max_length=64,
-                )
+                validate_cidv1, core_schema.str_schema()
             )
         ], serialization=core_schema.plain_serializer_function_ser_schema(
             str, return_schema=core_schema.str_schema(),
@@ -556,7 +549,6 @@ class CIDv1(CID):
         json_schema.update({
             'type': 'string',
             'format': 'cidv1',
-            'pattern': r'^b[a-z2-7]+$',
             'minLength': 62,
             'maxLength': 64,
             'description': 'Content Identifier (CID) version 1 - a self-describing content-addressed identifier',

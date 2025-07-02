@@ -1,6 +1,6 @@
 from datetime import datetime
 from functools import cached_property
-from typing import Annotated, Iterable, Literal, Optional, overload, override
+from typing import Annotated, Any, Iterable, Literal, Optional, overload, override
 from uuid import UUID
 
 from mcp.types import ModelPreferences
@@ -162,7 +162,7 @@ class BaseMemory(BaseModel):
         filesize: int
 
         def document(self): # ???
-            return None# self.content
+            return "" # self.content
     
     type MemoryData = Annotated[
         SelfData | OtherData | TextData | FileData,
@@ -170,6 +170,10 @@ class BaseMemory(BaseModel):
     ]
 
     data: MemoryData
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Metadata about the memory, no schema provided."
+    )
     timestamp: Optional[int] = None
     importance: Optional[float] = Field(
         default=None,
@@ -263,8 +267,11 @@ class IncompleteMemory(DraftMemory):
         '''Complete the memory by adding edges and returning a Memory object.'''
         return Memory(
             data=self.data,
+            metadata=self.metadata,
             timestamp=self.timestamp,
-            edges=self.edges
+            edges=self.edges,
+            importance=self.importance,
+            sonas=self.sonas
         )
 
 class PartialMemory(DraftMemory):
@@ -292,9 +299,12 @@ class Memory(NodeMemory, IPLDModel):
         '''Return a PartialMemory with the same data and edges, but without the CID.'''
         return PartialMemory(
             data=self.data,
+            metadata=self.metadata,
             timestamp=self.timestamp,
             edges=self.edges,
-            cid=self.cid
+            cid=self.cid,
+            importance=self.importance,
+            sonas=self.sonas
         )
 
 '''A memory which may or may not have a CID.'''

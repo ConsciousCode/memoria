@@ -3,7 +3,7 @@ from typing import Literal, Optional, Self, overload
 import hashlib
 
 from . import varint, multibase
-from ._common import Immutable
+from ._common_ipld import Immutable
 
 __all__ = (
     "HASH_CODES", "CODE_HASHES",

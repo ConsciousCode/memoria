@@ -3,6 +3,7 @@ from typing import Callable, Iterable, Optional, Protocol, cast, overload
 import sqlite3
 from uuid import UUID
 import os
+import json
 
 from pydantic import BaseModel
 from numpy import ndarray
@@ -73,13 +74,14 @@ class BaseMemoryRow(BaseModel):
     timestamp: Optional[int]
     kind: MemoryKind
     data: JSONB
+    metadata: Optional[JSONB]
     importance: Optional[float]
 
     @classmethod
-    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'AnyMemoryRow':
+    def factory(cls, rowid, cid, timestamp, kind, data, metadata, importance) -> 'AnyMemoryRow':
         '''Create a MemoryRow from a raw database row.'''
         return (MemoryRow if cid else IncompleteMemoryRow).factory(
-            rowid, cid, timestamp, kind, data, importance
+            rowid, cid, timestamp, kind, data, metadata, importance
         )
 
 class MemoryRow(BaseMemoryRow):
@@ -87,7 +89,7 @@ class MemoryRow(BaseMemoryRow):
     cid: CIDv1
 
     @classmethod
-    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'MemoryRow':
+    def factory(cls, rowid, cid, timestamp, kind, data, metadata, importance) -> 'MemoryRow':
         '''Create a MemoryRow from a raw database row.'''
         if timestamp and not timestamp.is_integer():
             raise TypeError("Timestamp must be an integer.")
@@ -97,6 +99,7 @@ class MemoryRow(BaseMemoryRow):
             timestamp=timestamp,
             kind=kind,
             data=data,
+            metadata=metadata,
             importance=importance
         )
     
@@ -109,27 +112,45 @@ class MemoryRow(BaseMemoryRow):
     
     def to_incomplete(self, edges: list[Edge[CIDv1]] = []):
         '''Convert this row to an IncompleteMemory object.'''
+        if (md := self.metadata) is not None:
+            md = json.loads(md)
+        else:
+            md = {}
         return IncompleteMemory(
             data=IncompleteMemory.build_data(self.kind, self.data),
+            metadata=md,
             timestamp=self.timestamp,
-            edges=edges
+            edges=edges,
+            importance=self.importance
         )
     
     def to_partial(self, edges: list[Edge[CIDv1]] = []):
         '''Convert this row to a Memory object without finalizing it.'''
+        if (md := self.metadata) is not None:
+            md = json.loads(md)
+        else:
+            md = {}
         return PartialMemory(
             cid=self.cid,
             data=Memory.build_data(self.kind, self.data),
+            metadata=md,
             timestamp=self.timestamp,
-            edges=edges
+            edges=edges,
+            importance=self.importance
         )
     
     def to_memory(self, edges: list[Edge[CIDv1]]):
         '''Convert this row to a Memory object.'''
+        if (md := self.metadata) is not None:
+            md = json.loads(md)
+        else:
+            md = {}
         return Memory(
             data=Memory.build_data(self.kind, self.data),
             timestamp=self.timestamp,
-            edges=edges
+            metadata=md,
+            edges=edges,
+            importance=self.importance
         )
 
 class IncompleteMemoryRow(BaseMemoryRow):
@@ -137,7 +158,7 @@ class IncompleteMemoryRow(BaseMemoryRow):
     cid: None = None
 
     @classmethod
-    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'IncompleteMemoryRow':
+    def factory(cls, rowid, cid, timestamp, kind, data, metadata, importance) -> 'IncompleteMemoryRow':
         '''Create an IncompleteMemoryRow from a raw database row.'''
         return IncompleteMemoryRow(
             rowid=rowid,
@@ -145,6 +166,7 @@ class IncompleteMemoryRow(BaseMemoryRow):
             timestamp=timestamp,
             kind=kind,
             data=data,
+            metadata=metadata,
             importance=importance
         )
     
@@ -154,17 +176,29 @@ class IncompleteMemoryRow(BaseMemoryRow):
     
     def to_incomplete(self, edges: list[Edge[CIDv1]] = []):
         '''Convert this row to an IncompleteMemory object.'''
+        if (md := self.metadata) is not None:
+            md = json.loads(md)
+        else:
+            md = {}
         return IncompleteMemory(
             data=IncompleteMemory.build_data(self.kind, self.data),
+            metadata=md,
             timestamp=self.timestamp,
-            edges=edges
+            edges=edges,
+            importance=self.importance
         )
 
     def to_memory(self, edges: list[Edge[CIDv1]]):
+        if (md := self.metadata) is not None:
+            md = json.loads(md)
+        else:
+            md = {}
         return IncompleteMemory(
             data=IncompleteMemory.build_data(self.kind, self.data),
+            metadata=md,
             timestamp=self.timestamp,
-            edges=edges
+            edges=edges,
+            importance=self.importance
         )
 
 type AnyMemoryRow = MemoryRow | IncompleteMemoryRow
@@ -343,7 +377,9 @@ class Database:
         '''Lookup an IPLD memory object by CID, returning its IPLD model.'''
         cur = self.cursor(MemoryRow)
         mem: Optional[MemoryRow] = cur.execute("""
-            SELECT rowid, cid, timestamp, kind, JSON(data), importance
+            SELECT
+                rowid, cid, timestamp, kind,
+                JSON(data), JSON(metadata), importance
             FROM memories
             WHERE cid = ?
         """, (cid.buffer,)).fetchone()
@@ -505,14 +541,18 @@ class Database:
     def select_memory_rowid(self, rowid: int) -> Optional[AnyMemoryRow]:
         cur = self.cursor(BaseMemoryRow)
         return cur.execute("""
-            SELECT rowid, cid, timestamp, kind, JSON(data), importance
+            SELECT
+                rowid, cid, timestamp, kind,
+                JSON(data), JSON(metadata), importance
             FROM memories WHERE rowid = ?
         """, (rowid,)).fetchone()
     
     def select_memory_cid(self, cid: CIDv1) -> Optional[MemoryRow]:
         cur = self.cursor(MemoryRow)
         return cur.execute("""
-            SELECT rowid, cid, timestamp, kind, JSON(data), importance
+            SELECT
+                rowid, cid, timestamp, kind,
+                JSON(data), JSON(metadata), importance
             FROM memories WHERE cid = ?
         """, (cid.buffer,)).fetchone()
 
@@ -559,7 +599,7 @@ class Database:
         row = cur.execute("""
             SELECT
                 a1.rowid, a1.cid, -- IncompleteACThread
-                m.timestamp, m.kind, m.data, -- IncompleteMemory
+                m.timestamp, m.kind, m.data, m.metadata, -- IncompleteMemory
                 s.cid, a2.cid -- {Sona, Previous} CID
             FROM acthreads a1
                 JOIN acthreads a2 ON a1.prev_id = a2.rowid
@@ -573,16 +613,18 @@ class Database:
         
         (
             a1_rowid, a1_cid, # IncompleteACThread
-            m_timestamp, m_kind, m_data, # IncompleteMemory
+            m_timestamp, m_kind, m_data, m_md, # IncompleteMemory
             s_cid, a2_cid # {Sona, Previous} CID
         ) = row
         # Just to double-check that this is actually an incomplete ACT
         if a1_cid is not None:
             raise ValueError(f"ACT with rowid {a1_rowid} already has a CID: {a1_cid}")
+        
         return IncompleteACThread(
             sona=UUID(bytes=s_cid),
             memory=IncompleteMemory(
                 data=IncompleteMemory.build_data(m_kind, m_data),
+                metadata={} if m_md is None else json.loads(m_md),
                 timestamp=m_timestamp,
                 edges=[
                     Edge(target=e.target.cid, weight=e.weight)
@@ -696,7 +738,9 @@ class Database:
         '''List messages in the database, paginated.'''
         cur = self.cursor(MemoryRow)
         cur.execute("""
-            SELECT rowid, cid, timestamp, kind, JSON(data), importance
+            SELECT
+                rowid, cid, timestamp, kind,
+                JSON(data), JSON(metadata), importance
             FROM memories
             ORDER BY rowid DESC
             LIMIT ? OFFSET ?
@@ -829,7 +873,8 @@ class DatabaseRW(Database):
                     WHERE embedding MATCH :sona_e AND k = :k
                 )
             SELECT
-                m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance,
+                m.rowid, m.cid, m.timestamp, m.kind,
+                JSON(m.data), JSON(m.metadata), m.importance,
                 (
                     IFNULL(:w_importance * m.importance, 0) +
                     IFNULL(:w_recency * POWER(

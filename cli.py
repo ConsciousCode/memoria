@@ -14,7 +14,7 @@ from pydantic_ai.providers import Provider
 from tqdm import tqdm
 
 from src.ipld import CIDv1
-from src.models import AnyMemory, Edge, IncompleteMemory, InsertConvo, InsertMemory, Memory, RecallConfig, SampleConfig
+from src.models import AnyMemory, Edge, IncompleteMemory, InsertConvo, InsertMemory, RecallConfig, SampleConfig
 from src.emulator.client import ClientEmulator
 
 if TYPE_CHECKING:
@@ -101,6 +101,10 @@ class Config(BaseModel):
                 for model, profile in models.items()
         }
 
+
+
+
+
 def unpack[*A](args: Iterable[str], *defaults: *A) -> tuple[str, ...]|tuple[*A]:
     '''Unpack rest arguments with defaults and proper typing.'''
     return (*args, *defaults)[:len(defaults)] # type: ignore
@@ -177,8 +181,7 @@ def argparse(argv: tuple[str, ...], config: dict[str, bool|int|type[int]|str|typ
                 elif isinstance(t, int) or t is int:
                     if val is None:
                         val = named_value(arg, it)
-                    try:
-                        opts[name] = int(val)
+                    try: opts[name] = int(val)
                     except ValueError:
                         raise ValueError(f"Expected an integer after {arg!r}") from None
                 elif isinstance(t, str) or t is str:
@@ -380,15 +383,10 @@ class MemoriaApp:
         self.config = config or CONFIG
     
     def tagname(self, memory: AnyMemory):
-        match memory.data:
-            case Memory.SelfData():
-                return "assistant"
-            
-            case Memory.OtherData():
-                return "user"
-            
-            case _:
-                return memory.data.kind
+        match memory.data.kind:
+            case "self": return "assistant"
+            case "other": return "user"
+            case kind: return kind
 
     def print_memory(self, memory: AnyMemory, refs: dict[CIDv1, int], verbose=True, extra=True):
         """Print a message to the user."""
@@ -475,10 +473,11 @@ class MemoriaApp:
         usage: python cli.py cmd ...
         
         Commands:
-          query [query]     Talk to the agent without creating memories.
-          chat [message]    Single-turn conversation with the agent. (default)
-          recall [search]   Recall a chat log from the agent's memory.
-          help              Show this help message.
+          import [sona] [file]  Load messages exported from an AI provider.
+          query [query]         Talk to the agent without creating memories.
+          chat [message]        Single-turn conversation with the agent. (default)
+          recall [search]       Recall a chat log from the agent's memory.
+          help                  Show this help message.
         """
         
         if what == "":
@@ -490,7 +489,7 @@ class MemoriaApp:
             doc = inspect.cleandoc(self.usage.__doc__ or "")
             doc = f"Unknown subcommand {what!r}\n\n{doc}"
         
-        return doc
+        return doc.format(name=what)
     
     def get_config(self) -> Config:
         import tomllib
@@ -616,7 +615,7 @@ class MemoriaApp:
         ) as client:
             yield ClientEmulator(client)
 
-    async def subcmd_insert(self, *argv: str):
+    async def subcmd_import(self, *argv: str):
         '''
         [-s sona] [file]
 
@@ -628,13 +627,13 @@ class MemoriaApp:
         \x1b[2m```
         InsertMemory | [InsertMemory] | InsertConvo
         InsertMemory = {{
-            kind: "self"|"other",
+            kind: "self" | "other",
             name?: str,
-            timestamp: float|iso8601,
+            timestamp: float | iso8601,
             content: str
         }}
         InsertConvo = {{
-            sona?: (UUID|str)?,
+            sona?: (UUID | str)?,
             prev?: CIDv1?,
             chatlog: [InsertMemory]
         }}
@@ -755,6 +754,9 @@ class MemoriaApp:
             chatlog = await client.chat(
                 prompt=IncompleteMemory(
                     data=IncompleteMemory.TextData(content=message),
+                    metadata={
+                        "source": "cli-chat"
+                    }
                 ),
                 system_prompt=SYSTEM_PROMPT,
                 recall_config=config.recall or RecallConfig(),

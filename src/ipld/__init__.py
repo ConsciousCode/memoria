@@ -1,4 +1,4 @@
-from ._common import IPLData
+from ._common_ipld import IPLData
 from .car import carv1_iter, carv2_iter, carv1, carv2
 from .cid import CID, CIDv0, CIDv1, cidhash
 from .multibase import (
