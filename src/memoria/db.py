@@ -74,14 +74,13 @@ class BaseMemoryRow(BaseModel):
     timestamp: Optional[int]
     kind: MemoryKind
     data: JSONB
-    metadata: Optional[JSONB]
     importance: Optional[float]
 
     @classmethod
-    def factory(cls, rowid, cid, timestamp, kind, data, metadata, importance) -> 'AnyMemoryRow':
+    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'AnyMemoryRow':
         '''Create a MemoryRow from a raw database row.'''
         return (MemoryRow if cid else IncompleteMemoryRow).factory(
-            rowid, cid, timestamp, kind, data, metadata, importance
+            rowid, cid, timestamp, kind, data, importance
         )
 
 class MemoryRow(BaseMemoryRow):
@@ -89,7 +88,7 @@ class MemoryRow(BaseMemoryRow):
     cid: CIDv1
 
     @classmethod
-    def factory(cls, rowid, cid, timestamp, kind, data, metadata, importance) -> 'MemoryRow':
+    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'MemoryRow':
         '''Create a MemoryRow from a raw database row.'''
         if timestamp and not timestamp.is_integer():
             raise TypeError("Timestamp must be an integer.")
@@ -99,7 +98,6 @@ class MemoryRow(BaseMemoryRow):
             timestamp=timestamp,
             kind=kind,
             data=data,
-            metadata=metadata,
             importance=importance
         )
     
@@ -112,13 +110,8 @@ class MemoryRow(BaseMemoryRow):
     
     def to_incomplete(self, edges: list[Edge[CIDv1]] = []):
         '''Convert this row to an IncompleteMemory object.'''
-        if (md := self.metadata) is not None:
-            md = json.loads(md)
-        else:
-            md = {}
         return IncompleteMemory(
             data=IncompleteMemory.build_data(self.kind, self.data),
-            metadata=md,
             timestamp=self.timestamp,
             edges=edges,
             importance=self.importance
@@ -126,14 +119,9 @@ class MemoryRow(BaseMemoryRow):
     
     def to_partial(self, edges: list[Edge[CIDv1]] = []):
         '''Convert this row to a Memory object without finalizing it.'''
-        if (md := self.metadata) is not None:
-            md = json.loads(md)
-        else:
-            md = {}
         return PartialMemory(
             cid=self.cid,
             data=Memory.build_data(self.kind, self.data),
-            metadata=md,
             timestamp=self.timestamp,
             edges=edges,
             importance=self.importance
@@ -141,14 +129,9 @@ class MemoryRow(BaseMemoryRow):
     
     def to_memory(self, edges: list[Edge[CIDv1]]):
         '''Convert this row to a Memory object.'''
-        if (md := self.metadata) is not None:
-            md = json.loads(md)
-        else:
-            md = {}
         return Memory(
             data=Memory.build_data(self.kind, self.data),
             timestamp=self.timestamp,
-            metadata=md,
             edges=edges,
             importance=self.importance
         )
@@ -158,7 +141,7 @@ class IncompleteMemoryRow(BaseMemoryRow):
     cid: None = None
 
     @classmethod
-    def factory(cls, rowid, cid, timestamp, kind, data, metadata, importance) -> 'IncompleteMemoryRow':
+    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'IncompleteMemoryRow':
         '''Create an IncompleteMemoryRow from a raw database row.'''
         return IncompleteMemoryRow(
             rowid=rowid,
@@ -166,36 +149,25 @@ class IncompleteMemoryRow(BaseMemoryRow):
             timestamp=timestamp,
             kind=kind,
             data=data,
-            metadata=metadata,
             importance=importance
         )
     
     def to_maybe(self, edges: list[Edge[CIDv1]] = []) -> DraftMemory:
         '''Convert this row to a MaybeMemory object.'''
-        return self.to_incomplete()
+        return self.to_incomplete(edges)
     
     def to_incomplete(self, edges: list[Edge[CIDv1]] = []):
         '''Convert this row to an IncompleteMemory object.'''
-        if (md := self.metadata) is not None:
-            md = json.loads(md)
-        else:
-            md = {}
         return IncompleteMemory(
             data=IncompleteMemory.build_data(self.kind, self.data),
-            metadata=md,
             timestamp=self.timestamp,
             edges=edges,
             importance=self.importance
         )
 
     def to_memory(self, edges: list[Edge[CIDv1]]):
-        if (md := self.metadata) is not None:
-            md = json.loads(md)
-        else:
-            md = {}
         return IncompleteMemory(
             data=IncompleteMemory.build_data(self.kind, self.data),
-            metadata=md,
             timestamp=self.timestamp,
             edges=edges,
             importance=self.importance
@@ -309,10 +281,8 @@ class Database:
     context manager.
     '''
 
-    def __init__(self, db_path: str=":memory:", file_path: str="files"):
+    def __init__(self, db_path: str=":memory:"):
         self.db_path = db_path
-        self.file_path = file_path
-        print("Hello world")
 
     def __enter__(self):
         conn = self.conn = sqlite3.connect(self.db_path)
@@ -379,7 +349,7 @@ class Database:
         mem: Optional[MemoryRow] = cur.execute("""
             SELECT
                 rowid, cid, timestamp, kind,
-                JSON(data), JSON(metadata), importance
+                JSON(data), importance
             FROM memories
             WHERE cid = ?
         """, (cid.buffer,)).fetchone()
@@ -543,7 +513,7 @@ class Database:
         return cur.execute("""
             SELECT
                 rowid, cid, timestamp, kind,
-                JSON(data), JSON(metadata), importance
+                JSON(data), importance
             FROM memories WHERE rowid = ?
         """, (rowid,)).fetchone()
     
@@ -552,7 +522,7 @@ class Database:
         return cur.execute("""
             SELECT
                 rowid, cid, timestamp, kind,
-                JSON(data), JSON(metadata), importance
+                JSON(data), importance
             FROM memories WHERE cid = ?
         """, (cid.buffer,)).fetchone()
 
@@ -624,7 +594,6 @@ class Database:
             sona=UUID(bytes=s_cid),
             memory=IncompleteMemory(
                 data=IncompleteMemory.build_data(m_kind, m_data),
-                metadata={} if m_md is None else json.loads(m_md),
                 timestamp=m_timestamp,
                 edges=[
                     Edge(target=e.target.cid, weight=e.weight)
@@ -740,7 +709,7 @@ class Database:
         cur.execute("""
             SELECT
                 rowid, cid, timestamp, kind,
-                JSON(data), JSON(metadata), importance
+                JSON(data), importance
             FROM memories
             ORDER BY rowid DESC
             LIMIT ? OFFSET ?
@@ -769,10 +738,6 @@ class DatabaseRW(Database):
         self = DatabaseRW.__new__(DatabaseRW)
         self.__dict__ = db.__dict__
         return self
-
-    def file_lookup(self, mh: str, ext: str):
-        fn, x, yz, rest = mh[:2], mh[2], mh[3:5], mh[5:]
-        return f"{self.file_path}/{fn}/{x}/{yz}/{rest}{ext}"
     
     def index(self, memory_id: int, index: str):
         '''Index a memory with a text embedding.'''
@@ -874,7 +839,7 @@ class DatabaseRW(Database):
                 )
             SELECT
                 m.rowid, m.cid, m.timestamp, m.kind,
-                JSON(m.data), JSON(m.metadata), m.importance,
+                JSON(m.data), m.importance,
                 (
                     IFNULL(:w_importance * m.importance, 0) +
                     IFNULL(:w_recency * POWER(

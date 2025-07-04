@@ -5,9 +5,9 @@ from contextlib import asynccontextmanager
 from typing import IO, Annotated, Literal, Optional, override
 from datetime import datetime
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastmcp import FastMCP
-from pydantic import BaseModel, Field, GetCoreSchemaHandler
+from pydantic import BaseModel, Field, GetCoreSchemaHandler, model_validator
 from pydantic_core import CoreSchema, core_schema
 
 from src.ipld.cid import CID, Codec
@@ -32,20 +32,21 @@ class NotSupportedValidator:
         )
 
 def NOT_SUPPORTED(description: str):
-    return NotSupportedValidator(), Field(
-        description=description + " [NOT SUPPORTED]"
+    return Field(
+        description=description + " [NOT SUPPORTED]",
+        not_supported=True # type: ignore
     )
 
 class AddParameters(BaseModel):
     """Kubo /api/v0/add parameters with validation"""
     recursive: Annotated[
-        bool, *NOT_SUPPORTED('Add directory paths recursively.')
+        bool, NOT_SUPPORTED('Add directory paths recursively.')
     ] = False
     wrap_with_directory: Annotated[
-        bool, *NOT_SUPPORTED('wrap_with_directory')
+        bool, NOT_SUPPORTED('wrap_with_directory')
     ] = False
     pin: Annotated[
-        bool, *NOT_SUPPORTED("Pin locally to protect from GC.")
+        bool, NOT_SUPPORTED("Pin locally to protect from GC.")
     ] = False
     progress: Annotated[
         bool, Field(description="Stream progress data.")
@@ -63,7 +64,7 @@ class AddParameters(BaseModel):
         bool, Field(description="Only chunk and hash.")
     ] = False
     trickle: Annotated[
-        bool, *NOT_SUPPORTED("Use trickle-dag format.")
+        bool, NOT_SUPPORTED("Use trickle-dag format.")
     ] = False
     raw_leaves: Annotated[
         bool, Field(description="Use raw blocks for leaves.")
@@ -80,6 +81,20 @@ class AddParameters(BaseModel):
     mtime: Annotated[
         Optional[int], Field(description="File modification time in seconds since epoch.")
     ] = None
+
+    @model_validator(mode="after")
+    def check_not_supported_fields(self):
+        for name, field in AddParameters.model_fields.items():
+            extra = field.json_schema_extra
+            if callable(extra):
+                continue
+            if extra and extra.get("not_supported"):
+                value = getattr(self, name)
+                default = field.default
+                # If the value is not the default, raise error
+                if value != default:
+                    raise UnsupportedError(f"Field '{name}' is not supported.")
+        return self
 
 class AppState(Blockstore):
     '''Application state for the FastAPI app.'''
@@ -134,7 +149,7 @@ class AppState(Blockstore):
 @asynccontextmanager
 async def root_lifespan(app: FastAPI):
     '''Lifespan context for the FastAPI app.'''
-    with Database("private/memoria.db", "files") as db:
+    with Database("private/memoria.db") as db:
         app.state.data = AppState(
             FlatfsBlockstore("private/blocks"),
             Memoria(db)
@@ -152,7 +167,12 @@ async def subapp_lifespan(subapp: FastAPI):
     yield
     del subapp.state.data
 
-depend_appstate = Depends(lambda request: request.app.state.data)
+@Depends
+def depend_appstate(request: Request) -> AppState:
+    '''Dependency to get the application state.'''
+    if not hasattr(request.app.state, "data"):
+        raise RuntimeError("App state not initialized.")
+    return request.app.state.data
 
 @asynccontextmanager
 async def mcp_lifespan(server: FastMCP):

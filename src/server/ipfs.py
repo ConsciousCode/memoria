@@ -4,10 +4,12 @@ Implement the IPFS Trustless Gateway specification and any IPFS-related utilitie
 import json
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, Query, Request, Response, UploadFile
+from fastapi import FastAPI, HTTPException, Header, Query, Request, Response, UploadFile
+from fastapi.datastructures import FormData
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
-from ._common_server import AddParameters, AppState, subapp_lifespan, depend_appstate
+from ._common_server import AddParameters, AppState, UnsupportedError, subapp_lifespan, depend_appstate
 from src.ipld import CID
 from src.ipld.ipfs import CIDResolveError, dag_dump
 
@@ -116,21 +118,21 @@ ipfs_api = FastAPI(
 )
 
 ## Root commands ##
-
 @ipfs_api.post("/add")
 async def ipfs_add(
         request: Request,
-        params: AddParameters = Depends(AddParameters),
         state: AppState = depend_appstate
     ):
     """
     Add files to IPFS - Kubo v0.35 compatible implementation
     """
-    async def kubo_add_stream():
+    ### Kubo endpoint ###
+    async def kubo_add_stream(form: FormData, params: AddParameters):
         try:
-            # FastAPI deosn't seem to implement true asynchronous streaming, so
+            # FastAPI doesn't seem to implement true asynchronous streaming, so
             # here we have to rely on request.form() which is blocking.
-            form = await request.form()
+            # This actually doesn't work because Kubo expects files to be
+            # uploaded without names...
             for name, data in form.multi_items():
                 if isinstance(data, str):
                     yield json.dumps({
@@ -164,9 +166,19 @@ async def ipfs_add(
                 "Error": str(e)
             })
     
+    request._body
+    form = await request.form()
+    try:
+        params = AddParameters.model_validate(form)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors())
+    except UnsupportedError as e:
+        # Your custom validator still works
+        raise HTTPException(status_code=400, detail=str(e))
+    
     # Stream response in Kubo format
     return StreamingResponse(
-        kubo_add_stream(),
+        kubo_add_stream(form, params),
         media_type="application/json",
         headers={
             "X-Chunked-Output": "1",

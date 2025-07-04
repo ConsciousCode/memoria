@@ -1,29 +1,4 @@
-type Edge struct {
-    target &Memory
-    weight float
-}
-
-type Memory struct {
-    data MemoryData
-    timestamp optional int
-    edges [Edge]
-}
-
-type MemoryData union {
-    | SelfData "self"
-    | OtherData "other"
-    | TextData "text" 
-    | FileData "file"
-} representation inline {
-    discriminantKey "kind"
-}
-
-type SelfData struct {
-    kind string
-    name optional string
-    parts [Part]
-    stop_reason optional StopReason
-}
+type UUID bytes
 
 type OtherData struct {
     kind string
@@ -43,7 +18,59 @@ type FileData struct {
     mimeType optional string
 }
 
-type UUID bytes
+type ProviderExport struct {
+    provider string
+    convo_id string
+    convo_title string
+}
+
+type MetaData struct {
+    export optional ProviderExport
+}
+
+# Contents of a memory
+type MemoryData union {
+    | SelfData "self"
+    | OtherData "other"
+    | TextData "text" 
+    | FileData "file"
+} representation inline {
+    discriminantKey "kind"
+}
+
+type Edge struct {
+    target &Memory
+    weight float
+}
+
+# Core memory structure
+type Memory struct {
+    data MemoryData
+    timestamp optional int
+    metadata optional Metadata
+    edges [Edge]
+}
+
+# SelfMemory compositional parts
+type Part struct {
+    content string
+    model optional string
+}
+
+# The reason a SelfMemory stopped
+type StopReason enum {
+    | endTurn
+    | stopSequence
+    | maxTokens
+}
+
+# A self-memory
+type SelfData struct {
+    kind string
+    name optional string
+    parts [Part]
+    stop_reason optional StopReason
+}
 
 type ACThread struct {
     sona UUID

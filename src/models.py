@@ -1,7 +1,8 @@
 from datetime import datetime
 from functools import cached_property
-from typing import Annotated, Any, Iterable, Literal, Optional, overload, override
+from typing import Annotated, Any, Iterable, Literal, Optional, Self, TypedDict, overload, override
 from uuid import UUID
+import json
 
 from mcp.types import ModelPreferences
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler
@@ -127,6 +128,7 @@ class Edge[T](BaseModel):
 class BaseMemory(BaseModel):
     '''Base memory model.'''
     class SelfData(BaseModel):
+        '''A memory from the agent's own perspective.'''
         class Part(BaseModel):
             content: str = ""
             model: Optional[str] = None
@@ -140,6 +142,7 @@ class BaseMemory(BaseModel):
             return "".join(part.content for part in self.parts)
 
     class OtherData(BaseModel):
+        '''A memory produced by someone else (eg a user).'''
         kind: Literal["other"] = "other"
         name: Optional[str] = None
         content: str
@@ -148,6 +151,7 @@ class BaseMemory(BaseModel):
             return self.content
     
     class TextData(BaseModel):
+        '''A text memory, which is just a string.'''
         kind: Literal["text"] = "text"
         content: str
 
@@ -155,6 +159,7 @@ class BaseMemory(BaseModel):
             return self.content
     
     class FileData(BaseModel):
+        '''A file memory, which contains a file and metadata about it.'''
         kind: Literal["file"] = "file"
         file: CID
         filename: Optional[str] = None
@@ -164,16 +169,29 @@ class BaseMemory(BaseModel):
         def document(self): # ???
             return "" # self.content
     
+    class MetaData(BaseModel):
+        '''A memory which is just metadata.'''
+        class Content(BaseModel):
+            class Export(BaseModel):
+                '''Metadata about exports from different providers.'''
+                provider: Literal['anthropic', 'openai']
+                convo_uuid: Optional[UUID] = None
+                convo_title: Optional[str] = None
+            
+            export: Optional[Export] = None
+
+        kind: Literal["metadata"] = "metadata"
+        metadata: Optional[Content]
+        
+        def document(self):
+            return json.dumps(self.metadata)
+    
     type MemoryData = Annotated[
-        SelfData | OtherData | TextData | FileData,
+        SelfData | OtherData | TextData | FileData | MetaData,
         Field(discriminator="kind")
     ]
 
     data: MemoryData
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Metadata about the memory, no schema provided."
-    )
     timestamp: Optional[int] = None
     importance: Optional[float] = Field(
         default=None,
@@ -186,7 +204,7 @@ class BaseMemory(BaseModel):
         description="Sonas the memory belongs to."
     )
 
-    def document(self) -> Optional[str]:
+    def document(self) -> str:
         return self.data.document()
 
     @overload
@@ -267,7 +285,6 @@ class IncompleteMemory(DraftMemory):
         '''Complete the memory by adding edges and returning a Memory object.'''
         return Memory(
             data=self.data,
-            metadata=self.metadata,
             timestamp=self.timestamp,
             edges=self.edges,
             importance=self.importance,
@@ -299,7 +316,6 @@ class Memory(NodeMemory, IPLDModel):
         '''Return a PartialMemory with the same data and edges, but without the CID.'''
         return PartialMemory(
             data=self.data,
-            metadata=self.metadata,
             timestamp=self.timestamp,
             edges=self.edges,
             cid=self.cid,
@@ -307,9 +323,9 @@ class Memory(NodeMemory, IPLDModel):
             sonas=self.sonas
         )
 
-'''A memory which may or may not have a CID.'''
 type CompleteMemory = PartialMemory | Memory
 '''A memory with a CID.'''
+
 type AnyMemory = IncompleteMemory | PartialMemory | Memory
 
 class IncompleteACThread(BaseModel):

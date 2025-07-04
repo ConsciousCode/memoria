@@ -753,10 +753,7 @@ class MemoriaApp:
         async with self.mcp() as client:
             chatlog = await client.chat(
                 prompt=IncompleteMemory(
-                    data=IncompleteMemory.TextData(content=message),
-                    metadata={
-                        "source": "cli-chat"
-                    }
+                    data=IncompleteMemory.TextData(content=message)
                 ),
                 system_prompt=SYSTEM_PROMPT,
                 recall_config=config.recall or RecallConfig(),

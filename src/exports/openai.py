@@ -1,26 +1,19 @@
 '''
 Pydantic models for OpenAI's JSON export format conversations.json
 '''
-
 from datetime import datetime
 from typing import Annotated, Any, Literal, Optional
 from uuid import UUID
+import logging
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, TypeAdapter, GetCoreSchemaHandler
-from pydantic_core import Url, core_schema
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic_core import Url
+
+from .schema import Unknown, Invalid
+
+logger = logging.getLogger(__name__)
 
 type MessageId = Literal['client-created-root']|UUID
-
-class Unknown:
-    @classmethod
-    def __get_pydantic_core_schema__(cls, source: Any, handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:
-        # Define a validator that prints a debug message and returns the value unchanged
-        def debug_validator(value: Any, info: core_schema.ValidationInfo) -> Any:
-            print("Unknown:", info.field_name)
-            return value
-        return core_schema.with_info_plain_validator_function(
-            debug_validator, field_name=handler.field_name
-        )
 
 class OAI(BaseModel):
     """OpenAI maliciously overengineers and underspecifies their exports."""
@@ -47,7 +40,7 @@ class ImagePart(OAI):
         
         class Generation(OAI):
             gen_id: str
-            gen_size: Literal['image', 'xlimage'] | str
+            gen_size: Literal['image', 'xlimage'] | Invalid[str]
             seed: Optional[int] = None
             parent_gen_id: Optional[Unknown] = None
             edit_op: Optional[Unknown] = None
@@ -93,13 +86,13 @@ class AudioAssetPointer(OAI):
     asset_pointer: Url
     '''URI to local asset, file-service://file-<slug> or sediment://file_<hex>'''
     size_bytes: int
-    format: Literal['wav'] | str
+    format: Literal['wav'] | Invalid[str]
     metadata: Metadata
 
 class AudioTranscriptionPart(OAI):
     content_type: Literal['audio_transcription']
     text: str
-    direction: Literal['in', 'out']
+    direction: Literal['in', 'out'] | Invalid[str]
     decoding_id: Optional[Unknown] = None
 
 class RealTimeUserAudioVideoAssetPointerPart(OAI):
@@ -232,7 +225,7 @@ class MessageMetadata(OAI):
             og_tags: Optional[Unknown] = None
         
         citation_format_type: Optional[
-            Literal['tether_og', 'tether_markdown'] | str
+            Literal['tether_og', 'tether_markdown'] | Invalid[str]
         ] = None
         start_idx: int = Field(
             validation_alias=AliasChoices("start_idx", "start_ix")
@@ -256,7 +249,7 @@ class MessageMetadata(OAI):
                     class Allow(OAI):
                         target_message_id: UUID
                     
-                    name: Literal['allow'] # ???
+                    name: Literal['allow'] | Invalid[str] # ???
                     type: Literal['allow']
                     allow: Allow
                 
@@ -273,7 +266,7 @@ class MessageMetadata(OAI):
                     class Deny(OAI):
                         target_message_id: UUID
                     
-                    name: Literal['deny']
+                    name: Literal['deny'] | Invalid[str]
                     type: Literal['deny']
                     deny: Deny
                 
@@ -285,7 +278,7 @@ class MessageMetadata(OAI):
                 domain: str
                 is_consequential: bool
                 privacy_policy: Url
-                method: Literal['get', 'post']
+                method: Literal['get', 'post'] | Invalid[str]
                 path: str
                 operation: str
                 params: dict[str, Any]
@@ -304,7 +297,7 @@ class MessageMetadata(OAI):
         class ImageMessage(OAI):
             message_type: Literal['image']
             time: float
-            sender: Literal['server'] | str
+            sender: Literal['server'] | Invalid[str]
             image_payload: Optional[Unknown] = None
             image_url: Url
             width: int
@@ -313,8 +306,8 @@ class MessageMetadata(OAI):
         class StreamMessage(OAI):
             message_type: Literal['stream']
             time: float
-            stream_name: Literal['stdout', 'stderr'] | str
-            sender: Literal['server'] | str
+            stream_name: Literal['stdout', 'stderr'] | Invalid[str]
+            sender: Literal['server'] | Invalid[str]
             text: str
         
         type Message = Annotated[
@@ -331,7 +324,7 @@ class MessageMetadata(OAI):
 
         class JupyterStatus(BaseJupyterMessage):
             class Content(OAI):
-                execution_state: Literal['busy', 'idle'] | str
+                execution_state: Literal['busy', 'idle'] | Invalid[str]
             
             msg_type: Literal['status']
             content: Content
@@ -361,7 +354,7 @@ class MessageMetadata(OAI):
 
         status: Literal[
             'success', 'cancelled', 'failed_with_in_kernel_exception'
-        ] | str
+        ] | Invalid[str]
         run_id: UUID
         start_time: float
         update_time: float
@@ -378,7 +371,7 @@ class MessageMetadata(OAI):
         type: Literal['file']
         name: str
         id: str
-        source: Literal['my_files'] | str
+        source: Literal['my_files'] | Invalid[str]
         extra: Optional[Unknown] = None
     
     class MetadataListWebpage(OAI):
@@ -398,7 +391,7 @@ class MessageMetadata(OAI):
         class SearchResult(OAI):
             class RefId(OAI):
                 turn_index: int
-                ref_type: Literal['search'] | str
+                ref_type: Literal['search'] | Invalid[str]
                 ref_index: int
             
             type: Literal['search_result']
@@ -426,7 +419,7 @@ class MessageMetadata(OAI):
         invalid: bool = False
     
     class ContentReferencesVisible(BaseContentReferences):
-        refs: Optional[list[Literal['hidden'] | str]] = None
+        refs: Optional[list[Literal['hidden'] | Invalid[str]]] = None
         safe_urls: Optional[list[Url]] = None
         prompt_text: Optional[str] = None
     
@@ -439,7 +432,7 @@ class MessageMetadata(OAI):
     class ContentReferencesImageV2(BaseContentReferences):
         class Ref(OAI):
             turn_index: int
-            ref_type: Literal['image'] | str
+            ref_type: Literal['image'] | Invalid[str]
             ref_index: int
         
         class Image(OAI):
@@ -500,9 +493,9 @@ class MessageMetadata(OAI):
         
         type: Literal['grouped_webpages', 'grouped_webpages_model_predicted_fallback']
         items: list[Item]
-        status: Optional[Literal['done', 'error'] | str] = None
+        status: Optional[Literal['done', 'error'] | Invalid[str]] = None
         error: Optional[Unknown] = None
-        style: Optional[Literal['v2'] | str] = None
+        style: Optional[Literal['v2'] | Invalid[str]] = None
     
     class ContentReferencesWebpageExtended(ContentReferencesVisible):
         type: Literal['webpage_extended']
@@ -542,15 +535,15 @@ class MessageMetadata(OAI):
         textdoc_type: str
         version: int
         textdoc_content_length: int
-        user_message_type: Literal['ask_chatgpt'] | str
+        user_message_type: Literal['ask_chatgpt'] | Invalid[str]
         selection_metadata: Selection
 
     is_user_system_message: bool = False
     is_visually_hidden_from_conversation: bool = False
     is_complete: bool = True
     user_context_message_data: Optional[UserContextMessageData] = None
-    timestamp_: Literal['absolute', 'relative'] = 'absolute'
-    message_type: Optional[Literal['next'] | str] = None
+    timestamp_: Literal['absolute', 'relative'] | Invalid[str] = 'absolute'
+    message_type: Optional[Literal['next'] | Invalid[str]] = None
     model_slug: Optional[str] = None
     default_model_slug: Optional[str] = None
     finish_details: Optional[FinishDetails] = None
@@ -567,7 +560,9 @@ class MessageMetadata(OAI):
     parent_id: Optional[MessageId] = None
     command: Optional[str] = None
     jit_plugin_data: Optional[JITPluginData] = None
-    reasoning_status: Optional[Literal['reasoning_ended', 'is_reasoning']] = None
+    reasoning_status: Optional[
+        Literal['reasoning_ended', 'is_reasoning'] | Invalid[str]
+    ] = None
     metadata_list: Optional[list[MetadataListItem]] = None
     original_query: Optional[Unknown] = None
     search_result_groups: Optional[list[SearchResultGroup]] = None
@@ -577,7 +572,7 @@ class Message(OAI):
         class Metadata(OAI):
             real_author: Optional[str] = None
         
-        role: Literal['system', 'assistant', 'user', 'tool'] | str
+        role: Literal['system', 'assistant', 'user', 'tool'] | Invalid[str]
         name: Optional[str] = None
         metadata: Optional[Metadata] = None
     
@@ -591,12 +586,12 @@ class Message(OAI):
         'failed_with_in_kernel_exception', 'finished',
         'finished_partial_completion', 'finished_successfully',
         'in_progress', 'running', 'success'
-    ] | str
+    ] | Invalid[str]
     end_turn: Optional[bool] = None
     weight: float
     metadata: MessageMetadata
     recipient: str
-    channel: Optional[Literal['final', 'commentary'] | str] = None
+    channel: Optional[Literal['final', 'commentary'] | Invalid[str]] = None
 
 class Node(OAI):
     id: MessageId
@@ -621,7 +616,7 @@ class OpenAIConvo(OAI):
     # Vague utility
     is_archived: bool = False
     is_starred: Optional[bool] = None
-    memory_scope: Literal['global_enabled'] | str
+    memory_scope: Literal['global_enabled'] | Invalid[str]
 
     # All of the rest of this is probably worthless
     moderation_results: list[Unknown]
@@ -630,7 +625,7 @@ class OpenAIConvo(OAI):
     conversation_id: UUID
     conversation_template_id: Optional[str] = None
     gizmo_id: Optional[str] = None
-    gizmo_type: Optional[Literal['gpt'] | str] = None
+    gizmo_type: Optional[Literal['gpt'] | Invalid[str]] = None
     safe_urls: Optional[list[str]] = None
     blocked_urls: Optional[list[Unknown]] = None
     default_model_slug: Optional[str] = None
@@ -641,7 +636,3 @@ class OpenAIConvo(OAI):
     sugar_item_id: Optional[Unknown] = None
 
 OpenAIExport = TypeAdapter(list[OpenAIConvo])
-
-import os
-with open("/home/consciouscode/data/Data/openai/export/conversations.json", 'r') as f:
-    OpenAIExport.validate_json(f.read())
