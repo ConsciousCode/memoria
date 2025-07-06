@@ -43,7 +43,7 @@ class _PBNodeLinks:
     
     def __iter__(self):
         for link in self._links:
-            yield PBLink(link.Hash, link.Name, link.Tsize)
+            yield PBLink(Hash=link.Hash, Name=link.Name, Tsize=link.Tsize)
 
 class PBNode(FauxMapping):
     """A dag-pb node."""
@@ -75,7 +75,7 @@ def _from_wrap(node: PBNode) -> dagpb_pb2.PBNode:
     return dagpb_pb2.PBNode(
         Data=node.Data,
         Links=(
-            dagpb_pb2.PBLink(link.Hash, link.Name, link.Tsize)
+            dagpb_pb2.PBLink(Hash=link.Hash, Name=link.Name, Tsize=link.Tsize)
             for link in node.Links
         )
     )

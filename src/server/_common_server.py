@@ -67,16 +67,16 @@ class AddParameters(BaseModel):
         bool, NOT_SUPPORTED("Use trickle-dag format.")
     ] = False
     raw_leaves: Annotated[
-        bool, Field(description="Use raw blocks for leaves.")
-    ] = False
+        bool, NOT_SUPPORTED(description="Use raw blocks for leaves.")
+    ] = True
     cid_version: Annotated[
         Literal[0, 1], Field(description="CID version.")
-    ] = 0
+    ] = 1 # We use raw-leaves by default, so CIDv1 is preferred.
     hash: Annotated[
         str, Field(description="Hash function.")
     ] = "sha2-256"
     chunker: Annotated[
-        Optional[str], Field(description="Chunking algorithm.")
+        Optional[str], NOT_SUPPORTED(description="Chunking algorithm.")
     ] = None
     mtime: Annotated[
         Optional[int], Field(description="File modification time in seconds since epoch.")
@@ -109,13 +109,18 @@ class AppState(Blockstore):
             stream: IO[bytes],
             filename: Optional[str],
             mimetype: str,
-            timestamp: Optional[int]
+            params: AddParameters
         ) -> tuple[bool, int, CID]:
         '''Upload a file to the IPFS blockstore.'''
-        cid = self.blockstore.ipfs_add(stream)
+        cid = self.blockstore.ipfs_add(
+            stream,
+            cid_version=params.cid_version,
+            function=params.hash
+        )
         root = self.blockstore.block_get(cid)
         assert root, "Failed to retrieve root block after adding file."
         created = not self.memoria.lookup_file(cid)
+        timestamp = params.mtime
         self.memoria.insert(
             Memory(
                 data=Memory.FileData(
@@ -141,14 +146,21 @@ class AppState(Blockstore):
     def block_put(self,
             block: bytes,
             *,
+            cid_version: Literal[0, 1]=1,
             codec: Codec = 'dag-cbor',
             function: str = 'sha2-256'
         ) -> CID:
-        return self.blockstore.block_put(block, codec=codec, function=function)
+        return self.blockstore.block_put(
+            block,
+            cid_version=cid_version,
+            codec=codec,
+            function=function
+        )
 
 @asynccontextmanager
 async def root_lifespan(app: FastAPI):
     '''Lifespan context for the FastAPI app.'''
+    print("Root")
     with Database("private/memoria.db") as db:
         app.state.data = AppState(
             FlatfsBlockstore("private/blocks"),
@@ -158,20 +170,12 @@ async def root_lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=root_lifespan)
 
-@asynccontextmanager
-async def subapp_lifespan(subapp: FastAPI):
-    '''Lifespan context for a subapp.'''
-    if not hasattr(app.state, "state"):
-        raise RuntimeError("App state not initialized.")
-    subapp.state.data = app.state.data
-    yield
-    del subapp.state.data
-
 @Depends
 def depend_appstate(request: Request) -> AppState:
     '''Dependency to get the application state.'''
-    if not hasattr(request.app.state, "data"):
+    if not hasattr(app.state, "data"):
         raise RuntimeError("App state not initialized.")
+    return app.state.data
     return request.app.state.data
 
 @asynccontextmanager

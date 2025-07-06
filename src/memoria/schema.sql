@@ -1,19 +1,6 @@
 PRAGMA foreign_keys=ON;
 
 /**
- * Multimodal files uploaded to memory.
-**/
-CREATE TABLE IF NOT EXISTS files (
-    rowid INTEGER PRIMARY KEY,
-    cid BLOB NOT NULL UNIQUE,
-    filename TEXT, /* filename at time of upload */
-    mimetype TEXT NOT NULL,
-    metadata JSONB,
-    size INTEGER NOT NULL,
-    content BLOB /* actual file content - NULL = external storage */
-);
-
-/**
  * Main table for storing and coordinating memories.
 **/
 CREATE TABLE IF NOT EXISTS memories (

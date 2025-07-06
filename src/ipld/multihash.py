@@ -178,12 +178,14 @@ class Multihash(BaseMultihash):
 
         # Now that we've detangled them, we can process them.
         match parts:
-            case (function, digest, None):
-                if isinstance(function, str):
-                    if (function := HASH_CODES.get(function)) is None:
-                        raise ValueError(f"Unknown hash function: {function}")
-                elif function not in CODE_HASHES:
-                    raise ValueError(f'Unsupported hash code {function:02x}')
+            case (fn, digest, None):
+                if isinstance(fn, str):
+                    if (function := HASH_CODES.get(fn)) is None:
+                        raise ValueError(f"Unknown hash function: {fn}")
+                elif fn not in CODE_HASHES:
+                    raise ValueError(f'Unsupported hash code {fn:02x}')
+                else:
+                    function = fn
                 
                 if isinstance(digest, str):
                     digest = bytes.fromhex(digest)

@@ -417,7 +417,7 @@ class Database:
         cur = self.cursor(FileRow)
         row = cur.execute("""
             SELECT cid, filename, mimetype, filesize, overhead
-            FROM files WHERE cid = ?
+            FROM ipfs_files WHERE cid = ?
         """, (cid.buffer,)).fetchone()
         if row is None:
             return None
@@ -1100,7 +1100,7 @@ class DatabaseRW(Database):
         '''
         cur = self.cursor()
         cur.execute("""
-            INSERT OR IGNORE INTO files (
+            INSERT OR IGNORE INTO ipfs_files (
                 cid, filename, mimetype, filesize, overhead
             ) VALUES (?, ?, ?, ?, ?)
         """, (cid, filename, mimetype, filesize, overhead))

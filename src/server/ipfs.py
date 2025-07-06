@@ -3,13 +3,16 @@ Implement the IPFS Trustless Gateway specification and any IPFS-related utilitie
 '''
 import json
 from typing import Literal, Optional
+import traceback
 
-from fastapi import FastAPI, HTTPException, Header, Query, Request, Response, UploadFile
-from fastapi.datastructures import FormData
+from fastapi import Depends, FastAPI, HTTPException, Header, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
-from ._common_server import AddParameters, AppState, UnsupportedError, subapp_lifespan, depend_appstate
+import io
+from multipart.multipart import MultipartParser, parse_options_header
+
+from ._common_server import AddParameters, AppState, UnsupportedError, depend_appstate
 from src.ipld import CID
 from src.ipld.ipfs import CIDResolveError, dag_dump
 
@@ -30,7 +33,6 @@ def codec_mimetype(codec: str) -> str:
 ############################
 
 ipfs_gateway = FastAPI(
-    lifespan=subapp_lifespan,
     title="IPFS Trustless Gateway",
     description="A FastAPI implementation of the IPFS Trustless Gateway specification.",
     version="0.1.0"
@@ -112,7 +114,6 @@ def get_ipfs(
 ##############################
 
 ipfs_api = FastAPI(
-    lifespan=subapp_lifespan,
     title="IPFS API",
     description="A limited implementation of the Kubo IPFS RPC API"
 )
@@ -121,64 +122,108 @@ ipfs_api = FastAPI(
 @ipfs_api.post("/add")
 async def ipfs_add(
         request: Request,
+        params: AddParameters = Depends(),
         state: AppState = depend_appstate
     ):
     """
     Add files to IPFS - Kubo v0.35 compatible implementation
     """
     ### Kubo endpoint ###
-    async def kubo_add_stream(form: FormData, params: AddParameters):
+    # Read full multipart/form-data body then parse and stream events
+    print(params)
+    if (content_type := request.headers.get("content-type")) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Content-Type header"
+        )
+    ctype, pdict = parse_options_header(content_type)
+    if ctype != b"multipart/form-data":
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported Content-Type; expected b'multipart/form-data', got {ctype}"
+        )
+    if (boundary := pdict.get(b"boundary")) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing boundary in Content-Type header"
+        )
+
+    # Parser callbacks and state
+    events: list[dict] = []
+    current_headers: dict[bytes, bytes] = {}
+    current_header_field: Optional[bytes] = None
+    filename: Optional[str] = None
+    mimetype: str = "application/octet-stream"
+    buffer: Optional[io.BytesIO] = None
+
+    def on_part_begin():
+        nonlocal current_headers, current_header_field, filename, mimetype, buffer
+        current_headers = {}
+        current_header_field = None
+        filename = None
+        mimetype = "application/octet-stream"
+        buffer = None
+
+    def on_header_field(data: bytes, start: int, end: int):
+        nonlocal current_header_field
+        current_header_field = data[start:end].lower()
+
+    def on_header_value(data: bytes, start: int, end: int):
+        if current_header_field is not None:
+            current_headers[current_header_field] = data[start:end]
+
+    def on_headers_finished():
+        nonlocal filename, mimetype, buffer
+        if cd := current_headers.get(b"content-disposition"):
+            _, cd_params = parse_options_header(cd)
+            if (fname := cd_params.get(b"filename")) is not None:
+                filename = fname.decode("utf-8", "ignore")
+        if ctype_hdr := current_headers.get(b"content-type"):
+            mimetype = ctype_hdr.decode("latin-1")
+        buffer = io.BytesIO()
+
+    def on_part_data(data: bytes, start: int, end: int):
+        if buffer is not None:
+            buffer.write(data[start:end])
+
+    def on_part_end():
+        if buffer is None:
+            return
+        buffer.seek(0)
         try:
-            # FastAPI doesn't seem to implement true asynchronous streaming, so
-            # here we have to rely on request.form() which is blocking.
-            # This actually doesn't work because Kubo expects files to be
-            # uploaded without names...
-            for name, data in form.multi_items():
-                if isinstance(data, str):
-                    yield json.dumps({
-                        "Name": name,
-                        "Error": f"Unexpected string data in field {name}"
-                    })
-                elif (mimetype := data.content_type) is None:
-                    yield json.dumps({
-                        "Name": data.filename,
-                        "Error": f"Missing content type for file {data.filename}"
-                    })
-                else:
-                    _, size, cid = state.upload_file(
-                        data.file,
-                        data.filename,
-                        mimetype,
-                        params.mtime
-                    )
-                    out = {
-                        "Bytes": data.size,
-                        "Hash": str(cid),
-                        "Size": str(size)
-                    }
-                    if data.filename:
-                        out['Name'] = data.filename
-                    if params.mtime:
-                        out['Mtime'] = params.mtime
-                    yield json.dumps(out)
-        except Exception as e:
-            yield json.dumps({
-                "Error": str(e)
-            })
-    
-    request._body
-    form = await request.form()
+            _, size, cid = state.upload_file(
+                buffer, filename, mimetype, params
+            )
+            event = {
+                "Bytes": buffer.tell(),
+                "Hash": str(cid),
+                "Size": str(size)
+            }
+            if filename: event["Name"] = filename
+            if params.mtime: event["Mtime"] = params.mtime
+        except Exception as exc:
+            traceback.print_exc()
+            event = {"Error": str(exc)}
+        events.append(event)
+
+    parser = MultipartParser(boundary, callbacks={
+        "on_part_begin": on_part_begin,
+        "on_header_field": on_header_field,
+        "on_header_value": on_header_value,
+        "on_headers_finished": on_headers_finished,
+        "on_part_data": on_part_data,
+        "on_part_end": on_part_end
+    })
+
     try:
-        params = AddParameters.model_validate(form)
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors())
-    except UnsupportedError as e:
-        # Your custom validator still works
-        raise HTTPException(status_code=400, detail=str(e))
-    
-    # Stream response in Kubo format
-    return StreamingResponse(
-        kubo_add_stream(form, params),
+        parser.write(await request.body())
+        parser.write(b"")
+    except Exception as exc:
+        events.append({"Error": str(exc)})
+
+    # Yield all parser events
+    return Response(
+        content="\n".join(json.dumps(event) for event in events),
         media_type="application/json",
         headers={
             "X-Chunked-Output": "1",

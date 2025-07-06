@@ -293,7 +293,11 @@ def codec_of(data: str) -> Codec|IdCodec:
 
 def is_encoded(data: str) -> bool:
     """Checks if the given data is encoded or not."""
-    return bool(data and data[0] in CODES)
+    if not data: return False
+    d = data[0]
+    if base := CODES.get(d):
+        return not isinstance(base, ReservedBase)
+    return False
 
 def encode_identity(data: bytes) -> bytes:
     """Encodes data using the identity encoding."""

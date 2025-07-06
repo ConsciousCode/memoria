@@ -135,10 +135,17 @@ def remove_prefix(bs: bytes) -> bytes:
 def get_codec(bs: bytes) -> str:
     """Gets the codec used for prefix the multicodec prefixed data."""
     prefix = extract_prefix(bs)
-    try:
-        return NAMES[prefix]
+    try: return NAMES[prefix]
     except KeyError:
         raise ValueError(f'Prefix {prefix} not present in the lookup table') from None
+
+def split_codec(bs: bytes) -> tuple[str, bytes]:
+    """Splits the multicodec prefixed data into codec and data."""
+    prefix = extract_prefix(bs)
+    try: codec = NAMES[prefix]
+    except KeyError:
+        raise ValueError(f'Prefix {prefix} not present in the lookup table') from None
+    return codec, bs[len(varint.encode(prefix)):]
 
 def is_codec(name: str) -> bool:
     """Check if the codec is a valid codec or not"""

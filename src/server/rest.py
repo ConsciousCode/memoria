@@ -4,15 +4,14 @@ Simple RESTful API separate from the MCP API.
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import FastAPI, Header, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, Header, Query, Request, Response, UploadFile
 
-from ._common_server import AppState, subapp_lifespan
+from ._common_server import AddParameters, AppState
 from src.ipld import dagcbor, CIDv1
 
 rest_api = FastAPI(
     title="Memoria REST API",
-    description="A RESTful API for the Memoria system.",
-    lifespan=subapp_lifespan
+    description="A RESTful API for the Memoria system."
 )
 
 @rest_api.get("/memory/{cid}")
@@ -99,10 +98,7 @@ def list_sonas(
 async def upload_file(
         request: Request,
         file: UploadFile,
-        timestamp: Optional[int] = Query(
-            None,
-            description="Creation time of the file in seconds since epoch."
-        )
+        params: AddParameters = Depends()
     ):
     '''Upload a file to the Memoria system.'''
     if file.content_type is None:
@@ -114,7 +110,7 @@ async def upload_file(
         fstream,
         file.filename,
         file.content_type,
-        timestamp
+        params
     )
     
     return Response(

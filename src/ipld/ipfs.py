@@ -214,39 +214,74 @@ class ShardLast(ShardingStrategy):
     Sharding strategy that uses the next-to-last N characters of the CID's
     representation to determine the path.
     """
-    def __init__(self, last: int = 2, encoding: multibase.Encoding = 'base32padupper'):
+    def __init__(self, last: int = 2):
         self.last = last
-        self.encoding: multibase.Encoding = encoding
     
     def name(self) -> str:
         return f"/next-to-last/{self.last}"
     
     def shard(self, cid: CID) -> str:
         # Since Kubo v0.12 only the multihash is sharded
-        enc = multibase.encode(self.encoding, cid.multihash.buffer)
+        # Since v0.35 base32upper is used without a multibase prefix
+        enc = multibase.base32upper.encode(cid.multihash.buffer)
         # [:-1] because next-to-last, not last (better entropy in base32)
         return f"{enc[:-1][-self.last:]}/{enc}.data"
 
 class Blockstore(Blocksource):
     @abstractmethod
-    def block_put(self, block: bytes, *, codec: Codec='dag-cbor', function: str='sha2-256') -> CID:
+    def block_put(self, block: bytes, *,
+            cid_version: Literal[0, 1]=1,
+            codec: Codec='dag-cbor',
+            function: str='sha2-256'
+        ) -> CID:
         """Store a block in the IPFS DAG and return its CID."""
         pass
     
-    def ipfs_put(self, data: bytes) -> RawBlockLink|DAGPBNode:
+    def ipfs_put(self, data: bytes, *,
+            raw_leaves: bool=True,
+            function: str='sha2-256'
+        ) -> RawBlockLink|DAGPBNode:
         """
         Given a raw block, store it in the IPFS DAG and return its block.
         This allows subclasses to override the behavior of how blocks are
         stored in IPFS. Uses raw-leaves by default.
         """
-        return RawBlockLink(self.block_put(data, codec='dag-pb'), len(data))
+        if raw_leaves:
+            return RawBlockLink(self.block_put(
+                data,
+                cid_version=1, # raw codec is not possible with CIDv0
+                codec='raw',
+                function=function
+            ), len(data))
+        else:
+            return FileLeaf(data)
 
-    def ipfs_add(self, stream: IO[bytes], *, chunker: ChunkingStrategy=chunker_size()) -> CID:
+    def ipfs_add(self, stream: IO[bytes], *,
+            raw_leaves: bool=True,
+            chunker: ChunkingStrategy=chunker_size(),
+            cid_version: Literal[0, 1]=0,
+            codec: Codec='dag-pb',
+            function: str='sha2-256'
+        ) -> CID:
         """Add a file to the IPFS DAG from a stream."""
         
-        return self.block_put(FileNode(
-            map(self.ipfs_put, chunker(stream))
-        ).dump())
+        blocks = [
+            self.ipfs_put(
+                chunk,
+                raw_leaves=raw_leaves,
+                function=function
+            ) for chunk in chunker(stream)
+        ]
+        if raw_leaves and len(blocks) == 1:
+            # If there's only one block, return it directly
+            return blocks[0].cid
+
+        return self.block_put(
+            FileNode(blocks).dump(),
+            cid_version=cid_version,
+            codec=codec,
+            function=function
+        )
 
 class FlatfsBlockstore(Blockstore):
     def __init__(self, root: str, sharding: ShardingStrategy = ShardLast(2)):
@@ -263,10 +298,13 @@ class FlatfsBlockstore(Blockstore):
         return os.path.exists(self.build_path(cid))
 
     @override
-    def block_put(self, block: bytes, *, codec: Codec='dag-cbor', function: str='sha2-256') -> CID:
+    def block_put(self, block: bytes, *, 
+            cid_version: Literal[0, 1]=1,
+            codec: Codec='dag-cbor',
+            function: str='sha2-256'
+        ) -> CID:
         """Store a block in the flatfs and return its CID."""
-        mh = multihash(function, block)
-        cid = CIDv0(mh) if codec == 'dag-pb' else CIDv1(codec, mh)
+        cid = CID(cid_version, codec, multihash(function, block))
         path = self.build_path(cid)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
