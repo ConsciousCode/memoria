@@ -14,7 +14,7 @@ from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, PromptMessage, TextContent
 from pydantic import Field
 
-from ._common_server import AppState, mcp_lifespan
+from ._common_server import AddParameters, AppState, mcp_lifespan
 from src.ipld import CIDv1
 from src.ipld.ipfs import CIDResolveError
 from src.memoria import Memoria
@@ -116,12 +116,16 @@ async def upload(
         ],
         filename: Annotated[
             Optional[str],
-            Field(description="Filename to use for the uploaded file. If `null`, uses the default filename.")
+            Field(description="Filename to use for the uploaded file.")
         ] = None,
         content_type: Annotated[
             Optional[str],
             Field(description="Content type of the file.")
-        ] = None
+        ] = None,
+        params: Annotated[
+            AddParameters,
+            Field(description="Parameters for adding the file to the blockstore.")
+        ] = AddParameters()
     ):
     '''
     Upload a file to the local block store and return its CID.
@@ -132,7 +136,7 @@ async def upload(
         BytesIO(base64.b64decode(file)),
         filename=filename,
         mimetype=content_type or "application/octet-stream",
-        timestamp=int(datetime.now().timestamp())
+        params=params
     )
 
 @mcp.tool(
