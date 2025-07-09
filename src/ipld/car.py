@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Iterable, Iterator, Literal, Optional, override
 
-from .cid import CIDv1, CIDv1.hash
+from .cid import CIDv1
 from . import varint, dagcbor
 
 __all__ = (

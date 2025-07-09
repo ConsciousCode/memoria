@@ -1,16 +1,13 @@
 # Memoria
-
 Memoria is a memory-first cognitive architecture for autonomous AI agents. It treats large language models (LLMs) as interchangeable simulators of a singular "self" split into multiple sub-personas ("sonas"). By organizing interactions as a DAG of memories and dynamically recalling relevant context, Memoria enables coherent, long-term reasoning across multiple concurrent threads.
 
 ## Overview
-
 Memoria reframes AI agents as static bundles of memory which can be *advanced* by an LLM-based emulator. Instead of linear chat logs, every input, output, and internal reasoning step is recorded as a **Memory** node in a graph. Memories are grouped into **Sonas** (context-specific sub-personas) to isolate perspectives. Sonas prevent confusing context from leaking between threads while still allowing inter-sona recall as needed.
 
 ## Theory
-
 Part of the design considerations for Memoria as compared to other memory-based architectures such as "MemGPT" is the observation that mutable context causes model instability. Causal autoregressive models cannot think outside of the objective, so *even if they're told a modification has occurred*, they struggle to maintain the necessary meta-level awareness of mutability. As an example, suppose the model says "the time is now 12:00" and the system prompt then changes to reflect 12:01. This rewrites the model's only sense of causality. Future iterations interpret this to mean the agent it's simulating was *demonstrably incorrect* in its previous statement and continues this behavior to maintain consistency. Or, at best, apologizes profusely for being "incorrect".
 
-Topologically-sorted memory subgraphs get around this by providing a consistent, immutable, *contextual* view of the past, better accomodating the weaknesses and strengths of causal autoregressive architectures. Context (the memory) becomes *append-only* like the model's actual objective. It ultimately resembles the attention mechanism, selectively highlighting relevant information from a global context which it's blinded to. If eg a memory is retroactively added, immutability guarantees that no memories between the memory's timestamp and the current time reference it; the model can see this. "I don't remember" remains a valid response, and future recollections in which it *does* remember are consistent with the agent "suddenly" remembering rather than having been incorrect in the past.
+Topologicall3y-sorted memory subgraphs get around this by providing a consistent, immutable, *contextual* view of the past, better accomodating the weaknesses and strengths of causal autoregressive architectures. Context (the memory) becomes *append-only* like the model's actual objective. It ultimately resembles the attention mechanism, selectively highlighting relevant information from a global context which it's blinded to. If eg a memory is retroactively added, immutability guarantees that no memories between the memory's timestamp and the current time reference it; the model can see this. "I don't remember" remains a valid response, and future recollections in which it *does* remember are consistent with the agent "suddenly" remembering rather than having been incorrect in the past.
 
 ## Relevant Concepts
 **MCP**
@@ -19,7 +16,6 @@ Topologically-sorted memory subgraphs get around this by providing a consistent,
 : (InterPlanetary Linked Data) Used to encode memory graph nodes, enabling *immutable* content-addressed storage of memories. IPLD is used as a system-level constraint to strongly encourage the use of immutable data structures, which are essential for the Memoria architecture.
 
 ## Key Concepts
-
 **Agent**
 : The complete system of one or more LLMs emulating a self using Memoria.
 **Self**
@@ -32,9 +28,7 @@ Topologically-sorted memory subgraphs get around this by providing a consistent,
 : A node in a directed acyclic graph (DAG) representing a single meaningful event (message, observation, or reasoning step).
 
 ## Architecture
-
 ### Memory Graph
-
 Memoria records each interaction as a **Memory** node:
 ```
 Memory {
@@ -64,7 +58,6 @@ Memory {
 Edges encode dependencies: supporting memories contribute context in future recalls. Memoria also keeps track of mutable *importance* values outside of the IPLD model which are used to weight recall and forgetting. Importance is backpropagated through edges, allowing memories to influence each other over time.
 
 ### Recall Mechanism
-
 For each new input, Memoria scores and selects relevant memories based on:
 - **Recency**: newer memories score higher and more important memories decay slower.
 - **Relevance**: semantic similarity (embeddings) and full-text search.
@@ -74,7 +67,6 @@ For each new input, Memoria scores and selects relevant memories based on:
 Top‐K scoring memories are expanded recursively along weighted edges until a budget is exhausted. The resulting subgraph is topologically sorted (timestamp as tiebreaker) to reconstruct a concise causal context for the LLM.
 
 ### Autonomous Cognitive Threads (ACTs)
-
 Memoria models sona simulation with a state‑monad pattern:
 ```haskell
 type Sona a = State MemoryDAG a
@@ -88,9 +80,7 @@ advance llm input = do
 ```
 
 ## API Endpoints
-
 ### Rest
-
 - **GET /ipfs/{cid}[/...path]** - Retrieve data by its CID as a Trustless Gateway.
 - **GET /file/{cid}** - Fetch a file by its CID.
 - **GET /memory/{cid}** - Retrieve a memory by its CID.
@@ -109,7 +99,6 @@ advance llm input = do
 - **TOOL chat** - Single-turn chat with the agent, replaying relevant memories and allowing the agent to respond with a new message. The result is stored in the agent's memory.
 
 ## References
-
 1. Generative Agents: Interactive Simulacra of Human Behavior. https://arxiv.org/abs/2304.03442  
 2. Memory‑Augmented Neural Networks. https://arxiv.org/abs/1605.06065  
 

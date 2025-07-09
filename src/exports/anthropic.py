@@ -3,17 +3,15 @@ Pydantic models for OpenAI's JSON export format exports.json
 '''
 
 from datetime import datetime
-from typing import Annotated, Generator, Literal, Optional
+from typing import Annotated, Literal, Optional
 from uuid import UUID
 import sqlite3
 import os
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_core import Url
-import httpx
 
 from .schema import Invalid, Unknown
-from src.models import FileData, IncompleteMemory, MetaData, TextData
 from src.ipld import CID
 
 with open(os.path.join(os.path.dirname(__file__), "anthropic.sql"), "r") as f:

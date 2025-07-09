@@ -6,9 +6,11 @@ import inspect
 import os
 import re
 import json
+import sys
 
 from deepmerge import always_merger
 
+from models import DraftMemory, ImportConvo, ImportFileData, ImportMemory, IncompleteMemory, OtherData, TextData
 from src.exports.anthropic import AnthropicConvo, AnthropicExport
 
 CHAT_ORGID = "70da662e-fdd6-42d6-9cf2-edfbaa98a782"
@@ -79,6 +81,71 @@ def genfiles(orgid: str, convo_path: str):
         })("%s");
     '''%(orgid, ' '.join(files))))
 
+def build_memory(file_path: str, msg: AnthropicConvo.ChatMessage) -> ImportMemory:
+    match msg.sender:
+        case "human":
+            # Assume humans only ever have text content
+            for c in msg.content or []:
+                if isinstance(c, AnthropicConvo.ChatMessage.TextContent):
+                    continue
+                raise NotImplementedError(
+                    f"Unsupported content type: {type(c)}"
+                )
+            
+            # Include dependencies (attachments and files)
+            deps: list[DraftMemory] = []
+
+            for f in msg.attachments or []:
+                if f.file_type in {"pdf", "txt", "text/markdown", "text/x-python"}:
+                    deps.append(IncompleteMemory(
+                        data=TextData(content=f.extracted_content)
+                    ))
+                else:
+                    print("Unsupported attachment type:", f.file_type, file=sys.stderr)
+            
+            for f in msg.files or []:
+                if not isinstance(f, AnthropicConvo.ChatMessage.CompleteImageFile):
+                    raise NotImplementedError(type(f))
+                
+                path = os.path.join(file_path, f"{f.file_uuid}.webp")
+                if not os.path.exists(path):
+                    raise FileNotFoundError(
+                        f"File {f.file_uuid} not found at {path}."
+                    )
+                ts = f.created_at
+                deps.append(IncompleteMemory(
+                    data=ImportFileData(
+                        file=path,
+                        filename=f.file_name,
+                        mimetype="image/webp"
+                    ),
+                    timestamp=ts and int(ts.timestamp())
+                ))
+            
+            # Construct the memory
+            ts = msg.created_at
+            return ImportMemory(
+                data=OtherData(content=msg.text),
+                timestamp=ts and int(ts.timestamp()),
+                deps=deps
+            )
+        
+        case "assistant":
+            
+        
+        case _:
+            raise NotImplementedError(msg.sender)
+    '''
+    uuid: UUID
+    text: str
+    content: Optional[list[Content]] = None
+    sender: Literal['assistant', 'human']
+    created_at: datetime
+    updated_at: datetime
+    attachments: list[Attachment] = Field(default_factory=list)
+    files: list[File] = Field(default_factory=list)
+    '''
+
 def combine(convo_path: str, file_path: str):
     # 1. Load the exported conversations.json
     with open(os.path.expanduser(convo_path)) as f:
@@ -88,9 +155,37 @@ def combine(convo_path: str, file_path: str):
     with open(os.path.expanduser(file_path)) as f:
         files = json.load(f)
 
-    print(json.dumps(
+    combined = AnthropicExport.validate_python(
         always_merger.merge(export, files)
-    ))
+    )
+    convos: list[ImportConvo] = []
+    for convo in combined:
+        convos.append(ImportConvo(
+            metadata=ImportConvo.Metadata(
+                timestamp=convo.created_at,
+                provider="anthropic",
+                uuid=convo.uuid,
+                title=convo.name
+            ),
+            chatlog=[build_memory(msg) for msg in convo.chat_messages]
+        ))
+
+    '''
+
+    sona: Optional[UUID|str] = Field(
+        default=None,
+        description="Sona to insert the memories into."
+    )
+    metadata: Optional[Metadata] = Field(
+        description="Metadata about the conversation being inserted."
+    )
+    prev: Optional[CIDv1] = Field(
+        default=None,
+        description="CID of the previous memory in the thread, if any."
+    )
+    chatlog: list[ImportMemory[AnyMemoryData]] = Field(
+        description="Chatlog to insert into the system."
+    )'''
 
 def usage():
     print(inspect.cleandoc('''
@@ -133,5 +228,4 @@ def main(*argv: str):
         sys.exit(1)
 
 if __name__ == "__main__":
-    import sys
     main(*sys.argv[1:])

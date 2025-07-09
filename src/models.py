@@ -327,10 +327,10 @@ type AnyMemory = IncompleteMemory | PartialMemory | Memory
 
 class ImportMemory[D: AnyMemoryData](DraftMemory[D]):
     '''Base memory model.'''
-    type: Literal['memory']
-    prev: Optional[CIDv1] = Field(
+    type: Literal['memory'] = "memory"
+    deps: Optional[list[DraftMemory]] = Field(
         default=None,
-        description="CID of the previous memory in the thread, if any."
+        description="Non-conversational dependencies of the memory, if any."
     )
 
 class ImportConvo(BaseModel):
@@ -354,7 +354,7 @@ class ImportConvo(BaseModel):
             description="Importance of the conversation, used for recall weighting."
         )
     
-    type: Literal['convo']
+    type: Literal['convo'] = "convo"
 
     sona: Optional[UUID|str] = Field(
         default=None,
