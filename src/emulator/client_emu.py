@@ -5,6 +5,7 @@ Implements a Memoria MCP client.
 from datetime import timedelta
 from typing import Optional, cast, overload, override
 
+from fastmcp.client.transports import ClientTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.client.client import Client
 from mcp.types import TextContent
@@ -13,12 +14,12 @@ from pydantic import BaseModel, TypeAdapter
 from ._common_emu import EdgeAnnotation, Emulator, QueryResult
 from src.models import CompleteMemory, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
 
-class ClientEmulator(Emulator):
+class ClientEmulator[TransportT: ClientTransport](Emulator):
     '''Emulator with direct access to memoria, sampling left unimplemented.'''
 
     timeout: Optional[timedelta]
 
-    def __init__(self, client: Client):
+    def __init__(self, client: Client[TransportT]):
         super().__init__()
         self.client = client
         self.timeout = None#timedelta(seconds=5)
@@ -80,7 +81,7 @@ class ClientEmulator(Emulator):
     
     @override
     async def insert(self,
-            memory: IncompleteMemory,
+            memory: NodeMemory,
             recall_config: RecallConfig = RecallConfig(),
             annotate_config: SampleConfig = SampleConfig()
         ) -> CompleteMemory:
@@ -92,7 +93,7 @@ class ClientEmulator(Emulator):
     
     @override
     async def query(self,
-            prompt: IncompleteMemory,
+            prompt: NodeMemory,
             system_prompt: str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig()

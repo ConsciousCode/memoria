@@ -4,18 +4,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import cached_property
 import os
-from typing import TYPE_CHECKING, Any, Final, Iterable, Iterator, NoReturn, Optional, Sequence
+from typing import TYPE_CHECKING, Annotated, Any, Final, Iterable, Iterator, Literal, NoReturn, Optional, Sequence, cast
 import inspect
+from uuid import UUID
+import mimetypes
 
 from mcp.types import ModelPreferences, TextContent
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
 from tqdm import tqdm
 
+from client import MemoriaClient
+from server._common_server import AddParameters
 from src.ipld import CIDv1
-from src.models import AnyMemory, Edge, IncompleteMemory, InsertConvo, InsertMemory, RecallConfig, SampleConfig
-from src.emulator.client import ClientEmulator
+from src.models import AnyMemory, AnyMemoryData, Edge, FileData, ImportAdapter, ImportFileData, IncompleteMemory, ImportMemory, MetaData, NodeMemory, PartialMemory, RecallConfig, SampleConfig, TextData
 
 if TYPE_CHECKING:
     # These can be pretty beefy, so put in a type check to avoid
@@ -68,6 +71,14 @@ class ProviderConfig(BaseModel):
 
     model_config = ConfigDict(extra='allow')
 
+class IPFSConfig(BaseModel):
+    cid_version: Annotated[
+        Literal[0, 1], Field(description="CID version.")
+    ] = 1 # We use raw-leaves by default, so CIDv1 is preferred.
+    hash: Annotated[
+        str, Field(description="Hash function.")
+    ] = "sha2-256"
+
 class Config(BaseModel):
     source: str
     '''Original source of the config file.'''
@@ -83,12 +94,14 @@ class Config(BaseModel):
     '''Configuration for chat sampling.'''
     annotate: SampleConfig = Field(default_factory=SampleConfig)
     '''Configuration for edge annotation sampling.'''
-    
+
     models: dict[str, dict[str, ModelConfig]] = Field(default_factory=dict)
     '''Model profiles for different AI models.'''
     purposes: dict[str, str] = Field(default_factory=dict)
     '''Map purposes to model names.'''
-    recall: Optional[RecallConfig] = None
+
+    ipfs: IPFSConfig = IPFSConfig()
+    recall: RecallConfig = RecallConfig()
     '''Configuration for how to weight memory recall.'''
     providers: ProviderConfig = Field(default_factory=ProviderConfig)
     '''AI model configuration.'''
@@ -100,10 +113,6 @@ class Config(BaseModel):
             for provider, models in self.models.items()
                 for model, profile in models.items()
         }
-
-
-
-
 
 def unpack[*A](args: Iterable[str], *defaults: *A) -> tuple[str, ...]|tuple[*A]:
     '''Unpack rest arguments with defaults and proper typing.'''
@@ -613,7 +622,63 @@ class MemoriaApp:
             StreamableHttpTransport(config.server),
             sampling_handler=self.sampling_handler,
         ) as client:
-            yield ClientEmulator(client)
+            yield MemoriaClient(client)
+    
+    async def insert_memory(self,
+            config: Config,
+            sona: Optional[UUID|str],
+            metadata_cid: Optional[CIDv1],
+            prev: Optional[CIDv1],
+            client: MemoriaClient,
+            memory: NodeMemory[AnyMemoryData]
+        ) -> CIDv1:
+        if sona:
+            if memory.sonas is None:
+                memory.sonas = []
+            memory.sonas.append(sona)
+        
+        if metadata_cid:
+            memory.edges.append(Edge(target=metadata_cid, weight=0.0))
+        
+        if prev:
+            memory.edges.append(Edge(target=prev, weight=1.0))
+        
+        if isinstance(memory.data, ImportFileData):
+            with open(memory.data.file, "rb") as f:
+                data = f.read()
+            if (filename := memory.data.filename):
+                filename = os.path.basename(filename)
+            else:
+                filename = memory.data.file
+            
+            ipfs = self.get_config().ipfs
+            params = AddParameters(
+                cid_version=ipfs.cid_version,
+                hash=ipfs.hash
+            )
+            mimetype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            uploaded = await client.upload(
+                data,
+                filename,
+                mimetype,
+                params
+            )
+            # Substitute for a normal file memory
+            memory = IncompleteMemory(
+                data=FileData(
+                    file=uploaded.cid,
+                    filename=filename,
+                    mimetype=mimetype,
+                    filesize=len(data)
+                ),
+                timestamp=memory.timestamp,
+                importance=memory.importance,
+                edges=memory.edges,
+                sonas=memory.sonas
+            )
+
+        complete = await client.insert(memory, config.recall, config.annotate)
+        return complete.cid
 
     async def subcmd_import(self, *argv: str):
         '''
@@ -625,31 +690,72 @@ class MemoriaApp:
           file           File containing the messages to insert, or STDIN. Follows this schema:
 
         \x1b[2m```
-        InsertMemory | [InsertMemory] | InsertConvo
-        InsertMemory = {{
-            kind: "self" | "other",
-            name?: str,
-            timestamp: float | iso8601,
+        type SelfData = {{
+            kind: "self",
+            name?: str?,
+            parts: [{{content: str, model?: str?}}]
+            stop_reason?: ("endTurn" | "stopSequence" | "maxTokens")?
+        }}
+        type OtherData = {{
+            kind: "other",
+            name?: str?,
             content: str
         }}
-        InsertConvo = {{
-            sona?: (UUID | str)?,
-            prev?: CIDv1?,
-            chatlog: [InsertMemory]
+        type TextData = {{
+            kind: "text",
+            content: str
         }}
+        type FileData = {{
+            kind: "file",
+            file: CID,
+            filename?: str?,
+            mimetype: str,
+            filesize: int
+        }}
+        type MetaData = {{
+            kind: "metadata",
+            metadata: {{[str]: any}}
+        }}
+        type ImportData = {{
+            kind: "import",
+            file: {{path: path}},
+            filename?: str?,
+            mimetype?: str?,
+            filesize?: int?
+        }}
+
+        type Memory = {{
+            data: SelfData | OtherData | TextData | FileData | MetaData,
+            timestamp: float | iso8601,
+            importance?: float?,
+            edges?: [{{target: CIDv1 | Memory, weight: float}}],
+            sonas?: [UUID | str]?
+        }}
+        type Convo = {{
+            sona?: (UUID | str)?,
+            metadata?: {{
+                timestamp: float | iso8601,
+                provider: str,
+                uuid: UUID,
+                title: str,
+                importance?: float?
+            }},
+            prev?: CIDv1 | Memory,
+            chatlog: [Memory]
+        }}
+
+        type Import = Memory | Convo | [Memory | Convo]
         ```\x1b[m
 
         options:
           -s,--sona       The sona to insert the message into. If not specified, the
                            default chat sona is used.
           -v,--verbose    Show the total context as seen by the agent.
-          -q,--quiet      Do not print extra data, just the raw contents.
         '''
 
         args, opts = argparse(argv, {
             "-s,--sona": str,
-            "-v,--verbose": False,
-            "-q,--quiet": False,
+            "-v,--verbose": False
         })
         
         if len(args) > 1:
@@ -661,68 +767,70 @@ class MemoriaApp:
         else:
             data = input()
         
-        convo = TypeAdapter[list[InsertMemory] | InsertMemory | InsertConvo](
-            list[InsertMemory] | InsertMemory | InsertConvo
-        ).validate_json(data)
-
-        match convo:
-            case list(): sona = prev = None
-            case InsertMemory():
-                sona = prev = None
-                convo = [convo]
-            case InsertConvo():
-                sona = convo.sona
-                prev = convo.prev
-                convo = convo.chatlog
-            
-            case _: raise RuntimeError(f"Unknown {type(convo)}")
-        
-        if sona is None:
-            if s := opts.get('sona'):
-                sona = str(s)
-            else:
-                sona = self.get_config().sona
+        sona = cast(Optional[UUID|str], opts.get('sona'))
+        parts = ImportAdapter.validate_json(data)
+        if not isinstance(parts, list):
+            parts = [parts]
 
         config = self.get_config()
-        recall_config = config.recall or RecallConfig()
-        annotate_config = config.annotate or SampleConfig()
+        verbose: bool = bool(opts.get('verbose'))
 
         async with self.mcp() as client:
-            if opts.get('verbose'):
-                convo = tqdm(convo, desc="Inserting messages", unit="msg")
-                progress = convo
-            else:
-                progress = None
+            if verbose:
+                parts = tqdm(parts, desc="Inserting messages", unit="convo")
             
-            for msg in convo:
-                match msg.kind:
-                    case "self":
-                        md = IncompleteMemory.SelfData(
-                            name=msg.name,
-                            parts=[IncompleteMemory.SelfData.Part(content=msg.content)]
-                        )
-                    case "other":
-                        md = IncompleteMemory.OtherData(
-                            name=msg.name,
-                            content=msg.content
-                        )
-                    
-                    case _: raise NotImplementedError(msg.kind)
+            for part in parts:
+                if isinstance(part, ImportMemory):
+                    prev = await self.insert_memory(
+                        config, sona, None, None, client, part
+                    )
+                    if verbose:
+                        tqdm.write(str(prev))
+                    continue
+
+                # ImportConvo
+                prev = part.prev
+                chatlog = part.chatlog
+                if verbose:
+                    chatlog = tqdm(
+                        chatlog,
+                        desc="Inserting chat log",
+                        unit="msg",
+                        leave=False
+                    )
                 
-                ts = msg.timestamp
-                memory = await client.insert(
-                    IncompleteMemory(
-                        data=md,
-                        timestamp=None if ts is None else int(ts.timestamp()),
-                        sonas=[sona] if sona else None,
-                        edges=[Edge(target=prev, weight=1.0)] if prev else []
-                    ),
-                    recall_config=recall_config,
-                    annotate_config=annotate_config
-                )
-                prev = memory.cid
-                if progress:
-                    progress.write(str(prev))
+                # Convo has metadata, insert it to act as a dependency ever
+                # memory in it has in common
+                if part.metadata:
+                    ts = part.metadata.timestamp
+                    md = await self.insert_memory(
+                        config, sona, None, None, client,
+                        IncompleteMemory(
+                            data=MetaData(
+                                metadata=MetaData.Content(
+                                    export=MetaData.Content.Export(
+                                        provider=part.metadata.provider,
+                                        convo_uuid=part.metadata.uuid,
+                                        convo_title=part.metadata.title
+                                    )
+                                )
+                            ),
+                            timestamp=ts and int(ts.timestamp()),
+                            importance=part.metadata.importance
+                        )
+                    )
+                else:
+                    md = None
+
+                for m in chatlog:
+                    if not isinstance(m, PartialMemory):
+                        raise TypeError(f"Expected PartialMemory, got {type(m)}")
+                    
+                    prev = await self.insert_memory(
+                        config, sona, md, prev, client, m
+                    )
+                    if verbose:
+                        tqdm.write(str(prev))
 
     async def subcmd_chat(self, *argv: str):
         '''
@@ -753,7 +861,7 @@ class MemoriaApp:
         async with self.mcp() as client:
             chatlog = await client.chat(
                 prompt=IncompleteMemory(
-                    data=IncompleteMemory.TextData(content=message)
+                    data=TextData(content=message)
                 ),
                 system_prompt=SYSTEM_PROMPT,
                 recall_config=config.recall or RecallConfig(),
@@ -804,7 +912,7 @@ class MemoriaApp:
         async with self.mcp() as client:
             chatlog = await client.query(
                 prompt=IncompleteMemory(
-                    data=IncompleteMemory.TextData(content=message),
+                    data=TextData(content=message),
                 ),
                 system_prompt=SYSTEM_PROMPT,
                 recall_config=config.recall or RecallConfig(),
@@ -850,7 +958,6 @@ class MemoriaApp:
           -v,--verbose    Show the total context as seen by the agent.
           -q,--quiet      Do not print extra data, just the raw contents.
         '''
-        from mcp.types import TextContent
         args, opts = argparse(argv, {
             "-s,--sona": str,
             "-v,--verbose": False,
@@ -869,7 +976,7 @@ class MemoriaApp:
 
             g = await client.recall(
                 prompt=IncompleteMemory(
-                    data=IncompleteMemory.TextData(content=search),
+                    data=TextData(content=search),
                     sonas=[str(sona)]
                 ),
                 recall_config=config.recall or RecallConfig(),

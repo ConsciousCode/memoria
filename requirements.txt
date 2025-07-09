@@ -7,4 +7,4 @@ mcp
 fastmcp
 tqdm
 protobuf
-libp2p
+deepmerge

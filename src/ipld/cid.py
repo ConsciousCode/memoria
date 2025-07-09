@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import Any, ClassVar, Literal, Optional, Self, cast, overload, override
+from typing import Any, ClassVar, Literal, Never, Optional, Self, cast, overload, override
 
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
@@ -393,6 +393,57 @@ class CID(Immutable):
             traceback.print_exc()
             print("Here")
             raise
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[0],
+            codec: Literal['dag-pb'],
+            function: str
+        ) -> 'CIDv0': ...
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[1],
+            codec: Codec,
+            function: str
+        ) -> 'CIDv1': ...
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[0, 1],
+            codec: Codec,
+            function: str
+        ) -> 'CIDv0 | CIDv1': ...
+    
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[0, 1]=1,
+            codec: Codec='dag-cbor',
+            function: str = 'sha2-256'
+        ) -> 'CIDv0 | CIDv1':
+        """
+        Create a CID from the given data using the specified hash function.
+        :param data: The data to hash.
+        :param version: The CID version (0 or 1).
+        :param codec: The codec for the CID.
+        :param function: The hash function to use (default is 'sha2-256').
+        :return: A CID object.
+        """
+        if version == 0:
+            if codec != CIDv0.CODEC:
+                raise TypeError(
+                    f"CIDv0 requires codec {CIDv0.CODEC}, got {codec}"
+                )
+            return CIDv0(multihash(function, data).digest)
+        elif version != 1:
+            raise TypeError(
+                f"Unsupported CID version {version!r}, expected 0 or 1"
+            )
+        else:
+            return CIDv1(codec, multihash(function, data).digest)
 
 class CIDv0(CID):
     """ CID version 0 object """
@@ -513,6 +564,42 @@ class CIDv0(CID):
             'title': 'CIDv0'
         })
         return json_schema
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[0],
+            codec: Literal['dag-pb'],
+            function: str
+        ) -> 'CIDv0': ...
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[1],
+            codec: Codec,
+            function: str
+        ) -> 'CIDv1': ...
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[0, 1],
+            codec: Codec,
+            function: str
+        ) -> 'CIDv0 | CIDv1': ...
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes) -> 'CIDv0': ...
+    
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[0, 1]=0,
+            codec: Codec='dag-pb',
+            function: str = 'sha2-256'
+        ) -> 'CIDv0 | CIDv1':
+        return CID.hash(data, version=version, codec=codec, function=function)
 
 class CIDv1(CID):
     """ CID version 1 object """
@@ -666,13 +753,39 @@ class CIDv1(CID):
             'title': 'CIDv1'
         })
         return json_schema
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[0],
+            codec: Literal['dag-pb'],
+            function: str
+        ) -> 'CIDv0': ...
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[1],
+            codec: Codec,
+            function: str
+        ) -> 'CIDv1': ...
+    
+    @overload
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[0, 1],
+            codec: Codec,
+            function: str
+        ) -> 'CIDv0 | CIDv1': ...
 
-def cidhash(data: bytes, *, function: str = 'sha2-256', codec: Codec='dag-cbor') -> CIDv1:
-    """
-    Create a Multihash from the given data using the specified hash function.
-
-    :param data: The data to hash.
-    :param name: The name of the hash function to use.
-    :return: A Multihash object.
-    """
-    return CIDv1(codec, multihash(function, data).digest)
+    @overload
+    @staticmethod
+    def hash(data: bytes) -> 'CIDv1': ...
+    
+    @staticmethod
+    def hash(data: bytes, *,
+            version: Literal[0, 1]=1,
+            codec: Codec='dag-cbor',
+            function: str = 'sha2-256'
+        ) -> 'CIDv0 | CIDv1':
+        return CID.hash(data, version=version, codec=codec, function=function)

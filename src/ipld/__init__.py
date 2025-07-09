@@ -1,6 +1,6 @@
 from ._common_ipld import IPLData
 from .car import carv1_iter, carv2_iter, carv1, carv2
-from .cid import CID, CIDv0, CIDv1, cidhash
+from .cid import CID, CIDv0, CIDv1, CIDv1.hash
 from .multibase import (
     Codec, IdCodec, BaseCodec, ReservedBase, Encoding,
     encode_identity, decode_identity,
@@ -22,7 +22,7 @@ __all__ = (
     
     'carv1_iter', 'carv2_iter', 'carv1', 'carv2',
     
-    'CID', 'CIDv0', 'CIDv1', 'cidhash',
+    'CID', 'CIDv0', 'CIDv1', 'CIDv1.hash',
 
     'Codec', 'IdCodec', 'BaseCodec', 'ReservedBase', 'Encoding',
     'encode_identity', 'decode_identity',

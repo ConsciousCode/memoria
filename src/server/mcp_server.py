@@ -18,9 +18,9 @@ from ._common_server import AddParameters, AppState, mcp_lifespan
 from src.ipld import CIDv1
 from src.ipld.ipfs import CIDResolveError
 from src.memoria import Memoria
-from src.models import DraftMemory, Edge, IncompleteMemory, Memory, RecallConfig, SampleConfig, StopReason
+from src.models import DraftMemory, Edge, IncompleteMemory, Memory, RecallConfig, SampleConfig, StopReason, UploadResponse
 from src.prompts import CHAT_PROMPT, QUERY_PROMPT
-from src.emulator.server import ServerEmulator
+from src.emulator.server_emu import ServerEmulator
 
 DEFAULT_RECALL_CONFIG = RecallConfig()
 
@@ -118,9 +118,9 @@ async def upload(
             Optional[str],
             Field(description="Filename to use for the uploaded file.")
         ] = None,
-        content_type: Annotated[
+        mimetype: Annotated[
             Optional[str],
-            Field(description="Content type of the file.")
+            Field(description="MIME type of the file.")
         ] = None,
         params: Annotated[
             AddParameters,
@@ -132,11 +132,16 @@ async def upload(
     '''
     state = mcp_state(ctx)
     emu = MCPEmulator(ctx, state)
-    return emu.state.upload_file(
+    created, size, cid = emu.state.upload_file(
         BytesIO(base64.b64decode(file)),
         filename=filename,
-        mimetype=content_type or "application/octet-stream",
+        mimetype=mimetype or "application/octet-stream",
         params=params
+    )
+    return UploadResponse(
+        created=created,
+        size=size,
+        cid=cid
     )
 
 @mcp.tool(

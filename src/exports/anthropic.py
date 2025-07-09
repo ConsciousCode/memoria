@@ -8,12 +8,12 @@ from uuid import UUID
 import sqlite3
 import os
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_core import Url
 import httpx
 
 from .schema import Invalid, Unknown
-from src.models import IncompleteMemory
+from src.models import FileData, IncompleteMemory, MetaData, TextData
 from src.ipld import CID
 
 with open(os.path.join(os.path.dirname(__file__), "anthropic.sql"), "r") as f:
@@ -60,20 +60,32 @@ class AnthropicDatabase:
         if row is not None:
             return CID(row[0])
 
-class Summary(BaseModel):
+class ANT(BaseModel):
+    """
+    Anthropic doesn't publish their export schema everywhere and it's almost
+    as messy as OpenAI.
+    """
+    model_config = ConfigDict(
+        extra='allow',
+        populate_by_name=True,
+        validate_by_name=True,
+        validate_by_alias=True
+    )
+
+class Summary(ANT):
     """A summary of the chat message."""
     summary: str
 
-class AnthropicConvo(BaseModel):
+class AnthropicConvo(ANT):
     """Anthropic conversations.json export."""
-    class Account(BaseModel):
+    class Account(ANT):
         """Anthropic account information."""
         uuid: UUID
     
-    class ChatMessage(BaseModel):
+    class ChatMessage(ANT):
         """Anthropic chat message."""
-        class ToolUseContent(BaseModel):
-            class AntCodeInput(BaseModel):
+        class ToolUseContent(ANT):
+            class AntCodeInput(ANT):
                 type: Literal[
                     'application/vnd.ant.react',
                     'application/vnd.ant.mermaid',
@@ -86,9 +98,9 @@ class AnthropicConvo(BaseModel):
                 command: Literal['create', 'update', 'rewrite']
                 content: str
             
-            class MarkdownInput(BaseModel):
-                class Citation(BaseModel):
-                    class Source(BaseModel):
+            class MarkdownInput(ANT):
+                class Citation(ANT):
+                    class Source(ANT):
                         url: Url
                         uuid: UUID
                         title: str
@@ -98,7 +110,7 @@ class AnthropicConvo(BaseModel):
                         content_body: Optional[Unknown]
                         resource_type: Optional[Unknown]
                     
-                    class GenericMetadata(BaseModel):
+                    class GenericMetadata(ANT):
                         type: Literal['generic_metadata']
                         uuid: UUID
                         source: str
@@ -124,13 +136,13 @@ class AnthropicConvo(BaseModel):
                 content: str
                 language: Optional[str]
             
-            class Code(BaseModel):
+            class Code(ANT):
                 code: str
             
-            class Command(BaseModel):
+            class Command(ANT):
                 command: str
             
-            class Query(BaseModel):
+            class Query(ANT):
                 query: str
             
             type Input = Annotated[
@@ -156,20 +168,20 @@ class AnthropicConvo(BaseModel):
             start_timestamp: Optional[datetime] = None
             stop_timestamp: Optional[datetime] = None
         
-        class ToolResultContent(BaseModel):
-            class TextResult(BaseModel):
+        class ToolResultContent(ANT):
+            class TextResult(ANT):
                 type: Literal['text']
                 text: str
                 uuid: UUID
             
-            class KnowledgeResult(BaseModel):
-                class WebpageMetadata(BaseModel):
+            class KnowledgeResult(ANT):
+                class WebpageMetadata(ANT):
                     type: Literal['webpage_metadata']
                     site_domain: str
                     favicon_url: Url
                     site_name: str
                 
-                class PromptContextMetadata(BaseModel):
+                class PromptContextMetadata(ANT):
                     url: Url
                 
                 type: Literal['knowledge']
@@ -200,7 +212,7 @@ class AnthropicConvo(BaseModel):
                 'artifacts', 'repl', 'web_search'
             ] | Invalid[str]] = None
         
-        class ThinkingContent(BaseModel):
+        class ThinkingContent(ANT):
             type: Literal['thinking']
             cut_off: bool = False
             start_timestamp: Optional[datetime] = None
@@ -208,9 +220,9 @@ class AnthropicConvo(BaseModel):
             summaries: Optional[list[Summary]] = None
             thinking: Optional[str] = None
         
-        class TextContent(BaseModel):
-            class Citation(BaseModel):
-                class WebSearch(BaseModel):
+        class TextContent(ANT):
+            class Citation(ANT):
+                class WebSearch(ANT):
                     type: Literal['web_search_citation']
                     url: Url
                 
@@ -228,29 +240,29 @@ class AnthropicConvo(BaseModel):
             Field(discriminator='type')
         ]
 
-        class Attachment(BaseModel):
+        class Attachment(ANT):
             """Attachment in an Anthropic chat message."""
             file_name: str
             file_size: int
             file_type: str
             extracted_content: str
         
-        class CompleteImageFile(BaseModel):
+        class CompleteImageFile(ANT):
             '''
             Anthropic exports deliberately exclude files from the export.
             This is the alternate of incomplete files which includes that
             missing information.
             '''
-            class Asset(BaseModel):
+            class Asset(ANT):
                 url: str
                 primary_color: str
                 image_width: int
                 image_height: int
             
-            class ThumbnailAsset(Asset):
+            class ThumbnailAsset(ANT):
                 file_variant: Literal['thumbnail']
             
-            class PreviewAsset(Asset):
+            class PreviewAsset(ANT):
                 file_variant: Literal['preview']
             
             file_kind: Literal['image']
@@ -267,7 +279,7 @@ class AnthropicConvo(BaseModel):
             Field(discriminator='file_kind')
         ]
 
-        class IncompleteFile(BaseModel):
+        class IncompleteFile(ANT):
             """Incomplete file as seen in chat exports."""
             file_name: str
         
@@ -290,92 +302,3 @@ class AnthropicConvo(BaseModel):
     chat_messages: list[ChatMessage]
 
 AnthropicExport = TypeAdapter(list[AnthropicConvo])
-
-class AnthropicImporter:
-    def __init__(self, db: AnthropicDatabase):
-        self.db = db
-        self.msgs: dict[UUID, CID] = {}
-        self.files: dict[UUID, CID] = {}
-
-    def process_convo(self, convo: AnthropicConvo) -> Generator[IncompleteMemory, CID, CID]:
-        if convo_cid := self.msgs.get(convo.uuid):
-            return convo_cid
-        
-        convo_cid = yield IncompleteMemory(
-            data=IncompleteMemory.MetaData(
-                metadata=IncompleteMemory.MetaData.Content(
-                    export=IncompleteMemory.MetaData.Content.Export(
-                        provider="anthropic",
-                        convo_uuid=convo.uuid,
-                        convo_title=convo.name
-                    )
-                )
-            )
-        )
-        return convo_cid
-    
-    def process_msg(self, convo_cid: CID, msg: AnthropicConvo.ChatMessage) -> Generator[IncompleteMemory, CID, CID]:
-        if msg_cid := self.db.load_message(msg.uuid):
-            return msg_cid
-        
-        deps: list[CID] = [convo_cid]
-
-        for attachment in msg.attachments:
-            acid = yield IncompleteMemory(
-                data=IncompleteMemory.TextData(
-                    content=attachment.extracted_content
-                )
-            )
-            deps.append(acid)
-
-        for file in msg.files:
-            if not isinstance(file, AnthropicConvo.ChatMessage.CompleteImageFile):
-                continue
-
-            if file.file_uuid in self.files:
-                continue
-            
-            fcid = yield IncompleteMemory(
-                data=IncompleteMemory.FileData(
-                    file_name=file.file_name,
-                    file_size=file.file_size,
-                    file_type=file.file_type,
-                    extracted_content=file.extracted_content
-                ),
-            )
-            self.files[file.file_uuid] = fcid
-            deps.append(fcid)
-        '''
-        match msg.sender:
-            case "assistant":
-                data = Memory.SelfData()
-        '''
-        '''
-        msg_cid = yield IncompleteMemory(
-            data=IncompleteMemory.MetaData({
-                "export": {
-                    "provider": "anthropic",
-                    "convo_uuid": msg.uuid,
-                    "convo_title": msg.text
-                }
-            }),
-            #cid=convo_cid
-        )
-        '''
-        return msg_cid
-
-    def iter_export(self, convos: list[AnthropicConvo]) -> Generator[IncompleteMemory, CID, None]:
-        """Iterate over memories in an Anthropic export."""
-
-        for convo in convos:
-            convo_cid = yield from self.process_convo(convo)
-            for msg in convo.chat_messages:
-                msg_cid = yield from self.process_msg(convo_cid, msg)
-                self.msgs[msg.uuid] = msg_cid
-
-def iter_export(convos: list[AnthropicConvo]) -> Generator[IncompleteMemory, CID, None]:
-    """Iterate over memories in an Anthropic export."""
-    imp = AnthropicImporter(AnthropicDatabase("anthropic.db"))
-    for convo in convos:
-        yield from imp.iter_convo(convo)
-    yield from imp.iter_export(convos)

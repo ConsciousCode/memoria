@@ -10,7 +10,7 @@ from mcp.types import ModelPreferences, Role, TextContent
 from ._common_emu import Emulator, EdgeAnnotation, QueryResult
 from src.prompts import ANNOTATE_EDGES
 from src.ipld import CIDv1
-from src.models import AnyMemory, CompleteMemory, DraftMemory, IncompleteMemory, Memory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
+from src.models import AnyMemory, CompleteMemory, DraftMemory, IncompleteMemory, MemoryDAG, NodeMemory, OtherData, PartialMemory, RecallConfig, SampleConfig, SelfData, TextData
 from src.memoria import Memoria
 from src.util import ifnone
 
@@ -34,7 +34,7 @@ def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=
         ts = datetime.fromtimestamp(ts)
     
     match memory.data:
-        case Memory.SelfData():
+        case SelfData():
             if name := memory.data.name:
                 tags.append(f"name:{name}")
             if sr := memory.data.stop_reason:
@@ -43,11 +43,11 @@ def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=
             content = ''.join(p.content for p in memory.data.parts)
             return ("assistant", build_tags(tags, ts) + content)
         
-        case Memory.TextData():
+        case TextData():
             tags.append("kind:raw_text")
             return ("user", build_tags(tags, ts) + memory.data.content)
         
-        case Memory.OtherData():
+        case OtherData():
             if name := memory.data.name:
                 tags.append(f"name:{name}")
             return ("user", build_tags(tags, ts) + memory.data.content)
@@ -318,8 +318,8 @@ class ServerEmulator(Emulator):
         g.insert(other_memory.cid, other_memory)
 
         response = IncompleteMemory(
-            data=Memory.SelfData(
-                parts=[Memory.SelfData.Part(
+            data=SelfData(
+                parts=[SelfData.Part(
                     content=content.text
                 )],
                 stop_reason=query.response.stopReason

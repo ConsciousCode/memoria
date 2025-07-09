@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Iterable, Iterator, Literal, Optional, override
 
-from .cid import CIDv1, cidhash
+from .cid import CIDv1, CIDv1.hash
 from . import varint, dagcbor
 
 __all__ = (
@@ -28,7 +28,7 @@ class CARv1Indexer(ABC):
 
     def add(self, block: bytes) -> CIDv1:
         '''Add a block to the index.'''
-        cid = cidhash(block)
+        cid = CIDv1.hash(block)
         self.roots.append(cid)
         self.blocks.append(block)
         return cid
@@ -40,7 +40,7 @@ class CARv1Indexer(ABC):
     def carv1_header(self) -> Iterable[bytes]:
         """Return the CARv1 header as bytes."""
         header = dagcbor.marshal({"version": 1, "roots": self.roots})
-        yield from _car_block(cidhash(header), header)
+        yield from _car_block(CIDv1.hash(header), header)
     
     def carv1(self) -> Iterable[bytes]:
         """Yield bytes for the CAR file."""

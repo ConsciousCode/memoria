@@ -12,7 +12,7 @@ from pydantic_core import CoreSchema, core_schema
 
 from src.ipld.cid import CID, Codec
 from src.ipld.ipfs import Blocksource, Blockstore, CompositeBlocksource, FlatfsBlockstore
-from src.models import Memory
+from src.models import FileData, Memory
 from src.memoria import Memoria, Database
 
 class UnsupportedError(NotImplementedError):
@@ -49,19 +49,19 @@ class AddParameters(BaseModel):
         bool, NOT_SUPPORTED("Pin locally to protect from GC.")
     ] = False
     progress: Annotated[
-        bool, Field(description="Stream progress data.")
+        bool, NOT_SUPPORTED(description="Stream progress data.")
     ] = False
     quiet: Annotated[
-        bool, Field(description="Write minimal output.")
+        bool, NOT_SUPPORTED(description="Write minimal output.")
     ] = False
     quieter: Annotated[
-        bool, Field(description="Write only final hash.")
+        bool, NOT_SUPPORTED(description="Write only final hash.")
     ] = False
     silent: Annotated[
-        bool, Field(description="Write no output.")
+        bool, NOT_SUPPORTED(description="Write no output.")
     ] = False
     only_hash: Annotated[
-        bool, Field(description="Only chunk and hash.")
+        bool, NOT_SUPPORTED(description="Only chunk and hash.")
     ] = False
     trickle: Annotated[
         bool, NOT_SUPPORTED("Use trickle-dag format.")
@@ -79,7 +79,7 @@ class AddParameters(BaseModel):
         Optional[str], NOT_SUPPORTED(description="Chunking algorithm.")
     ] = None
     mtime: Annotated[
-        Optional[int], Field(description="File modification time in seconds since epoch.")
+        Optional[int], NOT_SUPPORTED(description="File modification time in seconds since epoch.")
     ] = None
 
     @model_validator(mode="after")
@@ -123,7 +123,7 @@ class AppState(Blockstore):
         timestamp = params.mtime
         self.memoria.insert(
             Memory(
-                data=Memory.FileData(
+                data=FileData(
                     file=cid,
                     filename=filename,
                     mimetype=mimetype,

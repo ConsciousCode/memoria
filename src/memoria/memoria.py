@@ -10,7 +10,7 @@ from uuid import UUID
 from .db import Database, FileRow
 
 from src.ipld import CIDv1, CID
-from src.models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, RecallConfig, Sona, StopReason
+from src.models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, RecallConfig, SelfData, Sona, StopReason
 from src.util import todo_list
 from src.ipld.ipfs import Blocksource
 
@@ -228,7 +228,7 @@ class Memoria(Blocksource):
 
                 # Create the incomplete memory to receive the response
                 response_id = db.insert_memory(IncompleteMemory(
-                    data=IncompleteMemory.SelfData(
+                    data=SelfData(
                         parts=[],
                     ),
                     timestamp=int(datetime.now().timestamp()),
@@ -322,7 +322,7 @@ class Memoria(Blocksource):
             if last and (model is None or last.model == model):
                 last.content += delta or ""
             else:
-                data.parts.append(Memory.SelfData.Part(
+                data.parts.append(SelfData.Part(
                     content=delta or "",
                     model=model
                 ))
