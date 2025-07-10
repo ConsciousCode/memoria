@@ -131,7 +131,7 @@ def build_memory(file_path: str, msg: AnthropicConvo.ChatMessage) -> ImportMemor
             )
         
         case "assistant":
-            
+            pass
         
         case _:
             raise NotImplementedError(msg.sender)

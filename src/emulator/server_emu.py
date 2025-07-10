@@ -3,12 +3,13 @@ from datetime import datetime
 from typing import Awaitable, Iterable, Optional, override
 import json
 import re
+from uuid import UUID
 
 from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, Role, TextContent
 
 from ._common_emu import Emulator, EdgeAnnotation, QueryResult
-from src.prompts import ANNOTATE_EDGES
+from src.prompts import ANNOTATE_EDGES, CHAT_PROMPT
 from src.ipld import CIDv1
 from src.models import AnyMemory, CompleteMemory, DraftMemory, IncompleteMemory, MemoryDAG, NodeMemory, OtherData, PartialMemory, RecallConfig, SampleConfig, SelfData, TextData
 from src.memoria import Memoria
@@ -95,7 +96,8 @@ class ServerEmulator(Emulator):
         system_prompt: str,
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
-        model_preferences: Optional[ModelPreferences | str | list[str]] = None
+        model_preferences: Optional[ModelPreferences | str | list[str]] = None,
+        related_request_id: Optional[str|int] = None
     ) -> Awaitable[CreateMessageResult]:
         '''Sample a response from the LLM based on the provided messages and system prompt.'''
 
@@ -333,4 +335,60 @@ class ServerEmulator(Emulator):
         self_memory = self.raw_insert(response)
 
         return query.chatlog + [self_memory.partial()]
+
+    async def act_advance(
+            self,
+            sona: UUID|str,
+            recall_config: RecallConfig = RecallConfig(),
+            chat_config: SampleConfig = SampleConfig(),
+            annotate_config: SampleConfig = SampleConfig(),
+            related_request_id: Optional[str|int] = None,
+        ) -> Optional[list[PartialMemory]]:
+        '''
+        Advance the autonomous cognitive thread by one step: recall relevant memories,
+        sample a response from the LLM, annotate edges, and commit the resulting memory.
+        '''
+        # 1. Recall context for the next step
+        g = self.memoria.act_next(sona, recall_config)
+        if g is None:
+            return None
+
+        # 2. Build sampling messages from the recalled memories
+        refs: dict[CIDv1, int] = {}
+        messages: list[SamplingMessage] = []
+        for cid in g.invert().toposort(key=lambda v: v.timestamp):
+            ref = len(refs) + 1
+            refs[cid] = ref
+            m = g[cid]
+            deps = [refs[e.target] for e in m.edges] if m.edges else []
+            role, content = memory_to_message(ref, deps, m, final=False)
+            messages.append(SamplingMessage(
+                role=role,
+                content=TextContent(type="text", text=content)
+            ))
+
+        # 3. Sample a response from the LLM
+        result = await self.sample(
+            messages,
+            system_prompt=CHAT_PROMPT,
+            temperature=ifnone(chat_config.temperature, 1.0),
+            max_tokens=chat_config.max_tokens,
+            model_preferences=chat_config.model_preferences,
+            related_request_id=related_request_id
+        )
+        content = result.content
+        if not isinstance(content, TextContent):
+            raise ValueError(f"Expected text content, got {type(content)}")
+
+        # 4. Create and annotate the response memory
+        response = IncompleteMemory(
+            data=SelfData(parts=[SelfData.Part(content=content.text, model=result.model)]),
+            timestamp=int(datetime.now().timestamp())
+        )
+        annotation = await self.annotate(g.invert(), response, annotate_config)
+        annotation.apply(response)
+
+        # 5. Commit the response memory to memoria
+        cmem = self.raw_insert(response)
+        return [cmem.partial()]
     

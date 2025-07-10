@@ -18,7 +18,7 @@ from ._common_server import AddParameters, AppState, mcp_lifespan
 from src.ipld import CIDv1
 from src.ipld.ipfs import CIDResolveError
 from src.memoria import Memoria
-from src.models import DraftMemory, Edge, IncompleteMemory, Memory, RecallConfig, SampleConfig, StopReason, UploadResponse
+from src.models import DraftMemory, Edge, IncompleteMemory, Memory, PartialMemory, RecallConfig, SampleConfig, StopReason, UploadResponse
 from src.prompts import CHAT_PROMPT, QUERY_PROMPT
 from src.emulator.server_emu import ServerEmulator
 
@@ -57,9 +57,12 @@ class MCPEmulator(ServerEmulator):
             system_prompt: str,
             temperature: float = 0.7,
             max_tokens: Optional[int] = None,
-            model_preferences: Optional[ModelPreferences | str | list[str]] = None
+            model_preferences: Optional[ModelPreferences | str | list[str]] = None,
+            related_request_id: Optional[str|int] = None,
         ) -> CreateMessageResult:
         return await self.context.request_context.session.create_message(
+            inclue_context="allServers",
+            related_request_id=related_request_id,
             messages=list(messages),
             system_prompt=system_prompt,
             temperature=temperature,
@@ -371,3 +374,28 @@ def act_next(
         m.prompt_message(include_final=True)
             for m in [] #serialize_dag(g)
     ]
+
+@mcp.tool(
+    annotations=dict(
+        openWorldHint=True
+    )
+)
+async def act_advance(
+        ctx: Context,
+        sona: Annotated[UUID|str, Field(description="Sona to advance.")],
+        recall_config: Annotated[RecallConfig, Field(description="Configuration for how to weight memory recall.")] = DEFAULT_RECALL_CONFIG,
+        chat_config: Annotated[SampleConfig, Field(description="Configuration for how to sample the response.")] = DEFAULT_CHAT_CONFIG,
+        annotate_config: Annotated[SampleConfig, Field(description="Configuration for how to annotate edges.")] = DEFAULT_ANNOTATE_CONFIG
+    ) -> Optional[list[PartialMemory]]:
+    '''
+    Advance the autonomous cognitive thread by one step: recall relevant memories,
+    sample a response from the LLM, annotate edges, and commit the resulting memory.
+    '''
+    emu = MCPEmulator(ctx, mcp_state(ctx))
+    return await emu.act_advance(
+        sona,
+        recall_config,
+        chat_config,
+        annotate_config,
+        related_request_id=ctx.request_id
+    )

@@ -250,15 +250,13 @@ class Memoria(Blocksource):
             return UUID(bytes=sona_row.uuid)
     
     def act_next(self,
-            sona: str,
-            timestamp: Optional[float]=None,
+            sona: UUID|str,
             config: Optional[RecallConfig]=None
         ) -> Optional[MemoryDAG]:
         '''
         Get the next pending thread for the sona.
         
-        Returns the rowid of the pending thread or None if there is no
-        pending thread.
+        Returns the memory subgraph of the pending thread.
         '''
         with self.db.transaction() as db:
             # Find or stage the active thread
