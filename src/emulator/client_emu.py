@@ -44,6 +44,24 @@ class ClientEmulator[TransportT: ClientTransport](Emulator):
             self.progresss_handler,
             self.timeout
         )
+
+    @override
+    async def act_advance(
+            self,
+            sona: UUID|str,
+            recall_config: RecallConfig = RecallConfig(),
+            chat_config: SampleConfig = SampleConfig(),
+            annotate_config: SampleConfig = SampleConfig()
+        ) -> list[PartialMemory]:
+        return await self._call_tool(
+            TypeAdapter(list[PartialMemory]),
+            "act_advance", {
+                'sona': sona,
+                'recall_config': recall_config,
+                'chat_config': chat_config,
+                'annotate_config': annotate_config
+            }
+        )
         if res.isError:
             raise ToolError(cast(TextContent, res.content[0]).text)
         
