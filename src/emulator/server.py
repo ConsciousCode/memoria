@@ -5,13 +5,13 @@ import json
 from uuid import UUID
 
 from mcp import CreateMessageResult, SamplingMessage
-from mcp.types import ModelPreferences, Role, TextContent
+from mcp.types import Role, TextContent
 
 from ._common import EdgeAnnotation, Emulator, EdgeAnnotationResult, QueryResult
 from src.prompts import ANNOTATE_EDGES, CHAT_PROMPT
 from src.ipld import CIDv1
 from src.models import AnyMemory, CompleteMemory, DraftMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, OtherData, PartialMemory, RecallConfig, SampleConfig, SelfData, TextData
-from src.memoria import Memoria
+from src.memoria import Repository
 
 def build_tags(tags: list[str], timestamp: Optional[float|datetime]) -> str:
     if timestamp is not None:
@@ -83,9 +83,9 @@ def sampling_message(role: Role, content: str) -> SamplingMessage:
 class ServerEmulator(Emulator):
     '''Emulator with direct access to memoria, sampling left unimplemented.'''
 
-    def __init__(self, memoria: Memoria):
+    def __init__(self, repo: Repository):
         super().__init__()
-        self.memoria = memoria
+        self.repo = repo
     
     @abstractmethod
     def sample_chat(self,
@@ -110,7 +110,7 @@ class ServerEmulator(Emulator):
             prompt: DraftMemory,
             recall_config: RecallConfig = RecallConfig()
         ) -> MemoryDAG:
-        return self.memoria.recall(prompt, recall_config)
+        return self.repo.recall(prompt, recall_config)
 
     @override
     async def annotate(self,
@@ -186,7 +186,7 @@ class ServerEmulator(Emulator):
     def raw_insert(self, memory: IncompleteMemory) -> CompleteMemory:
         '''Just insert the memory into memoria, completing it.'''
         cmem = memory.complete()
-        self.memoria.insert(cmem)
+        self.repo.insert(cmem)
         return cmem
 
     @override
@@ -201,7 +201,7 @@ class ServerEmulator(Emulator):
             memory.timestamp = int(datetime.now().timestamp())
         
         # Recall relevant memories to ground the memory
-        g = self.memoria.recall(memory, recall_config)
+        g = self.repo.recall(memory, recall_config)
 
         # Annotate the edges with relevance scores
         annotation = await self.annotate(g.invert(), memory, annotate_config)
@@ -316,7 +316,7 @@ class ServerEmulator(Emulator):
             sona: UUID|str,
             include: list[Edge[CIDv1]]
         ) -> Optional[UUID]:
-        return self.memoria.act_push(sona, include)
+        return self.repo.act_push(sona, include)
 
     @override
     async def act_advance(
@@ -331,7 +331,7 @@ class ServerEmulator(Emulator):
         sample a response from the LLM, annotate edges, and commit the resulting memory.
         '''
         # 1. Recall context for the next step
-        if (g := self.memoria.act_next(sona, recall_config)) is None:
+        if (g := self.repo.act_next(sona, recall_config)) is None:
             return None
 
         # 2. Build sampling messages from the recalled memories
