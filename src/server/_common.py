@@ -12,7 +12,7 @@ from pydantic_core import CoreSchema, core_schema
 
 from ..ipld import CID, BlockCodec, Blocksource, Blockstore, CompositeBlocksource, FlatfsBlockstore
 from ..models import FileData, Memory
-from ..memoria import Memoria, Database
+from ..memoria import Repository, Database
 
 class UnsupportedError(NotImplementedError):
     pass
@@ -97,11 +97,11 @@ class AddParameters(BaseModel):
 
 class AppState(Blockstore):
     '''Application state for the FastAPI app.'''
-    def __init__(self, blockstore: Blockstore, memoria: Memoria):
+    def __init__(self, blockstore: Blockstore, repo: Repository):
         self.blockstore: Blockstore = blockstore
-        self.memoria: Memoria = memoria
+        self.memoria: Repository = repo
         self.blocksource: Blocksource = CompositeBlocksource(
-            memoria, blockstore
+            repo, blockstore
         )
     
     def upload_file(self,
@@ -163,7 +163,7 @@ async def root_lifespan(app: FastAPI):
     with Database("private/memoria.db") as db:
         app.state.data = AppState(
             FlatfsBlockstore("private/blocks"),
-            Memoria(db)
+            Repository(db)
         )
         yield
 

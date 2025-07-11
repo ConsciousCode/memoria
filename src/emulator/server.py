@@ -297,9 +297,7 @@ class ServerEmulator(Emulator):
 
         response = IncompleteMemory(
             data=SelfData(
-                parts=[SelfData.Part(
-                    content=content.text
-                )],
+                parts=[SelfData.Part(content=content.text)],
                 stop_reason=query.response.stopReason
             ),
             timestamp=int(datetime.now().timestamp())

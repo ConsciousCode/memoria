@@ -21,7 +21,7 @@ from ..emulator._common import EdgeAnnotation
 
 from ._common import AddParameters, AppState, mcp_lifespan
 from ..ipld import CIDv1, CIDResolveError
-from ..memoria import Memoria
+from ..memoria import Repository
 from ..models import DraftMemory, Edge, IncompleteMemory, Memory, PartialMemory, RecallConfig, SampleConfig, StopReason, UploadResponse
 from ..prompts import CHAT_PROMPT, QUERY_PROMPT
 from ..emulator.server import ServerEmulator
@@ -125,7 +125,7 @@ class MCPEmulator(ServerEmulator):
         )
         return result.output
 
-mcp = FastMCP[Memoria]("memoria",
+mcp = FastMCP[Repository]("memoria",
     """Coordinates a "sona" representing a cohesive identity and memory.""",
     lifespan=mcp_lifespan,
     #log_level="DEBUG"

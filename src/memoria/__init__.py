@@ -1,7 +1,7 @@
-from .memoria import Memoria
+from .repo import Repository
 from .db import Database
 
 __all__ = (
-    'Memoria',
+    'Repository',
     'Database'
 )

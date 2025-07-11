@@ -19,12 +19,6 @@ from src.server._common import AddParameters
 from src.ipld import CIDv1
 from src.models import AnyMemory, AnyMemoryData, Edge, FileData, ImportAdapter, ImportFileData, IncompleteMemory, ImportMemory, MetaData, NodeMemory, PartialMemory, RecallConfig, SampleConfig, TextData
 
-if TYPE_CHECKING:
-    # These can be pretty beefy, so put in a type check to avoid
-    # importing them unless needed.
-    from fastmcp.client.sampling import SamplingParams
-    from mcp import SamplingMessage
-
 SERVER: Final = "http://127.0.0.1:8000/mcp"
 CONFIG: Final = "./private/memoria.toml"
 

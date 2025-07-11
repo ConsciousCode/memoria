@@ -15,10 +15,10 @@ from src.util import todo_list
 from src.ipld.ipfs import Blocksource
 
 __all__ = (
-    'Memoria',
+    'Repository',
 )
 
-class Memoria(Blocksource):
+class Repository(Blocksource):
     '''
     Wraps all memoria-related functionality to abstract away the details
     of the underlying database, but doesn't implement the MCP server.
