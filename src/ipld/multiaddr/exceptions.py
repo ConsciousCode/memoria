@@ -1,6 +1,5 @@
 from typing import Optional
 
-
 class ProtocolLookupError(LookupError):
     """MultiAddr did not contain a protocol with the requested code."""
 

@@ -1,4 +1,4 @@
-from typing import Iterable, Optional
+from typing import Iterable, Literal, Optional
 import io
 
 from .. import varint
@@ -7,7 +7,18 @@ from .._common import Immutable
 from .exceptions import StringParseError
 from .protocols import MAProtocol, protocol_with_code, protocol_with_name
 
-__all__ = ("Multiaddr",)
+__all__ = (
+    'MultiaddrCodec',
+    "Multiaddr", 'join'
+)
+
+type MultiaddrCodec = Literal[
+    'ip4', 'tcp', 'dccp', 'ip6', 'ip6zone', 'dns', 'dns4', 'dns6',
+    'dnsaddr', 'sctp', 'udp', 'p2p-webrtc-star', 'p2p-webrtc-direct',
+    'p2p-stardust', 'p2p-circuit', 'udt', 'utp', 'unix', 'p2p',
+    'https', 'onion', 'onion3', 'garlic64', 'garlic32',
+    'quic', 'ws', 'wss', 'p2p-websocket-star', 'http'
+]
 
 def string_iter(string: str) -> Iterable[tuple[MAProtocol, Optional[str]]]:
     if not string.startswith(u'/'):

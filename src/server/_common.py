@@ -10,10 +10,9 @@ from fastmcp import FastMCP
 from pydantic import BaseModel, Field, GetCoreSchemaHandler, model_validator
 from pydantic_core import CoreSchema, core_schema
 
-from src.ipld.cid import CID, Codec
-from src.ipld.ipfs import Blocksource, Blockstore, CompositeBlocksource, FlatfsBlockstore
-from src.models import FileData, Memory
-from src.memoria import Memoria, Database
+from ..ipld import CID, BlockCodec, Blocksource, Blockstore, CompositeBlocksource, FlatfsBlockstore
+from ..models import FileData, Memory
+from ..memoria import Memoria, Database
 
 class UnsupportedError(NotImplementedError):
     pass
@@ -147,7 +146,7 @@ class AppState(Blockstore):
             block: bytes,
             *,
             cid_version: Literal[0, 1]=1,
-            codec: Codec = 'dag-cbor',
+            codec: BlockCodec = 'dag-cbor',
             function: str = 'sha2-256'
         ) -> CID:
         return self.blockstore.block_put(

@@ -8,8 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
 
-from src.models import RecallConfig, SampleConfig
-from src.util import warn
+from .models import RecallConfig, SampleConfig
+from .util import warn
 
 CHAT_SONA: Final = "chat"
 TEMPERATURE: Final = 0.7

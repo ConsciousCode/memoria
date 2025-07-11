@@ -3,7 +3,7 @@ from typing import Literal, Optional, overload
 import math
 
 __all__ = (
-    'Codec', 'IdCodec', 'BitpackCodec', 'BaseCodec', 'ReservedBase',
+    'Base', 'IdBase', 'BitpackBase', 'SimpleBase', 'ReservedBase',
     'Encoding', 'codec', 'is_encoded', 'encode', 'decode',
     'encode_identity', 'decode_identity', 'codec_of',
     'identity', 'base2', 'base8', 'base10', 'base16', 'base16upper',
@@ -13,7 +13,7 @@ __all__ = (
     'base64', 'base64pad', 'base64url', 'base64urlpad'
 )
 
-class Codec(ABC):
+class Base(ABC):
     """Abstract base class for multibase codecs."""
     __name__: str
     code: str
@@ -31,9 +31,9 @@ class Codec(ABC):
         """Decodes the given string representation back into bytes."""
     
     def __repr__(self):
-        return f"Codec({self.__name__})"
+        return f"multibase.{self.__name__}"
 
-class IdCodec:
+class IdBase:
     """
     Identity codec, must be handled specially because it's the only codec
     which doesn't encode to a string but rather returns the bytes as-is.
@@ -56,13 +56,13 @@ class IdCodec:
     def decode(self, x): return x
 
     def __repr__(self):
-        return "Codec(identity)"
+        return "multibase.identity"
 
-class DigitCodec(Codec):
+class DigitBase(Base):
     digits: str
     padding: str
 
-class BitpackCodec(DigitCodec):
+class BitpackBase(DigitBase):
     """Codec for encoding bytes into a bit-packed string."""
     
     def __init__(self, code: str, bits: int, digits: str, padding: str = ''):
@@ -112,7 +112,7 @@ class BitpackCodec(DigitCodec):
         
         return bytes(out)
 
-class BaseCodec(DigitCodec):
+class SimpleBase(DigitBase):
     """Straightforward base codec for encoding and decoding bytes."""
 
     def __init__(self, code: str, digits: str, padding: str = ""):
@@ -141,7 +141,7 @@ class BaseCodec(DigitCodec):
         # Convert the integer back to bytes
         return x.to_bytes((x.bit_length() + 7) // 8, byteorder='big')
 
-class ReservedBase(Codec):
+class ReservedBase(Base):
     """Base class for reserved multibase codes."""
     def __init__(self, code: str, name: str):
         assert len(code) == 1, 'code must be a single byte'
@@ -154,7 +154,7 @@ class ReservedBase(Codec):
     def decode(self, s: str) -> bytes:
         raise NotImplementedError(f"{self.name} does not support decoding")
 
-def _upper[T: DigitCodec](codec: T) -> T:
+def _upper[T: DigitBase](codec: T) -> T:
     """Returns a new codec with uppercase digits."""
     nc = codec.__new__(type(codec))
     nc.__dict__.update(codec.__dict__)
@@ -162,7 +162,7 @@ def _upper[T: DigitCodec](codec: T) -> T:
     nc.digits = codec.digits.upper()
     return nc
 
-def _pad[T: DigitCodec](code: str, codec: T, padding: str) -> T:
+def _pad[T: DigitBase](code: str, codec: T, padding: str) -> T:
     """Returns a new codec with specified padding."""
     nc = codec.__new__(type(codec))
     nc.__dict__.update(codec.__dict__)
@@ -178,35 +178,35 @@ _b58 = 'abcdefghijkmnopqrstuvwxyz'
 _B58 = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
 _b64 = _ABC + _abc + _b10
 
-identity = IdCodec()
-base2 = BaseCodec('0', '01')
-base8 = BaseCodec('7', _b10[:8])
-base10 = BaseCodec('9', _b10)
-base16 = BitpackCodec('f', 4, _b16)
+identity = IdBase()
+base2 = SimpleBase('0', '01')
+base8 = SimpleBase('7', _b10[:8])
+base10 = SimpleBase('9', _b10)
+base16 = BitpackBase('f', 4, _b16)
 base16upper = _upper(base16)
-base32hex = BitpackCodec('v', 4, _b10 + _abc[:22])
+base32hex = BitpackBase('v', 4, _b10 + _abc[:22])
 base32hexupper = _upper(base32hex)
 base32hexpad = _pad('t', base32hex, '='*8)
 base32hexpadupper = _upper(base32hexpad)
-base32 = BitpackCodec('b', 5, _abc + _b10[2:8])
+base32 = BitpackBase('b', 5, _abc + _b10[2:8])
 base32upper = _upper(base32)
 base32pad = _pad('c', base32, '=' * 8)
 base32padupper = _upper(base32pad)
-base32z = BitpackCodec('h', 5, 'ybndrfg8ejkmcpqxot1uwisza345h769')
-base36 = BaseCodec('k', _b10 + _abc)
+base32z = BitpackBase('h', 5, 'ybndrfg8ejkmcpqxot1uwisza345h769')
+base36 = SimpleBase('k', _b10 + _abc)
 base36upper = _upper(base36)
-base45 = BaseCodec('R', f"{_b10}{_ABC} $%*+-./:")
-base58btc = BaseCodec('z', _b10[1:] + _B58 + _b58)
-base58flickr = BaseCodec('Z', _b10[1:] + _b58 + _B58)
-base64 = BitpackCodec('m', 6, f'{_b64}+/')
+base45 = SimpleBase('R', f"{_b10}{_ABC} $%*+-./:")
+base58btc = SimpleBase('z', _b10[1:] + _B58 + _b58)
+base58flickr = SimpleBase('Z', _b10[1:] + _b58 + _B58)
+base64 = BitpackBase('m', 6, f'{_b64}+/')
 base64pad = _pad('M', base64, '='*2)
-base64url = BitpackCodec('u', 6, f'{_b64}-_')
+base64url = BitpackBase('u', 6, f'{_b64}-_')
 base64urlpad = _pad('U', base64url, '='*2)
 
 # Aliases
 base58 = base58btc
 
-ENCODINGS: dict[str, Codec] = {
+ENCODINGS: dict[str, Base] = {
     # Identity is the only multibase that must be bytes, so it's not
     #  compatible with the Codec protocol.
     #'identity': identity,
@@ -255,7 +255,7 @@ ENCODINGS: dict[str, Codec] = {
 
     # base256emoji is experimental and has no definitive mapping
 }
-CODES = {}
+CODES: dict[str, Base] = {}
 for _n, _c in ENCODINGS.items():
     CODES[_c.code] = _c
     _c.__name__ = _n
@@ -271,11 +271,11 @@ type Encoding = Literal[
 '''Valid multibase encodings.'''
 
 @overload
-def codec(name: Literal['identity']) -> IdCodec: ...
+def codec(name: Literal['identity']) -> IdBase: ...
 @overload
-def codec(name: Encoding) -> Codec: ...
+def codec(name: Encoding) -> Base: ...
 
-def codec(name: str) -> Codec|IdCodec:
+def codec(name: str) -> Base|IdBase:
     """Returns the codec used to encode the given data"""
     if name == 'identity':
         return identity
@@ -283,7 +283,7 @@ def codec(name: str) -> Codec|IdCodec:
         return enc
     raise ValueError(f'Cannot determine encoding for {name}')
 
-def codec_of(data: str) -> Codec|IdCodec:
+def codec_of(data: str) -> Base|IdBase:
     """Returns the codec used to encode the given data"""
     try:
         c = data[0]
@@ -309,7 +309,7 @@ def decode_identity(data: bytes) -> Optional[bytes]:
         raise ValueError('Data is not encoded with identity encoding.')
     return data[1:] if data else None
 
-def encode(encoding: Encoding|Codec, data: bytes) -> str:
+def encode(encoding: Encoding|Base, data: bytes) -> str:
     """Encodes the given data using the encoding that is specified."""
     if isinstance(encoding, str):
         enc = ENCODINGS.get(encoding)
@@ -322,6 +322,6 @@ def encode(encoding: Encoding|Codec, data: bytes) -> str:
 def decode(data: str) -> bytes:
     """Decode the multibase-encoded data."""
     codec = codec_of(data)
-    if isinstance(codec, IdCodec):
+    if isinstance(codec, IdBase):
         return identity.decode(data[1:]).encode('utf-8')
     return codec.decode(data[1:])

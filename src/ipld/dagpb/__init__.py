@@ -1,4 +1,4 @@
-from .._common_ipld import IPLData
+from .._common import IPLData
 from ..cid import CID
 from .wrap import PBNode, PBLink
 

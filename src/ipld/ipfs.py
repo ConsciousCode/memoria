@@ -3,14 +3,21 @@ from functools import cached_property
 from typing import IO, Callable, Iterable, Literal, Optional, override
 import os
 
-from . import ipld, multibase, dagpb, dagcbor, dagjson
+from . import ipld, multibase, dagpb
 
 from ._common import IPLData
-from .dagpb import PBLink, PBNode
 from .unixfs import Data
 from .multihash import multihash
-from .cid import CID, CIDv0, CIDv1, Codec
+from .cid import CID, CIDv0, BlockCodec
 from .car import CARv2Index, carv1_iter, carv2_iter
+
+__all__ = (
+    'CIDResolveError', 'RawBlockLink', 'DAGPBNode', 'FileLeaf', 'FileNode',
+    'Blocksource', 'Blockstore',
+    'FlatfsBlockstore', 'CompositeBlocksource',
+    'ShardingStrategy', 'ShardLast',
+    'ChunkingStrategy', 'chunker_size'
+)
 
 class CIDResolveError(Exception):
     """Raised when a CID cannot be resolved to a node."""
@@ -25,7 +32,7 @@ class RawBlockLink:
     def ByteSize(self):
         return self.size
 
-class DAGPBNode(PBNode):
+class DAGPBNode(dagpb.PBNode):
     size: int
 
     @cached_property
@@ -47,11 +54,11 @@ class FileNode(DAGPBNode):
     def __init__(self, nodes: Iterable[RawBlockLink|DAGPBNode]):
         size = 0
         blocksizes: list[int] = []
-        links: list[PBLink] = []
+        links: list[dagpb.PBLink] = []
         for node in nodes:
             size += node.size
             blocksizes.append(node.size)
-            links.append(PBLink(
+            links.append(dagpb.PBLink(
                 Name="",
                 Hash=node.cid.buffer,
                 Tsize=node.ByteSize()
@@ -66,42 +73,6 @@ class FileNode(DAGPBNode):
             ).SerializeToString()
         )
         self.size = size
-
-def dag_load(codec: Codec, block: bytes) -> IPLData:
-    """
-    Parse a block of data into its IPLD model based on the codec.
-    If a CID is provided, it will be used to determine the codec.
-    """
-    match codec:
-        case 'dag-pb':
-            node = dagpb.unmarshal(block)
-            return {
-                'Links': [{
-                    'Name': link.Name,
-                    'Hash': CID(link.Hash),
-                    'Tsize': link.Tsize
-                } for link in node.Links],
-                'Data': node.Data
-            }
-        case 'dag-cbor': return dagcbor.unmarshal(block)
-        case 'dag-json': return dagjson.unmarshal(block)
-
-        case _:
-            raise NotImplementedError(f"Unsupported codec: {codec}")
-
-def dag_dump(codec: Codec, node: IPLData) -> str|bytes:
-    """
-    Serialize an IPLD node into bytes based on the codec.
-    If a CID is provided, it will be used to determine the codec.
-    """
-    
-    match codec:
-        case 'dag-pb': return dagpb.marshal(node)
-        case 'dag-cbor': return dagcbor.marshal(node)
-        case 'dag-json': return dagjson.marshal(node)
-
-        case _:
-            raise NotImplementedError(f"Unsupported codec: {codec}")
 
 class Blocksource(ABC):
     @abstractmethod
@@ -118,7 +89,7 @@ class Blocksource(ABC):
         """Retrieve a DAG node by its CID and return its IPLD model."""
         if (block := self.block_get(cid)) is None:
             raise CIDResolveError(cid)
-        return dag_load(cid.codec, block)
+        return ipld.dag_load(cid.codec, block)
 
     def dag_export(self,
             cid: CID,
@@ -231,7 +202,7 @@ class Blockstore(Blocksource):
     @abstractmethod
     def block_put(self, block: bytes, *,
             cid_version: Literal[0, 1]=1,
-            codec: Codec='dag-cbor',
+            codec: BlockCodec='dag-cbor',
             function: str='sha2-256'
         ) -> CID:
         """Store a block in the IPFS DAG and return its CID."""
@@ -260,7 +231,7 @@ class Blockstore(Blocksource):
             raw_leaves: bool=True,
             chunker: ChunkingStrategy=chunker_size(),
             cid_version: Literal[0, 1]=0,
-            codec: Codec='dag-pb',
+            codec: BlockCodec='dag-pb',
             function: str='sha2-256'
         ) -> CID:
         """Add a file to the IPFS DAG from a stream."""
@@ -300,7 +271,7 @@ class FlatfsBlockstore(Blockstore):
     @override
     def block_put(self, block: bytes, *, 
             cid_version: Literal[0, 1]=1,
-            codec: Codec='dag-cbor',
+            codec: BlockCodec='dag-cbor',
             function: str='sha2-256'
         ) -> CID:
         """Store a block in the flatfs and return its CID."""

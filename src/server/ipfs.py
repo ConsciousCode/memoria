@@ -12,8 +12,7 @@ import io
 from multipart.multipart import MultipartParser, parse_options_header
 
 from ._common import AddParameters, AppState, depend_appstate
-from src.ipld import CID
-from src.ipld.ipfs import CIDResolveError, dag_dump
+from ..ipld import CID, CIDResolveError, dag_dump
 
 ROOT = "private/blocks"
 

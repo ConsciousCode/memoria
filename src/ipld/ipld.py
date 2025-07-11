@@ -1,8 +1,10 @@
 from typing import Iterable
+import json
+import cbor
 
 from . import dagcbor, dagjson, dagpb
 from ._common import IPLData
-from .cid import CID
+from .cid import CID, BlockCodec
 
 def iter_python_links(data: IPLData) -> Iterable[CID]:
     match data:
@@ -32,3 +34,49 @@ def iter_links(cid: CID, block: bytes) -> Iterable[CID]:
         
         case cc:
             raise NotImplementedError(f"Unknown codec {cc}")
+
+def dag_load(codec: BlockCodec, block: bytes) -> IPLData:
+    """
+    Parse a block of data into its IPLD model based on the codec.
+    If a CID is provided, it will be used to determine the codec.
+    """
+    match codec:
+        case 'dag-pb':
+            node = dagpb.unmarshal(block)
+            return {
+                'Links': [{
+                    'Name': link.Name,
+                    'Hash': CID(link.Hash),
+                    'Tsize': link.Tsize
+                } for link in node.Links],
+                'Data': node.Data
+            }
+        case 'dag-cbor': return dagcbor.unmarshal(block)
+        case 'dag-json': return dagjson.unmarshal(block)
+
+        case 'json':
+            return json.loads(block.decode('utf-8'))
+        case 'cbor':
+            return cbor.loads(block)
+
+        case _:
+            raise NotImplementedError(f"Unsupported codec: {codec}")
+
+def dag_dump(codec: BlockCodec, node: IPLData) -> str|bytes:
+    """
+    Serialize an IPLD node into bytes based on the codec.
+    If a CID is provided, it will be used to determine the codec.
+    """
+    
+    match codec:
+        case 'dag-pb': return dagpb.marshal(node)
+        case 'dag-cbor': return dagcbor.marshal(node)
+        case 'dag-json': return dagjson.marshal(node)
+
+        case 'json':
+            return json.dumps(node, indent=2).encode('utf-8')
+        case 'cbor':
+            return cbor.dumps(node)
+
+        case _:
+            raise NotImplementedError(f"Unsupported codec: {codec}")

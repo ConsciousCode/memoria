@@ -11,7 +11,7 @@ import mimetypes
 from mcp.types import TextContent
 from tqdm import tqdm
 
-from sampling import Sampler
+from src.sampling import Sampler
 from src.util import argparse, check_overflow, expected, named_value, warn
 from src.config import Config
 from src.client import MemoriaClient

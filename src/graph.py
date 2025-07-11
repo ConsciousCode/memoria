@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Callable, Iterable, Optional, overload, override
 from heapq import heapify, heappush
 
-from src.util import Least, Lexicographic, ifnone, todo_heap
+from .util import Least, Lexicographic, ifnone, todo_heap
 
 _default = object()
 

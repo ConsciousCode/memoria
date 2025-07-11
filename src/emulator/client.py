@@ -15,7 +15,7 @@ from pydantic import BaseModel, TypeAdapter
 from ipld.cid import CIDv1
 
 from ._common import EdgeAnnotationResult, Emulator, QueryResult
-from src.models import CompleteMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
+from ..models import CompleteMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
 
 class ClientEmulator[TransportT: ClientTransport](Emulator):
     '''Emulator with direct access to memoria, sampling left unimplemented.'''

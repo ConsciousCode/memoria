@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
-from .multiaddr import Multiaddr  # NOQA
+from .multiaddr import MultiaddrCodec, Multiaddr, join
 
-__author__ = 'Steven Buss'
-__email__ = 'steven.buss@gmail.com'
-__version__ = '0.0.9'
+__all__ = (
+    'MultiaddrCodec',
+    "Multiaddr", 'join'
+)

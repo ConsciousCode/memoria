@@ -3,10 +3,9 @@ from base64 import b64encode
 
 from fastmcp.client.transports import ClientTransport
 
-from src.models import UploadResponse
-from src.server._common_server import AddParameters
-
-from .emulator.client_emu import ClientEmulator
+from .models import UploadResponse
+from .server._common import AddParameters
+from .emulator.client import ClientEmulator
 
 class MemoriaClient[TransportT: ClientTransport](ClientEmulator[TransportT]):
     async def upload(self, data: bytes, mimetype: str, filename: Optional[str], params: AddParameters) -> UploadResponse:

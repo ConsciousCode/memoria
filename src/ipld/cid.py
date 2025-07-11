@@ -10,12 +10,12 @@ from .multihash import BaseMultihash, Multihash, multihash
 from . import multibase, multicodec
 
 __all__ = (
-    'Version', 'Codec',
+    'CIDVersion', 'BlockCodec',
     'CID', 'CIDv0', 'CIDv1', 'AnyCID'
 )
 
-type Version = Literal[0, 1]
-type Codec = Literal[
+type CIDVersion = Literal[0, 1]
+type BlockCodec = Literal[
     'raw', 'dag-pb', 'dag-cbor', 'dag-json',
     'libp2p-key', 'git-raw',
     'torrent-info', 'torrent-file',
@@ -29,7 +29,21 @@ type Codec = Literal[
     'decred-block', 'decred-tx',
     'dash-block', 'dash-tx',
     'swarm-manifest', 'swarm-feed'
+
+    'raw', 'dag-pb', 'dag-cbor', 'dag-json',
+    'cbor', 'libp2p-key', 'git-raw', 'torrent-info', 'torrent-file',
+    'blake3-hashseq', 'leofcoin-block', 'leofcoin-tx', 'leofcoin-pr',
+    'dag-jose', 'dag-cose', 'eth-block', 'eth-block-list',
+    'eth-tx-trie', 'eth-tx', 'eth-tx-receipt-trie',
+    'eth-tx-receipt', 'eth-state-trie', 'eth-account-snapshot',
+    'eth-storage-trie', 'eth-receipt-log-trie', 'eth-receipt-log',
+    'bitcoin-block', 'bitcoin-tx', 'bitcoin-witness-commitment',
+    'zcash-block', 'zcash-tx', 'stellar-block', 'stellar-tx',
+    'decred-block', 'decred-tx', 'dash-block', 'dash-tx',
+    'swarm-manifest', 'swarm-feed', 'beeson', 'swhid-1-snp', 'json'
 ]
+'''Multicodec type for IPLD block codecs.'''
+
 type AnyCID = 'CID|CIDv0|CIDv1'
 
 class CID(Immutable):
@@ -47,13 +61,13 @@ class CID(Immutable):
     @overload
     def __new__(cls, /, version: Literal[0], multihash: str|bytes|BaseMultihash) -> 'CIDv0': ...
     @overload
-    def __new__(cls, /, version: Literal[1], codec: Codec, multihash: str|bytes|BaseMultihash) -> 'CIDv1': ...
+    def __new__(cls, /, version: Literal[1], codec: BlockCodec, multihash: str|bytes|BaseMultihash) -> 'CIDv1': ...
     @overload
     def __new__(cls, /, version: int, multihash: str|bytes|BaseMultihash) -> AnyCID: ...
     @overload
-    def __new__(cls, /, version: int, codec: Codec, multihash: str|bytes|BaseMultihash) -> AnyCID: ...
+    def __new__(cls, /, version: int, codec: BlockCodec, multihash: str|bytes|BaseMultihash) -> AnyCID: ...
     @overload
-    def __new__(cls, /, codec: Codec, multihash: str|bytes|BaseMultihash) -> 'CIDv1': ...
+    def __new__(cls, /, codec: BlockCodec, multihash: str|bytes|BaseMultihash) -> 'CIDv1': ...
 
     def __new__(cls, *args, **kwargs) -> AnyCID:
         # Subclass fast path
@@ -121,7 +135,7 @@ class CID(Immutable):
                 f"CID requires multihash as str, bytes or BaseMultihash, got {type(multihash)}"
             )
         
-        return cls.build(version, cast(Codec, codec), multihash)
+        return cls.build(version, cast(BlockCodec, codec), multihash)
     
     # We repeat the overloads of __new__ on __init__ too, but CID.__init__
     # is only ever called by subclasses to set the buffer.
@@ -134,13 +148,13 @@ class CID(Immutable):
     @overload
     def __init__(self, /, version: Literal[0], multihash: str|bytes|BaseMultihash): ...
     @overload
-    def __init__(self, /, version: Literal[1], codec: Codec, multihash: str|bytes|BaseMultihash): ...
+    def __init__(self, /, version: Literal[1], codec: BlockCodec, multihash: str|bytes|BaseMultihash): ...
     @overload
     def __init__(self, /, version: int, multihash: str|bytes|BaseMultihash): ...
     @overload
-    def __init__(self, /, version: int, codec: Codec, multihash: str|bytes|BaseMultihash): ...
+    def __init__(self, /, version: int, codec: BlockCodec, multihash: str|bytes|BaseMultihash): ...
     @overload
-    def __init__(self, /, codec: Codec, multihash: str|bytes|BaseMultihash): ...
+    def __init__(self, /, codec: BlockCodec, multihash: str|bytes|BaseMultihash): ...
 
     def __init__(self, data: bytes, /): # type: ignore
         # Sanity check the data type because otherwise they're tiny bug bombs
@@ -156,7 +170,7 @@ class CID(Immutable):
         raise NotImplementedError("version")
 
     @property
-    def codec(self) -> Codec:
+    def codec(self) -> BlockCodec:
         """CID codec"""
         raise NotImplementedError("codec")
 
@@ -232,7 +246,7 @@ class CID(Immutable):
             return False
 
     @staticmethod
-    def parse(raw: 'str|bytes|BaseMultihash|CID') -> tuple[Version, Codec, Multihash]:
+    def parse(raw: 'str|bytes|BaseMultihash|CID') -> tuple[CIDVersion, BlockCodec, Multihash]:
         """
         Parses a CID string and returns a CID object.
 
@@ -276,10 +290,10 @@ class CID(Immutable):
         
         if version != 0 and version != 1:
             raise ValueError(f"Unsupported CID version {version}, expected 0 or 1")
-        return version, cast(Codec, codec), Multihash(multihash)
+        return version, cast(BlockCodec, codec), Multihash(multihash)
     
     @classmethod
-    def combine(cls, version: Version, codec: Codec, multihash: str|bytes|BaseMultihash) -> bytes:
+    def combine(cls, version: CIDVersion, codec: BlockCodec, multihash: str|bytes|BaseMultihash) -> bytes:
         """
         Constructs a CID byte string from its components.
 
@@ -311,7 +325,7 @@ class CID(Immutable):
         return b'\1' + multicodec.add_prefix(codec, multihash)
     
     @classmethod
-    def build(cls, version: Version, codec: Codec, multihash: str|bytes|BaseMultihash) -> 'CIDv0|CIDv1':
+    def build(cls, version: CIDVersion, codec: BlockCodec, multihash: str|bytes|BaseMultihash) -> 'CIDv0|CIDv1':
         if version == 0:
             if codec != CIDv0.CODEC:
                 raise ValueError(
@@ -405,7 +419,7 @@ class CID(Immutable):
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[1],
-            codec: Codec,
+            codec: BlockCodec,
             function: str
         ) -> 'CIDv1': ...
     
@@ -413,14 +427,14 @@ class CID(Immutable):
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[0, 1],
-            codec: Codec,
+            codec: BlockCodec,
             function: str
         ) -> 'CIDv0 | CIDv1': ...
     
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[0, 1]=1,
-            codec: Codec='dag-cbor',
+            codec: BlockCodec='dag-cbor',
             function: str = 'sha2-256'
         ) -> 'CIDv0 | CIDv1':
         """
@@ -447,7 +461,7 @@ class CID(Immutable):
 class CIDv0(CID):
     """ CID version 0 object """
 
-    CODEC: ClassVar[Codec] = 'dag-pb'
+    CODEC: ClassVar[BlockCodec] = 'dag-pb'
 
     def __new__(cls, data: 'str|bytes|BaseMultihash|CID', /) -> 'CIDv0':
         if isinstance(data, BaseMultihash):
@@ -469,7 +483,7 @@ class CIDv0(CID):
         return f"CIDv0({self.multihash!r})"
     
     @classmethod
-    def combine(cls, version: Version, codec: Codec, multihash: str|bytes|BaseMultihash) -> bytes:
+    def combine(cls, version: CIDVersion, codec: BlockCodec, multihash: str|bytes|BaseMultihash) -> bytes:
         """
         Constructs a CIDv0 byte string from its components.
 
@@ -576,7 +590,7 @@ class CIDv0(CID):
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[1],
-            codec: Codec,
+            codec: BlockCodec,
             function: str
         ) -> 'CIDv1': ...
     
@@ -584,7 +598,7 @@ class CIDv0(CID):
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[0, 1],
-            codec: Codec,
+            codec: BlockCodec,
             function: str
         ) -> 'CIDv0 | CIDv1': ...
     
@@ -595,7 +609,7 @@ class CIDv0(CID):
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[0, 1]=0,
-            codec: Codec='dag-pb',
+            codec: BlockCodec='dag-pb',
             function: str = 'sha2-256'
         ) -> 'CIDv0 | CIDv1':
         return CID.hash(data, version=version, codec=codec, function=function)
@@ -606,9 +620,9 @@ class CIDv1(CID):
     @overload
     def __new__(cls, data: str|bytes|CID, /) -> Self: ...
     @overload
-    def __new__(cls, /, version: Literal[1], codec: Codec, multihash: str|bytes|BaseMultihash) -> Self: ...
+    def __new__(cls, /, version: Literal[1], codec: BlockCodec, multihash: str|bytes|BaseMultihash) -> Self: ...
     @overload
-    def __new__(cls, /, codec: Codec, multihash: str|bytes|BaseMultihash) -> Self: ...
+    def __new__(cls, /, codec: BlockCodec, multihash: str|bytes|BaseMultihash) -> Self: ...
 
     def __new__(cls, *args, **kwargs) -> Self:
         self = super().__new__(cls, *args, **kwargs)
@@ -619,9 +633,9 @@ class CIDv1(CID):
     @overload
     def __init__(self, data: str|bytes|CID, /): ...
     @overload
-    def __init__(self, version: Literal[1], codec: Codec, multihash: str|bytes|BaseMultihash): ...
+    def __init__(self, version: Literal[1], codec: BlockCodec, multihash: str|bytes|BaseMultihash): ...
     @overload
-    def __init__(self, codec: Codec, multihash: str|bytes|BaseMultihash): ...
+    def __init__(self, codec: BlockCodec, multihash: str|bytes|BaseMultihash): ...
     
     def __init__(self, *args, **kwargs):
         """
@@ -666,7 +680,7 @@ class CIDv1(CID):
         return f"CIDv1({self.codec!r}, {self.multihash!r})"
 
     @classmethod
-    def combine(cls, version: Version, codec: Codec, multihash: str|bytes|BaseMultihash) -> bytes:
+    def combine(cls, version: CIDVersion, codec: BlockCodec, multihash: str|bytes|BaseMultihash) -> bytes:
         """
         Constructs a CIDv1 byte string from its components.
 
@@ -687,7 +701,7 @@ class CIDv1(CID):
     @override
     def codec(self):
         """Codec for the CID, without multibase prefix."""
-        return cast(Codec, multicodec.get_codec(self.buffer[1:]))
+        return cast(BlockCodec, multicodec.get_codec(self.buffer[1:]))
     
     @property
     @override
@@ -765,7 +779,7 @@ class CIDv1(CID):
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[1],
-            codec: Codec,
+            codec: BlockCodec,
             function: str
         ) -> 'CIDv1': ...
     
@@ -773,7 +787,7 @@ class CIDv1(CID):
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[0, 1],
-            codec: Codec,
+            codec: BlockCodec,
             function: str
         ) -> 'CIDv0 | CIDv1': ...
 
@@ -784,7 +798,7 @@ class CIDv1(CID):
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[0, 1]=1,
-            codec: Codec='dag-cbor',
+            codec: BlockCodec='dag-cbor',
             function: str = 'sha2-256'
         ) -> 'CIDv0 | CIDv1':
         return CID.hash(data, version=version, codec=codec, function=function)

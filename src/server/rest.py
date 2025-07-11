@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Header, Query, Request, Response, UploadFile
 
 from ._common import AddParameters, AppState
-from src.ipld import dagcbor, CIDv1
+from ..ipld import dagcbor, CIDv1
 
 rest_api = FastAPI(
     title="Memoria REST API",

@@ -7,7 +7,7 @@ import sys
 
 from pydantic import BaseModel
 
-from src.ipld import CID
+from .ipld import CID
 
 class JSONStructure(Protocol):
     def __json__(self) -> "json_t": ...

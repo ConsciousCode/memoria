@@ -16,17 +16,15 @@ from pydantic import Field
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart
 from pydantic_ai.models.mcp_sampling import MCPSamplingModel, MCPSamplingModelSettings
-from pydantic_ai.settings import ModelSettings
 
-from emulator._common import EdgeAnnotation
+from ..emulator._common import EdgeAnnotation
 
 from ._common import AddParameters, AppState, mcp_lifespan
-from src.ipld import CIDv1
-from src.ipld.ipfs import CIDResolveError
-from src.memoria import Memoria
-from src.models import DraftMemory, Edge, IncompleteMemory, Memory, PartialMemory, RecallConfig, SampleConfig, StopReason, UploadResponse
-from src.prompts import CHAT_PROMPT, QUERY_PROMPT
-from src.emulator.server_emu import ServerEmulator
+from ..ipld import CIDv1, CIDResolveError
+from ..memoria import Memoria
+from ..models import DraftMemory, Edge, IncompleteMemory, Memory, PartialMemory, RecallConfig, SampleConfig, StopReason, UploadResponse
+from ..prompts import CHAT_PROMPT, QUERY_PROMPT
+from ..emulator.server import ServerEmulator
 
 DEFAULT_RECALL_CONFIG = RecallConfig()
 

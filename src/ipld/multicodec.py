@@ -7,14 +7,6 @@ __all__ = (
 )
 
 CODECS = {
-    # serialization
-    'protobuf': 0x50,
-    'cbor': 0x51,
-    'rlp': 0x60,
-    'bencode': 0x63,
-    'json': 0x0200,
-    'messagepack': 0x0201,
-
     # multiformat
     'multicodec': 0x30,
     'multihash': 0x31,

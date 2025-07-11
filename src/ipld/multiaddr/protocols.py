@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from .exceptions import ProtocolNotFoundError
 
-class Codec(Protocol):
+class MACodec(Protocol):
     SIZE: Optional[int]
     IS_PATH: bool
 
@@ -24,7 +24,7 @@ class MAProtocol:
         if name is None:
             name = 'none'
         importlib.import_module
-        return cast(Codec,
+        return cast(MACodec,
             importlib.import_module(f".codecs.{name}", __package__)
         )
 
