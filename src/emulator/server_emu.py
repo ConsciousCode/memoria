@@ -7,7 +7,7 @@ from uuid import UUID
 from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, Role, TextContent
 
-from ._common_emu import EdgeAnnotation, Emulator, EdgeAnnotationResult, QueryResult
+from ._common import EdgeAnnotation, Emulator, EdgeAnnotationResult, QueryResult
 from src.prompts import ANNOTATE_EDGES, CHAT_PROMPT
 from src.ipld import CIDv1
 from src.models import AnyMemory, CompleteMemory, DraftMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, OtherData, PartialMemory, RecallConfig, SampleConfig, SelfData, TextData

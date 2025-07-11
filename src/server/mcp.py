@@ -18,9 +18,9 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Text
 from pydantic_ai.models.mcp_sampling import MCPSamplingModel, MCPSamplingModelSettings
 from pydantic_ai.settings import ModelSettings
 
-from emulator._common_emu import EdgeAnnotation
+from emulator._common import EdgeAnnotation
 
-from ._common_server import AddParameters, AppState, mcp_lifespan
+from ._common import AddParameters, AppState, mcp_lifespan
 from src.ipld import CIDv1
 from src.ipld.ipfs import CIDResolveError
 from src.memoria import Memoria

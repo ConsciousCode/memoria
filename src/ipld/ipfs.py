@@ -5,7 +5,7 @@ import os
 
 from . import ipld, multibase, dagpb, dagcbor, dagjson
 
-from ._common_ipld import IPLData
+from ._common import IPLData
 from .dagpb import PBLink, PBNode
 from .unixfs import Data
 from .multihash import multihash

@@ -5,7 +5,7 @@ import math
 from typing import Any, Iterable
 
 from .cid import CID
-from ._common_ipld import _decodec, IPLData
+from ._common import _decodec, IPLData
 
 __all__ = (
     "marshal", "unmarshal"

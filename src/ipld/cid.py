@@ -1,11 +1,10 @@
-from functools import cached_property
-from typing import Any, ClassVar, Literal, Never, Optional, Self, cast, overload, override
+from typing import Any, ClassVar, Literal, Self, cast, overload, override
 
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import core_schema
 
-from ._common_ipld import Immutable
+from ._common import Immutable
 
 from .multihash import BaseMultihash, Multihash, multihash
 from . import multibase, multicodec

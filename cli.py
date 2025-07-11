@@ -15,7 +15,7 @@ from sampling import Sampler
 from src.util import argparse, check_overflow, expected, named_value, warn
 from src.config import Config
 from src.client import MemoriaClient
-from src.server._common_server import AddParameters
+from src.server._common import AddParameters
 from src.ipld import CIDv1
 from src.models import AnyMemory, AnyMemoryData, Edge, FileData, ImportAdapter, ImportFileData, IncompleteMemory, ImportMemory, MetaData, NodeMemory, PartialMemory, RecallConfig, SampleConfig, TextData
 
