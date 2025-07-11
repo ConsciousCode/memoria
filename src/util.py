@@ -1,8 +1,9 @@
 import json
-from typing import Callable, Iterable, Mapping, Optional, Protocol, Self, Sequence, overload
+from typing import Callable, Iterable, Iterator, Mapping, NoReturn, Optional, Protocol, Self, Sequence, overload
 import re
 from functools import wraps
 from heapq import heappop
+import sys
 
 from pydantic import BaseModel
 
@@ -145,9 +146,92 @@ def cidstr(c: bytes) -> str:
     """
     return CID(c).encode()
 
-class classproperty[T, R]:
-    def __init__(self, fn: Callable[[type[T]], R]):
-        self.fn = fn
+def unpack[*A](args: Iterable[str], *defaults: *A) -> tuple[str, ...]|tuple[*A]:
+    '''Unpack rest arguments with defaults and proper typing.'''
+    return (*args, *defaults)[:len(defaults)] # type: ignore
+
+def expected(name: str) -> NoReturn:
+    raise ValueError(f"Expected a {name}.")
+
+def warn(msg):
+    print(f"Warning: {msg}", file=sys.stderr)
+
+def check_overflow(rest):
+    if rest: warn("Too many arguments.")
+
+def parse_opts(arg: str) -> Iterator[tuple[str, Optional[str]]]:
+    """Parse command line options from a string."""
+    if arg.startswith("--"):
+        try:
+            eq = arg.index('=')
+            yield arg[2:eq], arg[eq+1:]
+        except ValueError:
+            yield arg[2:], None
+    else:
+        # short options
+        for i in range(1, len(arg)):
+            yield arg[i], None
+
+def named_value(arg: str, it: Iterator[str]) -> str:
+    try: return next(it)
+    except StopIteration:
+        expected(f"value after {arg}")
+
+def argparse(argv: tuple[str, ...], config: dict[str, bool|int|type[int]|str|type[str]]):
+    which = {}
+    for aliases, v in config.items():
+        als = aliases.split(',')
+        match [a for a in als if a.startswith("--")]:
+            case []: name = None
+            case [name]: name = name.removeprefix('--')
+            case long: raise ValueError(f"Multiple long options found: {long}")
+
+        for k in als:
+            k = k.lstrip('-')
+            which[k] = v, name or k
     
-    def __get__(self, instance, owner: type[T]) -> R:
-        return self.fn(owner)
+    pos = []
+    opts = {
+        name: t
+        for t, name in which.values()
+            if isinstance(t, (bool, int, str))
+    }
+
+    it = iter(argv)
+    try:
+        while True:
+            arg = next(it)
+            if not arg.startswith("-"):
+                pos.append(arg)
+                continue
+            
+            if arg == "--":
+                pos.extend(it)
+                break
+            
+            for opt, val in parse_opts(arg):
+                if (c := which.get(opt)) is None:
+                    raise ValueError(f"Unknown option {opt!r}")
+                
+                t, name = c
+
+                if isinstance(t, bool) or t is bool:
+                    if val is not None:
+                        raise ValueError(f"Option {opt!r} does not take a value")
+                    opts[name] = not t
+                elif isinstance(t, int) or t is int:
+                    if val is None:
+                        val = named_value(arg, it)
+                    try: opts[name] = int(val)
+                    except ValueError:
+                        raise ValueError(f"Expected an integer after {arg!r}") from None
+                elif isinstance(t, str) or t is str:
+                    if val is None:
+                        val = named_value(arg, it)
+                    opts[name] = val
+                else:
+                    raise TypeError(f"Unsupported type {t} for option {arg!r}")
+    except StopIteration:
+        pass
+    
+    return pos, opts

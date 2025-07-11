@@ -4,13 +4,15 @@ memories stores.
 '''
 
 from abc import ABC, abstractmethod
-from typing import Awaitable, Optional
+from typing import Annotated, Awaitable, Optional
+from uuid import UUID
+import re
 
 from mcp import CreateMessageResult
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.ipld import CIDv1
-from src.models import CompleteMemory, DraftMemory, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
+from src.models import CompleteMemory, DraftMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
 
 __all__ = (
     'EdgeAnnotation',
@@ -18,23 +20,70 @@ __all__ = (
     'Emulator'
 )
 
+LocalRef = Annotated[int, Field(ge=0)]
+LLMScore = Annotated[int, Field(ge=0, le=10)]
+
+class ImportanceAnnotation(BaseModel):
+    novelty: LLMScore = Field(
+        description="Novelty score for the response [0-10]."
+    )
+    intensity: LLMScore = Field(
+        description="Intensity score for the response [0-10]."
+    )
+    future: LLMScore = Field(
+        description="Future score for the response [0-10]."
+    )
+    personal: LLMScore = Field(
+        description="Personal score for the response [0-10]."
+    )
+    saliency: LLMScore = Field(
+        description="Saliency score for the response [0-10]."
+    )
+
 class EdgeAnnotation(BaseModel):
+    '''Model for LLM edge annotation.'''
+    relevance: dict[LocalRef, LLMScore] = Field(
+        description="Relevance scores for each memory [0-10]."
+    )
+    importance: ImportanceAnnotation = Field(
+        description="Importance scores for the response [0-10]."
+    )
+
+    @field_validator('relevance')
+    @classmethod
+    def validate_relevance(cls, v: dict[str, int]) -> dict[LocalRef, LLMScore]:
+        '''Ensure relevance scores are within range.'''
+        out: dict[int, LLMScore] = {}
+        for k, score in v.items():
+            # LLMs are unbelievably bad at following instructions so we need to
+            # account for random garbage like "[ref:12]" or "#12"
+            if m := re.match(r"\d+", k):
+                k = int(m[0])
+            else:
+                raise ValueError(f"Memory key {k} must be an integer.")
+            
+            if not (0 <= score <= 10):
+                raise ValueError(f"Relevance score for memory {k} must be between 0 and 10.")
+            out[k] = score
+        return out
+
+class EdgeAnnotationResult(BaseModel):
     '''Edge annotation result.'''
 
-    rel: dict[CIDv1, float] = Field(
+    relevance: dict[CIDv1, float] = Field(
         description="Relevance scores for each memory."
     )
     prompt: Optional[float] = Field(
         description="Relevance score for the prompt memory."
     )
-    imp: dict[str, float] = Field(
+    imp: ImportanceAnnotation = Field(
         description="Importance scores for the response."
     )
 
     @property
     def importance(self):
         '''Total importance score for the response.'''
-        if imp := self.imp:
+        if imp := self.imp.model_dump():
             return sum(imp.values()) / len(imp)
         return 0
     
@@ -43,7 +92,7 @@ class EdgeAnnotation(BaseModel):
         if not memory.edges:
             memory.edges = []
         
-        for ref, weight in self.rel.items():
+        for ref, weight in self.relevance.items():
             if weight < 0: continue
             if not memory.has_edge(ref):
                 memory.insert_edge(ref, weight / 10)
@@ -80,7 +129,7 @@ class Emulator(ABC):
             g: MemoryDAG,
             response: NodeMemory,
             annotate_config: SampleConfig
-        ) -> Awaitable[EdgeAnnotation]:
+        ) -> Awaitable[EdgeAnnotationResult]:
         '''
         Use sampling with a faster model to annotate which memories are
         connected and by how much.
@@ -112,3 +161,21 @@ class Emulator(ABC):
             annotate_config: SampleConfig = SampleConfig(),
         ) -> Awaitable[list[PartialMemory]]:
         '''Single-turn chat with the Memoria system.'''
+    
+    @abstractmethod
+    async def act_push(
+            self,
+            sona: UUID|str,
+            include: list[Edge[CIDv1]]
+        ) -> Optional[UUID]:
+        '''Push a prompt to the sona for processing by its ACT.'''
+    
+    @abstractmethod
+    async def act_advance(
+            self,
+            sona: UUID|str,
+            recall_config: RecallConfig = RecallConfig(),
+            chat_config: SampleConfig = SampleConfig(),
+            annotate_config: SampleConfig = SampleConfig()
+        ) -> Optional[list[PartialMemory]]:
+        '''Advance the ACT for the provided Sona, returning new memories.'''

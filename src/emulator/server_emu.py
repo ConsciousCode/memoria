@@ -2,18 +2,16 @@ from abc import abstractmethod
 from datetime import datetime
 from typing import Awaitable, Iterable, Optional, override
 import json
-import re
 from uuid import UUID
 
 from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, Role, TextContent
 
-from ._common_emu import Emulator, EdgeAnnotation, QueryResult
+from ._common_emu import EdgeAnnotation, Emulator, EdgeAnnotationResult, QueryResult
 from src.prompts import ANNOTATE_EDGES, CHAT_PROMPT
 from src.ipld import CIDv1
-from src.models import AnyMemory, CompleteMemory, DraftMemory, IncompleteMemory, MemoryDAG, NodeMemory, OtherData, PartialMemory, RecallConfig, SampleConfig, SelfData, TextData
+from src.models import AnyMemory, CompleteMemory, DraftMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, OtherData, PartialMemory, RecallConfig, SampleConfig, SelfData, TextData
 from src.memoria import Memoria
-from src.util import ifnone
 
 def build_tags(tags: list[str], timestamp: Optional[float|datetime]) -> str:
     if timestamp is not None:
@@ -88,17 +86,23 @@ class ServerEmulator(Emulator):
     def __init__(self, memoria: Memoria):
         super().__init__()
         self.memoria = memoria
-
+    
     @abstractmethod
-    def sample(self,
+    def sample_chat(self,
         messages: Iterable[SamplingMessage],
         *,
         system_prompt: str,
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        model_preferences: Optional[ModelPreferences | str | list[str]] = None,
-        related_request_id: Optional[str|int] = None
+        chat_config: SampleConfig
     ) -> Awaitable[CreateMessageResult]:
+        '''Sample a response from the chat model based on the provided messages and system prompt.'''
+
+    @abstractmethod
+    def sample_annotate(self,
+        messages: Iterable[SamplingMessage],
+        *,
+        system_prompt: str,
+        annotate_config: SampleConfig
+    ) -> Awaitable[EdgeAnnotation]:
         '''Sample a response from the LLM based on the provided messages and system prompt.'''
 
     @override
@@ -113,7 +117,7 @@ class ServerEmulator(Emulator):
             g: MemoryDAG,
             response: NodeMemory,
             annotate_config: SampleConfig
-        ) -> EdgeAnnotation:
+        ) -> EdgeAnnotationResult:
         '''
         Use sampling with a faster model to annotate which memories are
         connected and by how much.
@@ -142,9 +146,9 @@ class ServerEmulator(Emulator):
             "role": "assistant",
             "content": response.data.document()
         })
-        
+
         # Annotate the edges
-        result = await self.sample(
+        result = await self.sample_annotate(
             [SamplingMessage(
                 role="user",
                 content=TextContent(
@@ -153,55 +157,31 @@ class ServerEmulator(Emulator):
                 )
             )],
             system_prompt=ANNOTATE_EDGES,
-            temperature=0,
-            max_tokens=None,
-            model_preferences=annotate_config.model_preferences
+            annotate_config=annotate_config
         )
-
-        if not isinstance(content := result.content, TextContent):
-            raise ValueError(
-                f"Edge annotation response must be text, got {type(content)}: {content}"
-            )
         
-        try:
-            # Parse the annotation (LLMs are really bad at this and MCP
-            # doesn't support structured outputs yet)
-            assert (m := re.match(r"^(?:```(?:json)?)?([\s\S\n]+?)(?:```)?$", content.text))
-            data = json.loads(m[1])
-            
-            if not isinstance(data, dict):
-                raise ValueError(f"Edge annotation response must be a JSON object, got {type(result)}: {result}")
-            
-            # Extract the data we want from the LLM response
-            importance = data.get("importance", {})
-            edges: dict[CIDv1, float] = {}
-            prompt_rel: Optional[float] = None
-            for k, v in data.get("relevance", {}).items():
-                if v < 0: continue
-                if m := re.match(r"\d+", k):
-                    ki = int(m[0])
-                    if ki == 0: continue # Some models output 0 key???
-                    ki -= 1 # Convert to 0-based index
-                    if isinstance(v, int):
-                        # Here we're pedantic about the type because it's going
-                        # into IPLD which can distinguish between int and float
-                        v = float(v)
-                    elif not isinstance(v, float):
-                        raise ValueError(
-                            f"Edge relevance score must be a number, got {type(v)}: {v}"
-                        )
-                    if ki >= len(cids):
-                        prompt_rel = v
-                    else:
-                        edges[cids[ki]] = v
+        # Project from relative-ref space to absolute CIDs
+        edges: dict[CIDv1, float] = {}
+        prompt_rel: Optional[float] = None
+        for k, v in result.relevance.items():
+            if isinstance(v, int):
+                # Here we're pedantic about the type because it's going
+                # into IPLD which can distinguish between int and float
+                v = float(v)
+            elif not isinstance(v, float):
+                raise ValueError(
+                    f"Edge relevance score must be a number, got {type(v)}: {v}"
+                )
+            if k >= len(cids):
+                prompt_rel = v
+            else:
+                edges[cids[k]] = v
 
-            return EdgeAnnotation(
-                rel=edges,
-                prompt=prompt_rel,
-                imp=importance
-            )
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Edge annotation response is not valid JSON: {e}") from e
+        return EdgeAnnotationResult(
+            relevance=edges,
+            prompt=prompt_rel,
+            imp=result.importance
+        )
     
     def raw_insert(self, memory: IncompleteMemory) -> CompleteMemory:
         '''Just insert the memory into memoria, completing it.'''
@@ -281,12 +261,10 @@ class ServerEmulator(Emulator):
             ) + prompt.document()
         ))
 
-        response = await self.sample(
+        response = await self.sample_chat(
             messages,
             system_prompt=system_prompt,
-            temperature=ifnone(chat_config.temperature, 0.7),
-            max_tokens=chat_config.max_tokens,
-            model_preferences=chat_config.model_preferences
+            chat_config=chat_config
         )
 
         return QueryResult(g=g, chatlog=chatlog, response=response)
@@ -311,9 +289,7 @@ class ServerEmulator(Emulator):
         assert isinstance(content := query.response.content, TextContent)
         g = query.g
 
-        other_note = await self.annotate(
-            g.invert(), prompt, annotate_config
-        )
+        other_note = await self.annotate(g.invert(), prompt, annotate_config)
         other_note.apply(prompt)
         other_memory = self.raw_insert(prompt).partial()
 
@@ -336,21 +312,28 @@ class ServerEmulator(Emulator):
 
         return query.chatlog + [self_memory.partial()]
 
+    @override
+    async def act_push(
+            self,
+            sona: UUID|str,
+            include: list[Edge[CIDv1]]
+        ) -> Optional[UUID]:
+        return self.memoria.act_push(sona, include)
+
+    @override
     async def act_advance(
             self,
             sona: UUID|str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig(),
-            annotate_config: SampleConfig = SampleConfig(),
-            related_request_id: Optional[str|int] = None,
+            annotate_config: SampleConfig = SampleConfig()
         ) -> Optional[list[PartialMemory]]:
         '''
         Advance the autonomous cognitive thread by one step: recall relevant memories,
         sample a response from the LLM, annotate edges, and commit the resulting memory.
         '''
         # 1. Recall context for the next step
-        g = self.memoria.act_next(sona, recall_config)
-        if g is None:
+        if (g := self.memoria.act_next(sona, recall_config)) is None:
             return None
 
         # 2. Build sampling messages from the recalled memories
@@ -368,16 +351,12 @@ class ServerEmulator(Emulator):
             ))
 
         # 3. Sample a response from the LLM
-        result = await self.sample(
+        result = await self.sample_chat(
             messages,
             system_prompt=CHAT_PROMPT,
-            temperature=ifnone(chat_config.temperature, 1.0),
-            max_tokens=chat_config.max_tokens,
-            model_preferences=chat_config.model_preferences,
-            related_request_id=related_request_id
+            chat_config=chat_config
         )
-        content = result.content
-        if not isinstance(content, TextContent):
+        if not isinstance(content := result.content, TextContent):
             raise ValueError(f"Expected text content, got {type(content)}")
 
         # 4. Create and annotate the response memory

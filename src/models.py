@@ -59,6 +59,7 @@ class RecallConfig(BaseModel):
     ] = 0.995
 
 class SampleConfig(BaseModel):
+    # See ModelSettings from pydantic for more to include
     '''Configuration for sampling responses.'''
     temperature: Annotated[
         Optional[float],
@@ -69,7 +70,7 @@ class SampleConfig(BaseModel):
         Field(description="Maximum number of tokens to generate in the response. If `null`, uses the default value.")
     ] = None
     model_preferences: Annotated[
-        Optional[ModelPreferences | str | list[str]],
+        Optional[ModelPreferences],
         Field(description="List of preferred models to use for the response. If `null`, uses the default model.")
     ] = None
 

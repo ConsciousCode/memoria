@@ -3,6 +3,7 @@ Implements a Memoria MCP client.
 '''
 
 from datetime import timedelta
+from uuid import UUID
 from typing import Optional, cast, overload, override
 
 from fastmcp.client.transports import ClientTransport
@@ -11,8 +12,10 @@ from fastmcp.client.client import Client
 from mcp.types import TextContent
 from pydantic import BaseModel, TypeAdapter
 
-from ._common_emu import EdgeAnnotation, Emulator, QueryResult
-from src.models import CompleteMemory, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
+from ipld.cid import CIDv1
+
+from ._common_emu import EdgeAnnotationResult, Emulator, QueryResult
+from src.models import CompleteMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
 
 class ClientEmulator[TransportT: ClientTransport](Emulator):
     '''Emulator with direct access to memoria, sampling left unimplemented.'''
@@ -44,10 +47,40 @@ class ClientEmulator[TransportT: ClientTransport](Emulator):
             self.progresss_handler,
             self.timeout
         )
+        if res.isError:
+            raise ToolError(cast(TextContent, res.content[0]).text)
+        
+        if (structured := res.structuredContent) is None:
+            content = res.content[0]
+            if not isinstance(content, TextContent):
+                raise ValueError(
+                    f"Edge annotation response must be text, got {type(content)}: {content}"
+                )
+            
+            if isinstance(model, TypeAdapter):
+                return model.validate_json(content.text)
+            return model.model_validate_json(content.text)
+        else:
+            if isinstance(model, TypeAdapter):
+                return model.validate_python(structured)
+            return model.model_validate_python(structured)
 
     @override
-    async def act_advance(
+    async def act_push(
             self,
+            sona: UUID|str,
+            include: list[Edge[CIDv1]]
+        ) -> Optional[UUID]:
+        return await self._call_tool(
+            TypeAdapter(UUID),
+            "act_push", {
+                'sona': sona,
+                'include': include
+            }
+        )
+
+    @override
+    async def act_advance(self,
             sona: UUID|str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig(),
@@ -62,18 +95,6 @@ class ClientEmulator[TransportT: ClientTransport](Emulator):
                 'annotate_config': annotate_config
             }
         )
-        if res.isError:
-            raise ToolError(cast(TextContent, res.content[0]).text)
-        
-        content = res.content[0]
-        if not isinstance(content, TextContent):
-            raise ValueError(
-                f"Edge annotation response must be text, got {type(content)}: {content}"
-            )
-        
-        if isinstance(model, TypeAdapter):
-            return model.validate_json(content.text)
-        return model.model_validate_json(content.text)
 
     @override
     async def recall(self,
@@ -90,8 +111,8 @@ class ClientEmulator[TransportT: ClientTransport](Emulator):
             g: MemoryDAG,
             response: NodeMemory,
             annotate_config: SampleConfig
-        ) -> EdgeAnnotation:
-        return await self._call_tool(EdgeAnnotation, "annotate", {
+        ) -> EdgeAnnotationResult:
+        return await self._call_tool(EdgeAnnotationResult, "annotate", {
             "g": g,
             "response": response,
             "annotate_config": annotate_config

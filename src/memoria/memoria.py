@@ -202,7 +202,7 @@ class Memoria(Blocksource):
 
     def act_push(self,
             sona: UUID|str,
-            prompts: list[Edge[CIDv1]]
+            include: list[Edge[CIDv1]]
         ) -> Optional[UUID]:
         '''
         Push prompts to the sona for processing. Return the receiving
@@ -228,11 +228,9 @@ class Memoria(Blocksource):
 
                 # Create the incomplete memory to receive the response
                 response_id = db.insert_memory(IncompleteMemory(
-                    data=SelfData(
-                        parts=[],
-                    ),
+                    data=SelfData(parts=[]),
                     timestamp=int(datetime.now().timestamp()),
-                    edges=prompts,
+                    edges=include
                 ))
 
                 # Create a new pending thread
@@ -245,7 +243,7 @@ class Memoria(Blocksource):
                     )
                 )
             
-            db.link_memory_edges(response_id, prompts)
+            db.link_memory_edges(response_id, include)
 
             return UUID(bytes=sona_row.uuid)
     

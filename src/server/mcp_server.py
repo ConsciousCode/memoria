@@ -13,6 +13,12 @@ from fastmcp.exceptions import ResourceError, ToolError
 from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, PromptMessage, TextContent
 from pydantic import Field
+from pydantic_ai import Agent
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart
+from pydantic_ai.models.mcp_sampling import MCPSamplingModel, MCPSamplingModelSettings
+from pydantic_ai.settings import ModelSettings
+
+from emulator._common_emu import EdgeAnnotation
 
 from ._common_server import AddParameters, AppState, mcp_lifespan
 from src.ipld import CIDv1
@@ -44,31 +50,82 @@ DEFAULT_CHAT_CONFIG = SampleConfig(
     )
 )
 
+def sample_to_model(sample: SampleConfig) -> MCPSamplingModelSettings:
+    """Convert SampleConfig to ModelSettings."""
+    settings: MCPSamplingModelSettings = {}
+    if sample.temperature is not None:
+        settings["temperature"] = sample.temperature
+    if sample.max_tokens is not None:
+        settings["max_tokens"] = sample.max_tokens
+    if sample.model_preferences:
+        settings["mcp_model_preferences"] = sample.model_preferences
+    return settings
+
 class MCPEmulator(ServerEmulator):
     def __init__(self, context: Context, state: AppState):
         super().__init__(state.memoria)
         self.context = context
         self.state = state
+    
+    def convert_history(self, msgs: Iterable[SamplingMessage]) -> Iterable[ModelMessage]:
+        """Convert SamplingMessages to ModelRequest/ModelResponse history."""
+        for m in msgs:
+            assert isinstance(m.content, TextContent), "Only TextContent is supported"
+            text = m.content.text
+            if m.role == "user":
+                yield ModelRequest.user_text_prompt(text)
+            elif m.role == "assistant":
+                yield ModelResponse(parts=[TextPart(content=text)])
+            else:
+                raise ValueError(f"Unknown role {m.role!r}")
 
     @override
-    async def sample(self,
+    async def sample_chat(self,
             messages: Iterable[SamplingMessage],
             *,
             system_prompt: str,
-            temperature: float = 0.7,
-            max_tokens: Optional[int] = None,
-            model_preferences: Optional[ModelPreferences | str | list[str]] = None,
-            related_request_id: Optional[str|int] = None,
+            chat_config: SampleConfig
         ) -> CreateMessageResult:
-        return await self.context.request_context.session.create_message(
-            inclue_context="allServers",
-            related_request_id=related_request_id,
-            messages=list(messages),
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens or 16384,
-            model_preferences=model_preferences
+        agent = Agent(
+            model=MCPSamplingModel(
+                session=self.context.request_context.session
+            ),
+            instructions=system_prompt,
+            name="chat"
         )
+        result = await agent.run(
+            message_history=list(self.convert_history(messages)),
+            model_settings=sample_to_model(chat_config)
+        )
+        return CreateMessageResult(
+            role="assistant",
+            content=TextContent(
+                type="text",
+                text=result.output
+            ),
+            model="mcp"
+        )
+    
+    @override
+    async def sample_annotate(self,
+            messages: Iterable[SamplingMessage],
+            *,
+            system_prompt: str,
+            annotate_config: SampleConfig
+        ) -> EdgeAnnotation:
+        agent = Agent(
+            model=MCPSamplingModel(
+                session=self.context.request_context.session
+            ),
+            output_type=EdgeAnnotation,
+            instructions=system_prompt,
+            name="annotate"
+        )
+        result = await agent.run(
+            message_history=list(self.convert_history(messages)),
+            model_settings=sample_to_model(annotate_config)
+        )
+        return result.output
 
 mcp = FastMCP[Memoria]("memoria",
     """Coordinates a "sona" representing a cohesive identity and memory.""",
@@ -297,7 +354,7 @@ def act_push(
             UUID|str,
             Field(description="Sona to push the memory to.")
         ],
-        memories: Annotated[
+        include: Annotated[
             list[Edge[CIDv1]],
             Field(description="Additional memories to include in the ACT, keyed by label.")
         ]
@@ -308,7 +365,7 @@ def act_push(
     '''
     state = mcp_state(ctx)
     emu = MCPEmulator(ctx, state)
-    if u := emu.act_push(sona, memories):
+    if u := emu.act_push(sona, include):
         return u
     raise ToolError("Sona not found or prompt memory not found.")
 
@@ -396,6 +453,5 @@ async def act_advance(
         sona,
         recall_config,
         chat_config,
-        annotate_config,
-        related_request_id=ctx.request_id
+        annotate_config
     )

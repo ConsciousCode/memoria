@@ -3,15 +3,13 @@
 MCP host for Memoria: autonomously drives ACT scheduling by calling act_advance
 against a running Memoria MCP server, using the same sampling logic as the CLI.
 """
-import os
 import sys
 import asyncio
 
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.client.client import Client
-from mcp.types import SamplingMessage
 
-from cli import MemoriaApp
+from src.sampling import make_sampling_handler
 from src.emulator.client_emu import ClientEmulator
 
 
@@ -34,9 +32,8 @@ async def main():
         help="Seconds between act_advance calls")
     args = parser.parse_args()
 
-    # Instantiate MemoriaApp to use its sampling_handler and config logic
-    app = MemoriaApp([], help=None, config=os.path.expanduser(args.config))
-    sampling_handler = app.sampling_handler
+    # Build a sampling handler from standalone logic
+    sampling_handler = make_sampling_handler(args.config)
 
     # Connect to the Memoria server over MCP, providing our sampling handler
     async with Client(
