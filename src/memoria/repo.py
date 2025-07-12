@@ -7,10 +7,10 @@ from datetime import datetime
 from typing import Iterable, Optional, overload, override
 from uuid import UUID
 
-from .db import Database, FileRow
+from .db import DatabaseRO, FileRow
 
 from src.ipld import CIDv1, CID
-from src.models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, RecallConfig, SelfData, Sona, StopReason
+from src.models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, MemoryData, RecallConfig, SelfData, Sona, StopReason
 from src.util import todo_list
 from src.ipld.ipfs import Blocksource
 
@@ -24,7 +24,7 @@ class Repository(Blocksource):
     of the underlying database, but doesn't implement the MCP server.
     '''
 
-    def __init__(self, db: Database):
+    def __init__(self, db: DatabaseRO):
         super().__init__()
         self.db = db
     
@@ -57,7 +57,7 @@ class Repository(Blocksource):
         with self.db.transaction() as db:
             db.register_file(cid, filename, mimetype, filesize, overhead)
 
-    def lookup_memory(self, cid: CID) -> Optional[Memory]:
+    def lookup_memory(self, cid: CID) -> Optional[Memory[MemoryData]]:
         if isinstance(cid, CIDv1):
             return self.db.lookup_ipld_memory(cid)
     
@@ -68,7 +68,7 @@ class Repository(Blocksource):
     def lookup_file(self, cid: CID) -> Optional[FileRow]:
         return self.db.lookup_ipld_file(cid)
 
-    def insert(self, memory: AnyMemory):
+    def insert(self, memory: AnyMemory[MemoryData]):
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
             db.insert_memory(memory)
@@ -250,22 +250,24 @@ class Repository(Blocksource):
     def act_next(self,
             sona: UUID|str,
             config: Optional[RecallConfig]=None
-        ) -> Optional[MemoryDAG]:
+        ) -> MemoryDAG | bool:
         '''
         Get the next pending thread for the sona.
         
-        Returns the memory subgraph of the pending thread.
+        Returns False if the sona was not found, True if the sona was found but
+        there are no pending ACTs, and otherwise the memory subgraph of the
+        pending thread.
         '''
         with self.db.transaction() as db:
             # Find or stage the active thread
             if (sona_row := db.find_sona(sona)) is None:
-                return None
+                return False
             
             if act := db.get_act_active(sona_row.rowid):
                 memory_id = act.memory_id
             else: # No active thread, check for pending
                 if (memory_id := sona_row.pending_id) is None:
-                    return None # No threads at all
+                    return True # No threads at all
                 db.sona_stage_active(sona_row.rowid)
             
             # We used the incomplete memory's edges to store prompts, only now
@@ -337,7 +339,7 @@ class Repository(Blocksource):
             return db.update_invalid()
 
     def recall(self,
-            prompt: DraftMemory,
+            prompt: DraftMemory[MemoryData],
             config: Optional[RecallConfig]=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
@@ -352,7 +354,7 @@ class Repository(Blocksource):
     def list_messages(self,
             page: int,
             perpage: int
-        ) -> Iterable[DraftMemory]:
+        ) -> Iterable[DraftMemory[MemoryData]]:
         '''List messages in a sona.'''
         for rowid, mem in self.db.list_memories(page, perpage):
             mem.sonas = [

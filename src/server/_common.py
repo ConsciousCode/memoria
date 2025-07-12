@@ -1,18 +1,18 @@
 '''
 Common server utilities.
 '''
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import IO, Annotated, Literal, Optional, override
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field, GetCoreSchemaHandler, model_validator
 from pydantic_core import CoreSchema, core_schema
 
-from ..ipld import CID, BlockCodec, Blocksource, Blockstore, CompositeBlocksource, FlatfsBlockstore
+from ..ipld import CID, BlockCodec, Blockstore, CompositeBlocksource, FlatfsBlockstore
 from ..models import FileData, Memory
-from ..memoria import Repository, Database
+from ..memoria import Repository, database
 
 class UnsupportedError(NotImplementedError):
     pass
@@ -33,7 +33,7 @@ class NotSupportedValidator:
 def NOT_SUPPORTED(description: str):
     return Field(
         description=description + " [NOT SUPPORTED]",
-        not_supported=True # type: ignore
+        json_schema_extra={"not_supported": True} # type: ignore
     )
 
 class AddParameters(BaseModel):
@@ -98,11 +98,9 @@ class AddParameters(BaseModel):
 class AppState(Blockstore):
     '''Application state for the FastAPI app.'''
     def __init__(self, blockstore: Blockstore, repo: Repository):
-        self.blockstore: Blockstore = blockstore
-        self.memoria: Repository = repo
-        self.blocksource: Blocksource = CompositeBlocksource(
-            repo, blockstore
-        )
+        self.blockstore = blockstore
+        self.repo = repo
+        self.blocksource = CompositeBlocksource(repo, blockstore)
     
     def upload_file(self,
             stream: IO[bytes],
@@ -118,9 +116,10 @@ class AppState(Blockstore):
         )
         root = self.blockstore.block_get(cid)
         assert root, "Failed to retrieve root block after adding file."
-        created = not self.memoria.lookup_file(cid)
+        
+        created = not self.repo.lookup_file(cid)
         timestamp = params.mtime
-        self.memoria.insert(
+        self.repo.insert(
             Memory(
                 data=FileData(
                     file=cid,
@@ -135,11 +134,11 @@ class AppState(Blockstore):
     
     @override
     def block_has(self, cid: CID) -> bool:
-        return self.memoria.block_has(cid) or self.blocksource.block_has(cid)
+        return self.blocksource.block_has(cid)
 
     @override
     def block_get(self, cid: CID) -> Optional[bytes]:
-        return self.memoria.block_get(cid) or self.blocksource.block_get(cid)
+        return self.blocksource.block_get(cid)
     
     @override
     def block_put(self,
@@ -156,28 +155,26 @@ class AppState(Blockstore):
             function=function
         )
 
-@asynccontextmanager
-async def root_lifespan(app: FastAPI):
-    '''Lifespan context for the FastAPI app.'''
-    print("Root")
-    with Database("private/memoria.db") as db:
-        app.state.data = AppState(
+mcp = FastMCP[Repository]("memoria",
+    """Coordinates a "sona" representing a cohesive identity and memory."""
+)
+mcp_http = mcp.http_app()
+app = FastAPI(lifespan=mcp_http.lifespan)
+
+@contextmanager
+def get_repo():
+    '''Dependency to get the repository.'''
+    with database("private/memoria.db") as db:
+        yield Repository(db)
+
+@contextmanager
+def get_appstate():
+    '''Context manager to get the application state.'''
+    with get_repo() as repo:
+        yield AppState(
             FlatfsBlockstore("private/blocks"),
-            Repository(db)
+            repo
         )
-        yield
 
-app = FastAPI(lifespan=root_lifespan)
-
-@Depends
-def depend_appstate(request: Request) -> AppState:
-    '''Dependency to get the application state.'''
-    if not hasattr(app.state, "data"):
-        raise RuntimeError("App state not initialized.")
-    return app.state.data
-    return request.app.state.data
-
-@asynccontextmanager
-async def mcp_lifespan(server: FastMCP):
-    '''Lifespan context for the FastAPI app.'''
-    yield app.state.data
+depend_appstate = Depends(get_appstate)
+depend_repo = Depends(get_repo)

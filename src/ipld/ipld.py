@@ -1,6 +1,6 @@
 from typing import Iterable
 import json
-import cbor
+import cbor2
 
 from . import dagcbor, dagjson, dagpb
 from ._common import IPLData
@@ -57,7 +57,7 @@ def dag_load(codec: BlockCodec, block: bytes) -> IPLData:
         case 'json':
             return json.loads(block.decode('utf-8'))
         case 'cbor':
-            return cbor.loads(block)
+            return cbor2.loads(block)
 
         case _:
             raise NotImplementedError(f"Unsupported codec: {codec}")
@@ -76,7 +76,7 @@ def dag_dump(codec: BlockCodec, node: IPLData) -> str|bytes:
         case 'json':
             return json.dumps(node, indent=2).encode('utf-8')
         case 'cbor':
-            return cbor.dumps(node)
+            return cbor2.dumps(node)
 
         case _:
             raise NotImplementedError(f"Unsupported codec: {codec}")

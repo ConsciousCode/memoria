@@ -4,10 +4,12 @@ Simple RESTful API separate from the MCP API.
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, Header, Query, Response, UploadFile
+from fastapi.responses import JSONResponse
 
-from ._common import AddParameters, AppState
+from ._common import AddParameters, AppState, depend_appstate, depend_repo
 from ..ipld import dagcbor, CIDv1
+from ..memoria import Repository
 
 rest_api = FastAPI(
     title="Memoria REST API",
@@ -16,13 +18,12 @@ rest_api = FastAPI(
 
 @rest_api.get("/memory/{cid}")
 def get_memory(
-        request: Request,
         cid: CIDv1,
-        accept: Annotated[Optional[list[str]], Header()] = None
+        accept: Annotated[Optional[list[str]], Header()] = None,
+        repo: Repository = depend_repo,
     ):
     '''Get a memory by CID.'''
-    state: AppState = request.app.state
-    if memory := state.memoria.lookup_memory(cid):
+    if memory := repo.lookup_memory(cid):
         accept = accept or []
         if "application/cbor" in accept:
             return dagcbor.marshal(memory)
@@ -34,18 +35,17 @@ def get_memory(
 
 @rest_api.get("/memories")
 def list_memories(
-        request: Request,
         page: Annotated[
             int, Query(description="Page number to return.")
         ] = 1,
         perpage: Annotated[
             int, Query(description="Number of messages to return per page.")
         ] = 100,
-        accept: Annotated[Optional[list[str]], Header()] = None
+        accept: Annotated[Optional[list[str]], Header()] = None,
+        repo: Repository = depend_repo
     ):
     '''List messages in the Memoria system.'''
-    state: AppState = request.app.state
-    messages = state.memoria.list_messages(page, perpage)
+    messages = repo.list_messages(page, perpage)
     accept = accept or []
     if "application/cbor" in accept:
         return dagcbor.marshal(messages)
@@ -53,17 +53,16 @@ def list_memories(
 
 @rest_api.get("/sona/{uuid}")
 def get_sona(
-        request: Request,
         uuid: UUID|str,
-        accept: Annotated[Optional[list[str]], Header()] = None
+        accept: Annotated[Optional[list[str]], Header()] = None,
+        repo: Repository = depend_repo,
     ):
     '''Get a sona by UUID.'''
     try: uuid = UUID(uuid) # type: ignore
     except Exception:
         pass
 
-    state: AppState = request.app.state
-    if sona := state.memoria.find_sona(uuid):
+    if sona := repo.find_sona(uuid):
         accept = accept or []
         if "application/cbor" in accept:
             return dagcbor.marshal(sona)
@@ -75,7 +74,6 @@ def get_sona(
 
 @rest_api.get("/sonas")
 def list_sonas(
-        request: Request,
         accept: Annotated[
             list[str], Header(default_factory=list)
         ],
@@ -84,27 +82,48 @@ def list_sonas(
         ] = 1,
         perpage: Annotated[
             int, Query(description="Number of sonas to return per page.")
-        ] = 100
+        ] = 100,
+        repo: Repository = depend_repo
     ):
     '''List sonas in the Memoria system.'''
-    state: AppState = request.app.state
-    sonas = state.memoria.list_sonas(page, perpage)
+    sonas = repo.list_sonas(page, perpage)
     accept = accept or []
     if "application/cbor" in accept:
         return dagcbor.marshal(sonas)
     return [sona.human_json() for sona in sonas]
 
+@rest_api.get("/sona/{uuid}/act/next")
+async def act_next(
+        uuid: UUID|str,
+        repo: Repository = depend_repo,
+    ):
+    '''Advance the ACT for a sona by UUID.'''
+    try: uuid = UUID(uuid) # type: ignore
+    except Exception:
+        return Response(
+            status_code=400,
+            content=f"Invalid UUID {uuid}"
+        )
+
+    match repo.act_next(uuid):
+        case False:
+            return Response(
+                status_code=404,
+                content=f"Sona with UUID {uuid} not found."
+            )
+        case True: return JSONResponse(None)
+        case g: return JSONResponse(g.adj)
+
 @rest_api.post("/file")
 async def upload_file(
-        request: Request,
         file: UploadFile,
-        params: AddParameters = Depends()
+        params: AddParameters = Depends(),
+        state: AppState = depend_appstate
     ):
     '''Upload a file to the Memoria system.'''
     if file.content_type is None:
         raise ValueError("Content-Type header is required")
     
-    state: AppState = request.app.state
     fstream = file.file
     created, size, cid = state.upload_file(
         fstream,

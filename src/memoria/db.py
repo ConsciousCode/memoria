@@ -3,17 +3,16 @@ from typing import Callable, Iterable, Optional, Protocol, cast, overload
 import sqlite3
 from uuid import UUID
 import os
-import json
 
 from pydantic import BaseModel
 from numpy import ndarray
 import numpy
 import sqlite_vec
 from fastembed import TextEmbedding
-from uuid_extensions import uuid7
+from uuid_extension import uuid7
 
 from src.ipld import CIDv1, CID
-from src.models import ACThread, AnyACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, DraftMemory, Memory, MemoryKind, PartialMemory, RecallConfig
+from src.models import ACThread, AnyACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, DraftMemory, Memory, MemoryData, MemoryKind, PartialMemory, RecallConfig
 from src.util import finite
 
 __all__ = (
@@ -22,7 +21,8 @@ __all__ = (
     'EdgeRow',
     'SonaRow',
     'ACThreadRow', 'IncompleteACThreadRow', 'AnyACThreadRow',
-    'Database'
+    'CancelTransaction',
+    'database', "DatabaseRO", "DatabaseRW"
 )
 
 with open(os.path.join(os.path.dirname(__file__), "schema.sql"), "r") as f:
@@ -101,14 +101,14 @@ class MemoryRow(BaseMemoryRow):
             importance=importance
         )
     
-    def to_mutable(self, edges: list[Edge[CIDv1]] = []) -> DraftMemory:
+    def to_mutable(self, edges: list[Edge[CIDv1]] = []) -> DraftMemory[MemoryData]:
         '''Convert this row to a MaybeMemory object.'''
         if self.cid:
             return self.to_partial(edges)
         else:
             return self.to_incomplete(edges)
     
-    def to_incomplete(self, edges: list[Edge[CIDv1]] = []):
+    def to_incomplete(self, edges: list[Edge[CIDv1]] = []) -> IncompleteMemory[MemoryData]:
         '''Convert this row to an IncompleteMemory object.'''
         return IncompleteMemory(
             data=IncompleteMemory.build_data(self.kind, self.data),
@@ -117,7 +117,7 @@ class MemoryRow(BaseMemoryRow):
             importance=self.importance
         )
     
-    def to_partial(self, edges: list[Edge[CIDv1]] = []):
+    def to_partial(self, edges: list[Edge[CIDv1]] = []) -> PartialMemory[MemoryData]:
         '''Convert this row to a Memory object without finalizing it.'''
         return PartialMemory(
             cid=self.cid,
@@ -127,7 +127,7 @@ class MemoryRow(BaseMemoryRow):
             importance=self.importance
         )
     
-    def to_memory(self, edges: list[Edge[CIDv1]]):
+    def to_memory(self, edges: list[Edge[CIDv1]]) -> Memory[MemoryData]:
         '''Convert this row to a Memory object.'''
         return Memory(
             data=Memory.build_data(self.kind, self.data),
@@ -152,11 +152,11 @@ class IncompleteMemoryRow(BaseMemoryRow):
             importance=importance
         )
     
-    def to_maybe(self, edges: list[Edge[CIDv1]] = []) -> DraftMemory:
+    def to_maybe(self, edges: list[Edge[CIDv1]] = []) -> DraftMemory[MemoryData]:
         '''Convert this row to a MaybeMemory object.'''
         return self.to_incomplete(edges)
     
-    def to_incomplete(self, edges: list[Edge[CIDv1]] = []):
+    def to_incomplete(self, edges: list[Edge[CIDv1]] = []) -> IncompleteMemory[MemoryData]:
         '''Convert this row to an IncompleteMemory object.'''
         return IncompleteMemory(
             data=IncompleteMemory.build_data(self.kind, self.data),
@@ -165,7 +165,7 @@ class IncompleteMemoryRow(BaseMemoryRow):
             importance=self.importance
         )
 
-    def to_memory(self, edges: list[Edge[CIDv1]]):
+    def to_memory(self, edges: list[Edge[CIDv1]]) -> IncompleteMemory[MemoryData]:
         return IncompleteMemory(
             data=IncompleteMemory.build_data(self.kind, self.data),
             timestamp=self.timestamp,
@@ -264,7 +264,8 @@ class CancelTransaction(Exception):
     to be rolled back and the database to be closed.
     '''
 
-class Database:
+@contextmanager
+def database(db_path: str=":memory:"):
     '''
     All SQL queries are contained within this database class. This prevents the
     proliferation of SQL queries throughout the codebase, allowing for easier
@@ -274,30 +275,33 @@ class Database:
     must be used correctly to ensure that the database remains consistent. For
     instance, memories are inserted separately from their edges, but memories
     themselves have a `cid` which depends on those edges.
-
-    By default the Database only supports read operations to provide interface-
-    level safety wrt mutations outside of transactions. Write operations are
-    only exposed through the `DatabaseRW` subclass provided in the`transaction`
-    context manager.
     '''
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
 
-    def __init__(self, db_path: str=":memory:"):
-        self.db_path = db_path
+    conn.executescript(SCHEMA)
+    conn.commit()
+    db = DatabaseRO(conn)
+    try:
+        yield db
+    except CancelTransaction:
+        db.rollback()
+    except:
+        db.rollback()
+        raise
+    else:
+        db.commit()
 
-    def __enter__(self):
-        conn = self.conn = sqlite3.connect(self.db_path)
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        self.cursor().executescript(SCHEMA)
-        return self
-    
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.rollback() if exc_type else self.commit()
-        self.close()
-        del self.conn
-        return False
-    
+class DatabaseRO:
+    '''
+    Provides read-only access to the database. This is used to prevent
+    accidental mutations to the database when only read access is needed.
+    '''
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
     def cursor(self, factory: Optional[Factory|Callable]=None):
         cur = self.conn.cursor()
         if factory:
@@ -343,7 +347,7 @@ class Database:
         
         return False
     
-    def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory]:
+    def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory[MemoryData]]:
         '''Lookup an IPLD memory object by CID, returning its IPLD model.'''
         cur = self.cursor(MemoryRow)
         mem: Optional[MemoryRow] = cur.execute("""
@@ -542,7 +546,7 @@ class Database:
             FROM sonas WHERE uuid = ?
         """, (uuid.bytes,)).fetchone()
 
-    def ipld_memory_rowid(self, rowid: int) -> Optional[AnyMemory]:
+    def ipld_memory_rowid(self, rowid: int) -> Optional[AnyMemory[MemoryData]]:
         '''
         Build a Memory object from a memory rowid. This will also fetch the
         edges for the memory.
@@ -703,7 +707,7 @@ class Database:
                 target=which.factory(*row[:6])
             )
     
-    def list_memories(self, page: int, perpage: int) -> Iterable[tuple[int, DraftMemory]]:
+    def list_memories(self, page: int, perpage: int) -> Iterable[tuple[int, DraftMemory[MemoryData]]]:
         '''List messages in the database, paginated.'''
         cur = self.cursor(MemoryRow)
         cur.execute("""
@@ -730,11 +734,11 @@ class Database:
             LIMIT ? OFFSET ?
         """, (perpage, (page - 1) * perpage))
 
-class DatabaseRW(Database):
+class DatabaseRW(DatabaseRO):
     '''Provides mutating operations for the database.'''
 
     @classmethod
-    def _construct(cls, db: Database):
+    def _construct(cls, db: DatabaseRO):
         self = DatabaseRW.__new__(DatabaseRW)
         self.__dict__ = db.__dict__
         return self
@@ -798,7 +802,7 @@ class DatabaseRW(Database):
         return None
 
     def recall(self,
-            prompt: DraftMemory,
+            prompt: DraftMemory[MemoryData],
             config: Optional[RecallConfig]=None
         ) -> Iterable[tuple[MemoryRow, float]]:
         config = config or RecallConfig()
@@ -880,7 +884,7 @@ class DatabaseRW(Database):
         for row in cur:
             yield MemoryRow.factory(*row[:-1]), row[-1]
     
-    def finalize_memory(self, rowid: int) -> Memory:
+    def finalize_memory(self, rowid: int) -> Memory[MemoryData]:
         '''
         Finalize a memory by setting its CID and returning the memory object.
         This is used after all edges have been linked to the memory.
@@ -1034,7 +1038,7 @@ class DatabaseRW(Database):
             VALUES (?, ?)
         """, (memory_id, index))
 
-    def insert_memory(self, memory: AnyMemory) -> int:
+    def insert_memory(self, memory: AnyMemory[MemoryData]) -> int:
         cid = memory.cid
         cid = cid and cid.buffer
         cur = self.cursor()

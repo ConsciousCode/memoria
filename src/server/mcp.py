@@ -2,29 +2,29 @@
 MCP Server for Memoria
 '''
 
+from contextlib import contextmanager
 from datetime import datetime
 from io import BytesIO
 from typing import Annotated, Iterable, Optional, override
 from uuid import UUID
 import base64
 
-from fastmcp import Context, FastMCP
+from fastmcp import Context
 from fastmcp.exceptions import ResourceError, ToolError
 from mcp import CreateMessageResult, SamplingMessage
 from mcp.types import ModelPreferences, PromptMessage, TextContent
 from pydantic import Field
-from pydantic_ai import Agent
+from pydantic_ai import Agent, capture_run_messages
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart
 from pydantic_ai.models.mcp_sampling import MCPSamplingModel, MCPSamplingModelSettings
 
 from ..emulator._common import EdgeAnnotation
 
-from ._common import AddParameters, AppState, mcp_lifespan
+from ._common import AddParameters, AppState, get_appstate, get_repo, mcp
 from ..ipld import CIDv1, CIDResolveError
-from ..memoria import Repository
-from ..models import DraftMemory, Edge, IncompleteMemory, Memory, PartialMemory, RecallConfig, SampleConfig, StopReason, UploadResponse
+from ..models import DraftMemory, Edge, IncompleteMemory, Memory, NodeMemory, RecallConfig, SampleConfig, StopReason, UploadResponse
 from ..prompts import CHAT_PROMPT, QUERY_PROMPT
-from ..emulator.server import ServerEmulator
+from ..emulator.server import AnnotateMessage, ServerEmulator
 
 DEFAULT_RECALL_CONFIG = RecallConfig()
 
@@ -61,7 +61,7 @@ def sample_to_model(sample: SampleConfig) -> MCPSamplingModelSettings:
 
 class MCPEmulator(ServerEmulator):
     def __init__(self, context: Context, state: AppState):
-        super().__init__(state.memoria)
+        super().__init__(state.repo)
         self.context = context
         self.state = state
     
@@ -106,7 +106,8 @@ class MCPEmulator(ServerEmulator):
     
     @override
     async def sample_annotate(self,
-            messages: Iterable[SamplingMessage],
+            messages: Iterable[AnnotateMessage],
+            response: NodeMemory,
             *,
             system_prompt: str,
             annotate_config: SampleConfig
@@ -119,46 +120,48 @@ class MCPEmulator(ServerEmulator):
             instructions=system_prompt,
             name="annotate"
         )
-        result = await agent.run(
-            message_history=list(self.convert_history(messages)),
-            model_settings=sample_to_model(annotate_config)
-        )
-        return result.output
+        print(messages, response)
+        raise NotImplementedError("Edge annotation is not yet implemented in MCPEmulator")
+        with capture_run_messages() as run_messages:
+            try:
+                result = await agent.run(
+                    message_history=list(self.convert_history(messages)),
+                    model_settings=sample_to_model(annotate_config)
+                )
+                return result.output
+            except:
+                print(run_messages)
+                raise
 
-mcp = FastMCP[Repository]("memoria",
-    """Coordinates a "sona" representing a cohesive identity and memory.""",
-    lifespan=mcp_lifespan,
-    #log_level="DEBUG"
-)
-
-def mcp_state(ctx: Context) -> AppState:
+@contextmanager
+def mcp_emu(ctx: Context):
     '''Get the application state from the context.'''
-    return ctx.request_context.lifespan_context
+    with get_appstate() as state:
+        yield MCPEmulator(ctx, state)
 
 @mcp.resource("ipfs://{cid}")
 def ipfs_resource(ctx: Context, cid: CIDv1):
     '''IPFS resource handler.'''
-    state = mcp_state(ctx)
-    try:
-        return state.dag_get(cid)
-    except CIDResolveError:
-        raise ResourceError(f"CID {cid} not found in IPFS blockstore")
+    with get_appstate() as state:
+        try: return state.dag_get(cid)
+        except CIDResolveError:
+            raise ResourceError(f"CID {cid} not found in IPFS blockstore")
 
 @mcp.resource("memoria://sona/{uuid}")
 def sona_resource(ctx: Context, uuid: UUID):
     '''Sona resource handler.'''
-    state = mcp_state(ctx)
-    if m := state.memoria.find_sona(uuid):
-        return m
-    raise ResourceError("Sona not found")
+    with get_repo() as repo:
+        if m := repo.find_sona(uuid):
+            return m
+        raise ResourceError("Sona not found")
 
 @mcp.resource("memoria://memory/{cid}")
 def memory_resource(ctx: Context, cid: CIDv1):
     '''Memory resource handler.'''
-    state = mcp_state(ctx)
-    if m := state.memoria.lookup_memory(cid):
-        return m
-    raise ResourceError("Memory not found")
+    with get_repo() as repo:
+        if m := repo.lookup_memory(cid):
+            return m
+        raise ResourceError("Memory not found")
 
 @mcp.tool(
     annotations=dict(
@@ -188,19 +191,18 @@ async def upload(
     '''
     Upload a file to the local block store and return its CID.
     '''
-    state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state)
-    created, size, cid = emu.state.upload_file(
-        BytesIO(base64.b64decode(file)),
-        filename=filename,
-        mimetype=mimetype or "application/octet-stream",
-        params=params
-    )
-    return UploadResponse(
-        created=created,
-        size=size,
-        cid=cid
-    )
+    with mcp_emu(ctx) as emu:
+        created, size, cid = emu.state.upload_file(
+            BytesIO(base64.b64decode(file)),
+            filename=filename,
+            mimetype=mimetype or "application/octet-stream",
+            params=params
+        )
+        return UploadResponse(
+            created=created,
+            size=size,
+            cid=cid
+        )
 
 @mcp.tool(
     annotations=dict(
@@ -224,9 +226,8 @@ async def insert(
         ] = DEFAULT_ANNOTATE_CONFIG
     ):
     '''Insert a new memory into the sona.'''
-    state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state)
-    return await emu.insert(memory, recall_config, annotate_config)
+    with mcp_emu(ctx) as emu:
+        return await emu.insert(memory, recall_config, annotate_config)
 
 @mcp.tool(
     annotations=dict(
@@ -249,10 +250,9 @@ async def recall(
     Recall memories related to the prompt, including relevant included memories
     and their dependencies.
     '''
-    state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state)
-    g = await emu.recall(prompt, recall_config)
-    return dict(g.items())
+    with mcp_emu(ctx) as emu:
+        g = await emu.recall(prompt, recall_config)
+        return dict(g.items())
 
 @mcp.tool(
     annotations=dict(
@@ -280,25 +280,23 @@ async def query(
         ] = DEFAULT_CHAT_CONFIG
     ):
     '''Single-turn conversation returning the response.'''
-    state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state)
-
-    return await emu.query(
-        prompt,
-        system_prompt or QUERY_PROMPT,
-        recall_config,
-        chat_config
-    )
-    content = qr.response.content
-    assert isinstance(content, TextContent)
-
-    return qr.chatlog + [IncompleteMemory(
-        timestamp=int(datetime.now().timestamp()),
-        data=Memory.SelfData(
-            parts=[Memory.SelfData.Part(content=content.text)],
-            stop_reason=qr.response.stopReason
+    with mcp_emu(ctx) as emu:
+        return await emu.query(
+            prompt,
+            system_prompt or QUERY_PROMPT,
+            recall_config,
+            chat_config
         )
-    )]
+        content = qr.response.content
+        assert isinstance(content, TextContent)
+
+        return qr.chatlog + [IncompleteMemory(
+            timestamp=int(datetime.now().timestamp()),
+            data=Memory.SelfData(
+                parts=[Memory.SelfData.Part(content=content.text)],
+                stop_reason=qr.response.stopReason
+            )
+        )]
 
 @mcp.tool(
     annotations=dict(
@@ -331,15 +329,14 @@ async def chat(
     '''
     Single-turn conversation returning the response. This is committed to memory.
     '''
-    state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state)
-    return await emu.chat(
-        prompt,
-        system_prompt or CHAT_PROMPT,
-        recall_config,
-        chat_config,
-        annotate_config
-    )
+    with mcp_emu(ctx) as emu:
+        return await emu.chat(
+            prompt,
+            system_prompt or CHAT_PROMPT,
+            recall_config,
+            chat_config,
+            annotate_config
+        )
 
 @mcp.tool(
     annotations=dict(
@@ -361,11 +358,10 @@ def act_push(
     Insert a new memory into the sona, formatted for an ACT
     (Autonomous Cognitive Thread).
     '''
-    state = mcp_state(ctx)
-    emu = MCPEmulator(ctx, state)
-    if u := emu.act_push(sona, include):
-        return u
-    raise ToolError("Sona not found or prompt memory not found.")
+    with mcp_emu(ctx) as emu:
+        if u := emu.act_push(sona, include):
+            return u
+        raise ToolError("Sona not found or prompt memory not found.")
 
 @mcp.tool(
     annotations=dict(
@@ -395,8 +391,8 @@ def act_stream(
     Stream tokens from the LLM to the sona to be committed to memory in case
     the LLM is interrupted or the session ends unexpectedly.
     '''
-    state = mcp_state(ctx)
-    return state.memoria.act_stream(sona, delta, model, stop_reason)
+    with get_repo() as repo:
+        return repo.act_stream(sona, delta, model, stop_reason)
 
 @mcp.prompt()
 def act_next(
@@ -429,27 +425,3 @@ def act_next(
         m.prompt_message(include_final=True)
             for m in [] #serialize_dag(g)
     ]
-
-@mcp.tool(
-    annotations=dict(
-        openWorldHint=True
-    )
-)
-async def act_advance(
-        ctx: Context,
-        sona: Annotated[UUID|str, Field(description="Sona to advance.")],
-        recall_config: Annotated[RecallConfig, Field(description="Configuration for how to weight memory recall.")] = DEFAULT_RECALL_CONFIG,
-        chat_config: Annotated[SampleConfig, Field(description="Configuration for how to sample the response.")] = DEFAULT_CHAT_CONFIG,
-        annotate_config: Annotated[SampleConfig, Field(description="Configuration for how to annotate edges.")] = DEFAULT_ANNOTATE_CONFIG
-    ) -> Optional[list[PartialMemory]]:
-    '''
-    Advance the autonomous cognitive thread by one step: recall relevant memories,
-    sample a response from the LLM, annotate edges, and commit the resulting memory.
-    '''
-    emu = MCPEmulator(ctx, mcp_state(ctx))
-    return await emu.act_advance(
-        sona,
-        recall_config,
-        chat_config,
-        annotate_config
-    )

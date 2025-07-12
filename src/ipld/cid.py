@@ -275,6 +275,10 @@ class CID(Immutable):
                     codec = CIDv0.CODEC
                     multihash = multibase.base58.decode(raw)
             
+            case bytes():
+                version, raw = raw[0], raw[1:]
+                codec, multihash = multicodec.split_codec(raw)
+
             case _:
                 raise NotImplementedError(f"CID({type(raw)})")
         

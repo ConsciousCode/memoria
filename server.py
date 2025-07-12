@@ -1,11 +1,11 @@
-from src.server import app, ipfs_gateway, ipfs_api, rest_api, mcp
+from src.server import app, ipfs_gateway, ipfs_api, rest_api, mcp_http
 
 app.mount("/ipfs", ipfs_gateway)
 app.mount("/api/v0", ipfs_api)
 app.mount("/api/m0", rest_api)
 
 # Nothing can be mounted after this
-app.mount("", mcp.http_app())
+app.mount("", mcp_http)
 
 def main():
     import uvicorn

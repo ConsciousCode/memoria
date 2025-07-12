@@ -241,15 +241,13 @@ async def ipfs_cat(
         )
     ):
     """Get the content of a block by CID."""
-    if state.blocksource.block_has(cid):
+    if state.block_has(cid):
         return StreamingResponse(
-            state.blocksource.ipfs_cat(cid, offset, length),
+            state.ipfs_cat(cid, offset, length),
             media_type="application/octet-stream"
         )
     
     return Response(f"{cid} not found", status_code=404)
-
-
 
 ## Block commands ##
 
@@ -302,7 +300,7 @@ def ipfs_dag_export(
         state: AppState = depend_appstate
     ):
     """Export a DAG starting from the given CID."""
-    return StreamingResponse(state.blocksource.dag_export(cid))
+    return StreamingResponse(state.dag_export(cid))
 
 @ipfs_api.post("/dag/get")
 def ipfs_dag_get(

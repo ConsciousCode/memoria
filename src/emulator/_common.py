@@ -12,7 +12,7 @@ from mcp import CreateMessageResult
 from pydantic import BaseModel, Field, field_validator
 
 from src.ipld import CIDv1
-from src.models import CompleteMemory, DraftMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
+from src.models import CompleteMemory, DraftMemory, Edge, IncompleteMemory, MemoryDAG, MemoryData, NodeMemory, PartialMemory, RecallConfig, SampleConfig
 
 __all__ = (
     'EdgeAnnotation',
@@ -87,7 +87,7 @@ class EdgeAnnotationResult(BaseModel):
             return sum(imp.values()) / len(imp)
         return 0
     
-    def apply(self, memory: DraftMemory):
+    def apply(self, memory: DraftMemory[MemoryData]):
         '''Apply the edge annotations to the memory, modifying in-place.'''
         if not memory.edges:
             memory.edges = []
@@ -107,7 +107,7 @@ class QueryResult(BaseModel):
     g: MemoryDAG = Field(
         description="Memory DAG of the query."
     )
-    chatlog: list[PartialMemory] = Field(
+    chatlog: list[PartialMemory[MemoryData]] = Field(
         description="Chatlog of the query."
     )
     response: CreateMessageResult = Field(
@@ -119,7 +119,7 @@ class Emulator(ABC):
 
     @abstractmethod
     def recall(self,
-            prompt: IncompleteMemory,
+            prompt: IncompleteMemory[MemoryData],
             recall_config: RecallConfig = RecallConfig()
         ) -> Awaitable[MemoryDAG]:
         '''Recall supporting memories for the provided memory.'''
@@ -127,7 +127,7 @@ class Emulator(ABC):
     @abstractmethod
     def annotate(self,
             g: MemoryDAG,
-            response: NodeMemory,
+            response: NodeMemory[MemoryData],
             annotate_config: SampleConfig
         ) -> Awaitable[EdgeAnnotationResult]:
         '''
@@ -137,15 +137,15 @@ class Emulator(ABC):
 
     @abstractmethod
     def insert(self,
-            memory: IncompleteMemory,
+            memory: IncompleteMemory[MemoryData],
             recall_config: RecallConfig = RecallConfig(),
             annotate_config: SampleConfig = SampleConfig()
-        ) -> Awaitable[CompleteMemory]:
+        ) -> Awaitable[CompleteMemory[MemoryData]]:
         '''Insert a memory into the Memoria system.'''
     
     @abstractmethod
     def query(self,
-            prompt: IncompleteMemory,
+            prompt: IncompleteMemory[MemoryData],
             system_prompt: str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig()
@@ -154,12 +154,12 @@ class Emulator(ABC):
     
     @abstractmethod
     def chat(self,
-            prompt: IncompleteMemory,
+            prompt: IncompleteMemory[MemoryData],
             system_prompt: str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig(),
             annotate_config: SampleConfig = SampleConfig(),
-        ) -> Awaitable[list[PartialMemory]]:
+        ) -> Awaitable[list[PartialMemory[MemoryData]]]:
         '''Single-turn chat with the Memoria system.'''
     
     @abstractmethod
@@ -169,13 +169,3 @@ class Emulator(ABC):
             include: list[Edge[CIDv1]]
         ) -> Optional[UUID]:
         '''Push a prompt to the sona for processing by its ACT.'''
-    
-    @abstractmethod
-    async def act_advance(
-            self,
-            sona: UUID|str,
-            recall_config: RecallConfig = RecallConfig(),
-            chat_config: SampleConfig = SampleConfig(),
-            annotate_config: SampleConfig = SampleConfig()
-        ) -> Optional[list[PartialMemory]]:
-        '''Advance the ACT for the provided Sona, returning new memories.'''

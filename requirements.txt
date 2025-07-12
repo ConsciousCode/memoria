@@ -5,6 +5,9 @@ pydantic
 pydantic-ai
 mcp
 fastmcp
+fastapi
 tqdm
 protobuf
 deepmerge
+cbor2
+uuid-extension

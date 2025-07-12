@@ -12,9 +12,8 @@ from fastmcp.client.client import Client
 from mcp.types import TextContent
 from pydantic import BaseModel, TypeAdapter
 
-from ipld.cid import CIDv1
-
 from ._common import EdgeAnnotationResult, Emulator, QueryResult
+from ..ipld import CIDv1
 from ..models import CompleteMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
 
 class ClientEmulator[TransportT: ClientTransport](Emulator):
