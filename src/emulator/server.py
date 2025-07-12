@@ -81,7 +81,10 @@ def sampling_message(role: Role, content: str) -> SamplingMessage:
     )
 
 class ServerEmulator(Emulator):
-    '''Emulator with direct access to memoria, sampling left unimplemented.'''
+    '''
+    Emulator with direct access to memoria, sampling left unimplemented. Used
+    for implementing closed-loop emulators on the server for debug endpoints.
+    '''
 
     def __init__(self, repo: Repository):
         super().__init__()
@@ -241,12 +244,9 @@ class ServerEmulator(Emulator):
             messages.append(
                 SamplingMessage(
                     role=role,
-                    content=TextContent(
-                        type="text",
-                        text=content
-                    )
+                    content=TextContent(type="text", text=content)
                 )
-            )#msg.sampling_message(include_final=True))
+            )
         
         tag = f"ref:{len(messages)}"
         deps = [refs[e.target] for e in prompt.edges]

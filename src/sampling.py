@@ -1,14 +1,13 @@
-from typing import Any, Iterable
+from typing import Iterable
 from mcp.shared.context import LifespanContextT, RequestContext
 from mcp.types import ModelPreferences, TextContent, SamplingMessage
 from mcp import ClientSession, CreateMessageResult
-from pydantic_ai import Agent, RunContext
-from pydantic_ai.mcp import CallToolFunc, MCPServer, MCPServerSSE
+from pydantic_ai import Agent
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart
 from fastmcp.client.sampling import SamplingParams
 
-from cli import Config, SYSTEM_PROMPT
+from .config import Config
 
 class Sampler:
     '''
@@ -44,24 +43,6 @@ class Sampler:
             settings["temperature"] = self.config.temperature
         return settings
     
-    async def memoria_process_tool(self,
-            ctx: RunContext[str|int],
-            call_tool: CallToolFunc,
-            tool_name: str,
-            args: dict[str, Any]
-        ):
-        """Process a tool call for Memoria."""
-        # For now we just add the related_request_id
-        return await call_tool(tool_name, args, {'related_request_id': ctx.deps})
-    
-    def mcp_servers(self) -> list[MCPServer]:
-        """Return a list of MCP server URLs."""
-        memoria = MCPServerSSE(
-            self.config.server,
-            process_tool_call=self.memoria_process_tool
-        )
-        return [memoria]
-
     async def sampling_handler(self,
             msgs: list[SamplingMessage],
             params: 'SamplingParams',
@@ -75,14 +56,11 @@ class Sampler:
             model = config.build_model(name, provider) if provider else name
 
             agent = Agent(model,
-                instructions=params.systemPrompt or SYSTEM_PROMPT,
-                mcp_servers=self.mcp_servers(),
-                deps_type=str|int
+                instructions=params.systemPrompt
             )
             result = await agent.run(
                 message_history=list(self.convert_history(msgs)),
-                model_settings=self.convert_settings(params),
-                deps=ctx.related_request_id
+                model_settings=self.convert_settings(params)
             )
             return CreateMessageResult(
                 role="assistant",
