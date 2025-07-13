@@ -4,15 +4,15 @@ from typing import Awaitable, Iterable, Optional, override
 import json
 from uuid import UUID
 
-from mcp import CreateMessageResult, SamplingMessage
+from mcp import SamplingMessage
 from mcp.types import Role, TextContent
 from pydantic import BaseModel
 
 from ._common import EdgeAnnotation, Emulator, EdgeAnnotationResult, QueryResult
-from src.prompts import ANNOTATE_EDGES, CHAT_PROMPT
-from src.ipld import CIDv1
-from src.models import AnyMemory, CompleteMemory, DraftMemory, Edge, IncompleteMemory, MemoryDAG, MemoryData, NodeMemory, OtherData, PartialMemory, RecallConfig, SampleConfig, SelfData, TextData
-from src.memoria import Repository
+from ..prompts import ANNOTATE_EDGES
+from ..ipld import CIDv1
+from ..memory import AnyMemory, CompleteMemory, DraftMemory, Edge, MemoryDAG, OtherData, PartialMemory, RecallConfig, SampleConfig, SelfData, TextData
+from ..repo import Repository
 
 def build_tags(tags: list[str], timestamp: Optional[float|datetime]) -> str:
     if timestamp is not None:
@@ -84,7 +84,7 @@ def sampling_message(role: Role, content: str) -> SamplingMessage:
 class AnnotateMessage(BaseModel):
     index: int
     deps: list[int]
-    memory: PartialMemory[MemoryData]
+    memory: PartialMemory
 
 class ServerEmulator(Emulator):
     '''
@@ -102,13 +102,13 @@ class ServerEmulator(Emulator):
         *,
         system_prompt: str,
         chat_config: SampleConfig
-    ) -> Awaitable[CreateMessageResult]:
+    ) -> Awaitable[DraftMemory]:
         '''Sample a response from the chat model based on the provided messages and system prompt.'''
 
     @abstractmethod
     def sample_annotate(self,
         messages: Iterable[AnnotateMessage],
-        response: NodeMemory[MemoryData],
+        response: AnyMemory,
         *,
         system_prompt: str,
         annotate_config: SampleConfig
@@ -117,7 +117,7 @@ class ServerEmulator(Emulator):
 
     @override
     async def recall(self,
-            prompt: DraftMemory[MemoryData],
+            prompt: AnyMemory,
             recall_config: RecallConfig = RecallConfig()
         ) -> MemoryDAG:
         return self.repo.recall(prompt, recall_config)
@@ -125,7 +125,7 @@ class ServerEmulator(Emulator):
     @override
     async def annotate(self,
             g: MemoryDAG,
-            response: NodeMemory[MemoryData],
+            response: AnyMemory,
             annotate_config: SampleConfig
         ) -> EdgeAnnotationResult:
         '''
@@ -177,19 +177,13 @@ class ServerEmulator(Emulator):
             prompt=prompt_rel,
             imp=result.importance
         )
-    
-    def raw_insert(self, memory: IncompleteMemory[MemoryData]) -> CompleteMemory[MemoryData]:
-        '''Just insert the memory into memoria, completing it.'''
-        cmem = memory.complete()
-        self.repo.insert(cmem)
-        return cmem
 
     @override
     async def insert(self,
-            memory: IncompleteMemory[MemoryData],
+            memory: DraftMemory,
             recall_config: RecallConfig = RecallConfig(),
             annotate_config: SampleConfig = SampleConfig()
-        ) -> CompleteMemory[MemoryData]:
+        ) -> CompleteMemory:
         '''Insert a memory into the Memoria system.'''
         # If no timestamp is provided, use the current time
         if memory.timestamp is None:
@@ -203,11 +197,12 @@ class ServerEmulator(Emulator):
         annotation.apply(memory)
         
         # Insert it
-        return self.raw_insert(memory)
+        self.repo.insert(memory)
+        return memory.complete()
     
     @override
     async def query(self,
-            prompt: IncompleteMemory[MemoryData],
+            prompt: AnyMemory,
             system_prompt: str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig()
@@ -219,7 +214,7 @@ class ServerEmulator(Emulator):
         # to annotate edges, and thus don't need localized references.
 
         refs: dict[CIDv1, int] = {}
-        chatlog: list[PartialMemory[MemoryData]] = []
+        chatlog: list[PartialMemory] = []
         messages: list[SamplingMessage] = []
         #for msg in serialize_dag(g, refs):
         for cid in g.invert().toposort(key=lambda v: v.timestamp):
@@ -263,12 +258,12 @@ class ServerEmulator(Emulator):
     
     @override
     async def chat(self,
-            prompt: IncompleteMemory[MemoryData],
+            prompt: CompleteMemory,
             system_prompt: str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig(),
             annotate_config: SampleConfig = SampleConfig(),
-        ) -> list[PartialMemory[MemoryData]]:
+        ) -> list[PartialMemory]:
         '''Single-turn chat with the Memoria system.'''
         
         # Query the chat model
@@ -278,10 +273,15 @@ class ServerEmulator(Emulator):
             recall_config,
             chat_config
         )
-        note = await self.annotate(query.g, prompt, annotate_config)
-        note.apply(prompt)
-        memory = self.raw_insert(prompt).partial()
-        return query.chatlog + [memory]
+        g = query.g
+        other_memory = prompt.partial()
+        self_memory = query.response
+        g.insert(other_memory.cid, other_memory)
+        note = await self.annotate(query.g, self_memory, annotate_config)
+        note.apply(self_memory)
+        self.repo.insert(prompt)
+        self.repo.insert(self_memory)
+        return query.chatlog + [other_memory]
 
     @override
     async def act_push(

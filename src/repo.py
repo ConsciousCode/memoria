@@ -8,11 +8,10 @@ from typing import Iterable, Optional, overload, override
 from uuid import UUID
 
 from .db import DatabaseRO, FileRow
-
-from src.ipld import CIDv1, CID
-from src.models import ACThread, AnyMemory, Edge, IncompleteMemory, DraftMemory, Memory, MemoryDAG, MemoryData, RecallConfig, SelfData, Sona, StopReason
-from src.util import todo_list
-from src.ipld.ipfs import Blocksource
+from .ipld import CIDv1, CID
+from .memory import ACThread, AnyMemory, Edge, DraftMemory, Memory, MemoryDAG, MemoryData, RecallConfig, SelfData, Sona, StopReason
+from .util import todo_list
+from .ipld import Blocksource
 
 __all__ = (
     'Repository',
@@ -57,7 +56,7 @@ class Repository(Blocksource):
         with self.db.transaction() as db:
             db.register_file(cid, filename, mimetype, filesize, overhead)
 
-    def lookup_memory(self, cid: CID) -> Optional[Memory[MemoryData]]:
+    def lookup_memory(self, cid: CID) -> Optional[Memory]:
         if isinstance(cid, CIDv1):
             return self.db.lookup_ipld_memory(cid)
     
@@ -68,7 +67,7 @@ class Repository(Blocksource):
     def lookup_file(self, cid: CID) -> Optional[FileRow]:
         return self.db.lookup_ipld_file(cid)
 
-    def insert(self, memory: AnyMemory[MemoryData]):
+    def insert(self, memory: AnyMemory):
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
             db.insert_memory(memory)
@@ -227,7 +226,7 @@ class Repository(Blocksource):
                 )
 
                 # Create the incomplete memory to receive the response
-                response_id = db.insert_memory(IncompleteMemory(
+                response_id = db.insert_memory(DraftMemory(
                     data=SelfData(parts=[]),
                     timestamp=int(datetime.now().timestamp()),
                     edges=include
@@ -274,7 +273,7 @@ class Repository(Blocksource):
             #  do we actually run recall on them.
             edges: list[Edge[CIDv1]] = []
             for e in db.backward_edges(memory_id):
-                prompt = e.target.to_incomplete()
+                prompt = e.target.to_draft()
                 for row, score in db.recall(prompt, config):
                     if cid := row.cid:
                         edges.append(Edge(
@@ -312,10 +311,11 @@ class Repository(Blocksource):
             if (mr := db.select_memory_rowid(thread.memory_id)) is None:
                 return "thread memory not found"
             
-            if mr.kind != "self":
-                return "thread memory is not a self memory"
+            draft = mr.to_draft()
+            data = draft.data
+            if data.kind != "self":
+                return "thread memory is not self memory"
             
-            data = Memory.build_data('self', mr.data)
             last = data.parts[-1] if data.parts else None
             if last and (model is None or last.model == model):
                 last.content += delta or ""
@@ -339,7 +339,7 @@ class Repository(Blocksource):
             return db.update_invalid()
 
     def recall(self,
-            prompt: DraftMemory[MemoryData],
+            prompt: AnyMemory,
             config: Optional[RecallConfig]=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
@@ -354,7 +354,7 @@ class Repository(Blocksource):
     def list_messages(self,
             page: int,
             perpage: int
-        ) -> Iterable[DraftMemory[MemoryData]]:
+        ) -> Iterable[DraftMemory]:
         '''List messages in a sona.'''
         for rowid, mem in self.db.list_memories(page, perpage):
             mem.sonas = [

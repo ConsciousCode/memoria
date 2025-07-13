@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from datetime import datetime
 from functools import cached_property
-from typing import Annotated, Iterable, Literal, Optional, overload, override
+from typing import Annotated, Iterable, Literal, Optional, override
 from uuid import UUID
 import json
 
@@ -17,14 +17,14 @@ __all__ = (
     'StopReason',
     'RecallConfig', 'SampleConfig',
     'IPLDModel',
-    'Edge', 'BaseMemory', 'NodeMemory',
-    'DraftMemory', 'IncompleteMemory', 'PartialMemory', 'Memory',
+    'Edge', 'BaseMemory',
+    'DraftMemory', 'PartialMemory', 'Memory',
     'CompleteMemory', 'AnyMemory',
     'AnyACThread', 'IncompleteACThread', 'ACThread',
     'Sona', 'MemoryDAG'
 )
 
-type MemoryKind = Literal["self", "other", "text", "image", "file"]
+type MemoryKind = Literal["self", "other", "text", "image", "file", "metadata"]
 type StopReason = Literal["endTurn", "stopSequence", "maxTokens"] | str
 
 class RecallConfig(BaseModel):
@@ -165,7 +165,7 @@ class ImportFileData(BaseModel):
     IPLD model, but is used for importing files into the memory system.
     '''
     kind: Literal["import"] = "import"
-    file: str = Field(
+    path: str = Field(
         description="File path or URL of the file to import."
     )
     filename: Optional[str] = Field(
@@ -177,23 +177,28 @@ class ImportFileData(BaseModel):
         description="MIME type of the file to import, if known."
     )
 
-type AnyMemoryData = Annotated[
-    SelfData | OtherData | TextData | FileData | MetaData | ImportFileData,
-    Field(discriminator="kind")
-]
-'''Most permissive type for memory data, including import files.'''
-
 type MemoryData = Annotated[
     SelfData | OtherData | TextData | FileData | MetaData,
     Field(discriminator="kind")
 ]
 '''Memory data which can actually be stored.'''
 
+type AnyMemoryData = Annotated[
+    SelfData | OtherData | TextData | FileData | MetaData | ImportFileData,
+    Field(discriminator="kind")
+]
+'''Most permissive type for memory data, including import files.'''
+
 class BaseMemory[D: AnyMemoryData=MemoryData](BaseModel):
     '''Base memory model.'''
 
     data: D
     timestamp: Optional[int] = None
+    edges: list[Edge[CIDv1]] = Field(
+        default_factory=list,
+        description="Edges to other memories."
+    )
+    # Extra metadata not included in the IPLD model
     importance: Optional[float] = Field(
         default=None,
         exclude=True,
@@ -203,43 +208,6 @@ class BaseMemory[D: AnyMemoryData=MemoryData](BaseModel):
         default=None,
         exclude=True,
         description="Sonas the memory belongs to."
-    )
-
-    def document(self) -> str:
-        if isinstance(self.data, Documenting):
-            return self.data.document()
-        return ""
-
-    @overload
-    @classmethod
-    def build_data(cls, kind: Literal["self"], json: str) -> SelfData: ...
-    @overload
-    @classmethod
-    def build_data(cls, kind: Literal["other"], json: str) -> OtherData: ...
-    @overload
-    @classmethod
-    def build_data(cls, kind: Literal["text"], json: str) -> TextData: ...
-    @overload
-    @classmethod
-    def build_data(cls, kind: Literal["image", "file"], json: str) -> FileData: ...
-
-    @classmethod
-    def build_data(cls, kind: MemoryKind, json: str) -> AnyMemoryData:
-        '''Build memory data based on the kind.'''
-        match kind:
-            case "self": return SelfData.model_validate_json(json)
-            case "other": return OtherData.model_validate_json(json)
-            case "text": return TextData.model_validate_json(json)
-            case "image" | "file": return FileData.model_validate_json(json)
-            case _:
-                raise ValueError(f"Unknown memory kind: {kind}")
-
-class NodeMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
-    '''A memory which is a node in the memory graph, i.e. has edges.'''
-
-    edges: list[Edge[CIDv1]] = Field(
-        default_factory=list,
-        description="Edges to other memories."
     )
 
     def edge(self, target: CIDv1) -> Optional[Edge[CIDv1]]:
@@ -252,17 +220,19 @@ class NodeMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
     def has_edge(self, target: CIDv1):
         return any(target == e.target for e in self.edges)
 
-    def insert_edge(self, target: CIDv1, weight: float):
-        '''Insert an edge to the target memory with the given weight.'''
-        if self.edge(target) is None:
-            self.edges.append(Edge(
-                target=target,
-                weight=weight
-            ))
+    def document(self) -> str:
+        if isinstance(self.data, Documenting):
+            return self.data.document()
+        return ""
 
-class DraftMemory[D: AnyMemoryData=MemoryData](NodeMemory[D]):
-    '''A memory which cannot derive a CID.'''
-    
+class DraftMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
+    '''
+    A memory which is incomplete and in the process of being created.
+    Cannot be assigned a CID.
+    '''
+
+    cid: None = None
+
     def insert_edge(self, target: CIDv1, weight: float):
         '''Insert an edge to the target memory with the given weight.'''
         if self.edge(target) is not None:
@@ -272,14 +242,6 @@ class DraftMemory[D: AnyMemoryData=MemoryData](NodeMemory[D]):
             target=target,
             weight=weight
         ))
-
-class IncompleteMemory[D: AnyMemoryData=MemoryData](DraftMemory[D]):
-    '''
-    A memory which is incomplete and in the process of being created.
-    Cannot be assigned a CID.
-    '''
-
-    cid: None = None
 
     def complete(self) -> 'Memory[D]':
         '''Complete the memory by adding edges and returning a Memory object.'''
@@ -291,17 +253,17 @@ class IncompleteMemory[D: AnyMemoryData=MemoryData](DraftMemory[D]):
             sonas=self.sonas
         )
 
-class PartialMemory[D: AnyMemoryData=MemoryData](DraftMemory[D]):
+class PartialMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
     '''
-    A memory which is complete but does not have its full contents. Thus
-    the CID can't be calculated from it and must be provided.
+    A memory which is complete but does not have its full contents. The
+    CID can't be calculated and must be provided explicitly.
     '''
     cid: CIDv1
 
     def partial(self):
         return self
 
-class Memory[D: AnyMemoryData=MemoryData](NodeMemory[D], IPLDModel):
+class Memory[D: AnyMemoryData=MemoryData](BaseMemory[D], IPLDModel):
     '''A completed memory which can be referred to by CID.'''
 
     model_config = ConfigDict(frozen=True)
@@ -326,11 +288,14 @@ class Memory[D: AnyMemoryData=MemoryData](NodeMemory[D], IPLDModel):
 type CompleteMemory[D: AnyMemoryData=MemoryData] = PartialMemory[D] | Memory[D]
 '''A memory with a CID.'''
 
-type AnyMemory[D: AnyMemoryData=MemoryData] = IncompleteMemory[D] | PartialMemory[D] | Memory[D]
+type AnyMemory[D: AnyMemoryData=MemoryData] = DraftMemory[D] | CompleteMemory[D]
+'''Any kind of instantiable memory.'''
 
-class ImportMemory[D: AnyMemoryData=MemoryData](DraftMemory[D]):
+class ImportMemory(DraftMemory[ImportFileData]):
     '''Base memory model.'''
     type: Literal['memory'] = "memory"
+    '''Used to disambiguate this memory from ImportConvo.'''
+    
     deps: Optional[list[DraftMemory[MemoryData]]] = Field(
         default=None,
         description="Non-conversational dependencies of the memory, if any."
@@ -370,7 +335,7 @@ class ImportConvo(BaseModel):
         default=None,
         description="CID of the previous memory in the thread, if any."
     )
-    chatlog: list[ImportMemory[AnyMemoryData]] = Field(
+    chatlog: list[ImportMemory] = Field(
         description="Chatlog to insert into the system."
     )
 
@@ -388,7 +353,7 @@ class IncompleteACThread[D: MemoryData=MemoryData](BaseModel):
     '''A thread of memories in the agent's context.'''
     cid: None = None # Incomplete threads can't have a cid
     sona: UUID
-    memory: IncompleteMemory[D] # Can't be referred to by cid
+    memory: DraftMemory[D] # Can't be referred to by cid
     prev: Optional[CIDv1] = None
 
 class ACThread(IPLDModel):
@@ -397,7 +362,7 @@ class ACThread(IPLDModel):
     memory: CIDv1
     prev: Optional[CIDv1] = None
 
-type AnyACThread = IncompleteACThread | ACThread
+type AnyACThread[D: MemoryData=MemoryData] = IncompleteACThread[D] | ACThread
 
 class UploadResponse(BaseModel):
     created: bool = Field(
@@ -442,10 +407,10 @@ class Sona(BaseModel):
             "pending": self.pending and self.pending.model_dump()
         }
 
-class MemoryDAG(IGraph[CIDv1, float, PartialMemory[MemoryData], PartialMemory[MemoryData]]):
+class MemoryDAG(IGraph[CIDv1, float, PartialMemory, PartialMemory]):
     '''IPLD data model for memories implementing the IGraph interface.'''
 
-    def __init__(self, keys: dict[CIDv1, PartialMemory[MemoryData]]|None = None):
+    def __init__(self, keys: dict[CIDv1, PartialMemory]|None = None):
         super().__init__()
         self.adj = keys or {}
 
@@ -472,13 +437,13 @@ class MemoryDAG(IGraph[CIDv1, float, PartialMemory[MemoryData], PartialMemory[Me
         )
     
     @override
-    def _node(self, value: PartialMemory[MemoryData]) -> PartialMemory[MemoryData]:
+    def _node(self, value: PartialMemory) -> PartialMemory:
         copy = value.model_copy(deep=True)
         copy.edges = []
         return copy
     
     @override
-    def _setvalue(self,  node: PartialMemory[MemoryData], value: PartialMemory[MemoryData]):
+    def _setvalue(self,  node: PartialMemory, value: PartialMemory):
         # We're assigning the discriminant with the data together so despite
         #  not being technically correct, there is no observable type violations
         node.kind = value.kind # type: ignore
@@ -487,16 +452,16 @@ class MemoryDAG(IGraph[CIDv1, float, PartialMemory[MemoryData], PartialMemory[Me
         node.edges = value.edges
     
     @override
-    def _valueof(self, node: PartialMemory[MemoryData]) -> PartialMemory[MemoryData]:
+    def _valueof(self, node: PartialMemory) -> PartialMemory:
         return node
     
     @override
-    def _edges(self, node: PartialMemory[MemoryData]) -> Iterable[tuple[CIDv1, float]]:
+    def _edges(self, node: PartialMemory) -> Iterable[tuple[CIDv1, float]]:
         for edge in node.edges:
             yield edge.target, edge.weight
 
     @override
-    def _add_edge(self, src: PartialMemory[MemoryData], dst: CIDv1, edge: float):
+    def _add_edge(self, src: PartialMemory, dst: CIDv1, edge: float):
         if not any(dst == e.target for e in src.edges):
             src.edges.append(Edge[CIDv1](
                 target=dst,
@@ -504,7 +469,7 @@ class MemoryDAG(IGraph[CIDv1, float, PartialMemory[MemoryData], PartialMemory[Me
             ))
     
     @override
-    def _pop_edge(self, src: PartialMemory[MemoryData], dst: CIDv1) -> Optional[float]:
+    def _pop_edge(self, src: PartialMemory, dst: CIDv1) -> Optional[float]:
         edges = src.edges
         for i, edge in enumerate(edges):
             if edge.target == dst:

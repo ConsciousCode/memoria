@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from typing import Callable, Iterable, Optional, Protocol, cast, overload
+from typing import Callable, Iterable, Literal, Optional, Protocol, cast, overload
 import sqlite3
 from uuid import UUID
 import os
@@ -11,9 +11,9 @@ import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extension import uuid7
 
-from src.ipld import CIDv1, CID
-from src.models import ACThread, AnyACThread, AnyMemory, Edge, IncompleteACThread, IncompleteMemory, DraftMemory, Memory, MemoryData, MemoryKind, PartialMemory, RecallConfig
-from src.util import finite
+from .ipld import CIDv1, CID
+from .memory import ACThread, AnyACThread, AnyMemory, Edge, FileData, IncompleteACThread, DraftMemory, Memory, MemoryKind, MetaData, OtherData, PartialMemory, RecallConfig, SelfData, TextData
+from .util import finite
 
 __all__ = (
     'FileRow',
@@ -63,6 +63,28 @@ class FileRow(BaseModel):
             overhead=overhead
         )
 
+@overload
+def memory_data(kind: Literal["self"], json: str) -> SelfData: ...
+@overload
+def memory_data(kind: Literal["other"], json: str) -> OtherData: ...
+@overload
+def memory_data(kind: Literal["text"], json: str) -> TextData: ...
+@overload
+def memory_data(kind: Literal["image", "file"], json: str) -> FileData: ...
+@overload
+def memory_data(kind: Literal["metadata"], json: str) -> MetaData: ...
+
+def memory_data(kind: MemoryKind, json: str):
+    '''Build memory data based on the kind.'''
+    match kind:
+        case "self": return SelfData.model_validate_json(json)
+        case "other": return OtherData.model_validate_json(json)
+        case "text": return TextData.model_validate_json(json)
+        case "image" | "file": return FileData.model_validate_json(json)
+        case "metadata": return MetaData.model_validate_json(json)
+        case _:
+            raise ValueError(f"Unknown memory kind: {kind}")
+
 class BaseMemoryRow(BaseModel):
     '''
     Split MemoryRow into complete and incomplete varieties for type-level
@@ -101,36 +123,29 @@ class MemoryRow(BaseMemoryRow):
             importance=importance
         )
     
-    def to_mutable(self, edges: list[Edge[CIDv1]] = []) -> DraftMemory[MemoryData]:
-        '''Convert this row to a MaybeMemory object.'''
-        if self.cid:
-            return self.to_partial(edges)
-        else:
-            return self.to_incomplete(edges)
-    
-    def to_incomplete(self, edges: list[Edge[CIDv1]] = []) -> IncompleteMemory[MemoryData]:
+    def to_draft(self, edges: list[Edge[CIDv1]] = []):
         '''Convert this row to an IncompleteMemory object.'''
-        return IncompleteMemory(
-            data=IncompleteMemory.build_data(self.kind, self.data),
+        return DraftMemory(
+            data=memory_data(self.kind, self.data),
             timestamp=self.timestamp,
             edges=edges,
             importance=self.importance
         )
     
-    def to_partial(self, edges: list[Edge[CIDv1]] = []) -> PartialMemory[MemoryData]:
+    def to_partial(self, edges: list[Edge[CIDv1]] = []) -> PartialMemory:
         '''Convert this row to a Memory object without finalizing it.'''
         return PartialMemory(
             cid=self.cid,
-            data=Memory.build_data(self.kind, self.data),
+            data=memory_data(self.kind, self.data),
             timestamp=self.timestamp,
             edges=edges,
             importance=self.importance
         )
     
-    def to_memory(self, edges: list[Edge[CIDv1]]) -> Memory[MemoryData]:
+    def to_memory(self, edges: list[Edge[CIDv1]]) -> Memory:
         '''Convert this row to a Memory object.'''
         return Memory(
-            data=Memory.build_data(self.kind, self.data),
+            data=memory_data(self.kind, self.data),
             timestamp=self.timestamp,
             edges=edges,
             importance=self.importance
@@ -152,22 +167,18 @@ class IncompleteMemoryRow(BaseMemoryRow):
             importance=importance
         )
     
-    def to_maybe(self, edges: list[Edge[CIDv1]] = []) -> DraftMemory[MemoryData]:
-        '''Convert this row to a MaybeMemory object.'''
-        return self.to_incomplete(edges)
-    
-    def to_incomplete(self, edges: list[Edge[CIDv1]] = []) -> IncompleteMemory[MemoryData]:
+    def to_draft(self, edges: list[Edge[CIDv1]] = []):
         '''Convert this row to an IncompleteMemory object.'''
-        return IncompleteMemory(
-            data=IncompleteMemory.build_data(self.kind, self.data),
+        return DraftMemory(
+            data=memory_data(self.kind, self.data),
             timestamp=self.timestamp,
             edges=edges,
             importance=self.importance
         )
-
-    def to_memory(self, edges: list[Edge[CIDv1]]) -> IncompleteMemory[MemoryData]:
-        return IncompleteMemory(
-            data=IncompleteMemory.build_data(self.kind, self.data),
+    
+    def to_memory(self, edges: list[Edge[CIDv1]]) -> Memory:
+        return Memory(
+            data=memory_data(self.kind, self.data),
             timestamp=self.timestamp,
             edges=edges,
             importance=self.importance
@@ -347,7 +358,7 @@ class DatabaseRO:
         
         return False
     
-    def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory[MemoryData]]:
+    def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory]:
         '''Lookup an IPLD memory object by CID, returning its IPLD model.'''
         cur = self.cursor(MemoryRow)
         mem: Optional[MemoryRow] = cur.execute("""
@@ -460,7 +471,7 @@ class DatabaseRO:
         if row.cid is None:
             return IncompleteACThread(
                 sona=UUID(bytes=sona.uuid),
-                memory=memory.to_incomplete(),
+                memory=memory.to_draft(),
                 prev=prev and prev.cid
             )
         
@@ -546,7 +557,7 @@ class DatabaseRO:
             FROM sonas WHERE uuid = ?
         """, (uuid.bytes,)).fetchone()
 
-    def ipld_memory_rowid(self, rowid: int) -> Optional[AnyMemory[MemoryData]]:
+    def ipld_memory_rowid(self, rowid: int) -> Optional[AnyMemory]:
         '''
         Build a Memory object from a memory rowid. This will also fetch the
         edges for the memory.
@@ -596,8 +607,8 @@ class DatabaseRO:
         
         return IncompleteACThread(
             sona=UUID(bytes=s_cid),
-            memory=IncompleteMemory(
-                data=IncompleteMemory.build_data(m_kind, m_data),
+            memory=DraftMemory(
+                data=memory_data(m_kind, m_data),
                 timestamp=m_timestamp,
                 edges=[
                     Edge(target=e.target.cid, weight=e.weight)
@@ -707,7 +718,7 @@ class DatabaseRO:
                 target=which.factory(*row[:6])
             )
     
-    def list_memories(self, page: int, perpage: int) -> Iterable[tuple[int, DraftMemory[MemoryData]]]:
+    def list_memories(self, page: int, perpage: int) -> Iterable[tuple[int, DraftMemory]]:
         '''List messages in the database, paginated.'''
         cur = self.cursor(MemoryRow)
         cur.execute("""
@@ -802,7 +813,7 @@ class DatabaseRW(DatabaseRO):
         return None
 
     def recall(self,
-            prompt: DraftMemory[MemoryData],
+            prompt: AnyMemory,
             config: Optional[RecallConfig]=None
         ) -> Iterable[tuple[MemoryRow, float]]:
         config = config or RecallConfig()
@@ -884,7 +895,7 @@ class DatabaseRW(DatabaseRO):
         for row in cur:
             yield MemoryRow.factory(*row[:-1]), row[-1]
     
-    def finalize_memory(self, rowid: int) -> Memory[MemoryData]:
+    def finalize_memory(self, rowid: int) -> Memory:
         '''
         Finalize a memory by setting its CID and returning the memory object.
         This is used after all edges have been linked to the memory.
@@ -899,7 +910,7 @@ class DatabaseRW(DatabaseRO):
         m = mr.to_memory([
             Edge(target=e.target.cid, weight=e.weight)
                 for e in self.backward_edges(rowid)
-        ]).complete()
+        ])
         cur = self.cursor()
         cur.execute("""
             UPDATE memories SET cid = ? WHERE rowid = ?
@@ -1038,7 +1049,7 @@ class DatabaseRW(DatabaseRO):
             VALUES (?, ?)
         """, (memory_id, index))
 
-    def insert_memory(self, memory: AnyMemory[MemoryData]) -> int:
+    def insert_memory(self, memory: AnyMemory) -> int:
         cid = memory.cid
         cid = cid and cid.buffer
         cur = self.cursor()

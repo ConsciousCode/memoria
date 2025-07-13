@@ -14,7 +14,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from ._common import EdgeAnnotationResult, Emulator, QueryResult
 from ..ipld import CIDv1
-from ..models import CompleteMemory, Edge, IncompleteMemory, MemoryDAG, NodeMemory, PartialMemory, RecallConfig, SampleConfig
+from ..memory import AnyMemory, CompleteMemory, DraftMemory, Edge, MemoryDAG, PartialMemory, RecallConfig, SampleConfig
 
 class ClientEmulator[TransportT: ClientTransport](Emulator):
     '''Emulator with direct access to memoria, sampling left unimplemented.'''
@@ -79,25 +79,8 @@ class ClientEmulator[TransportT: ClientTransport](Emulator):
         )
 
     @override
-    async def act_advance(self,
-            sona: UUID|str,
-            recall_config: RecallConfig = RecallConfig(),
-            chat_config: SampleConfig = SampleConfig(),
-            annotate_config: SampleConfig = SampleConfig()
-        ) -> list[PartialMemory]:
-        return await self._call_tool(
-            TypeAdapter(list[PartialMemory]),
-            "act_advance", {
-                'sona': sona,
-                'recall_config': recall_config,
-                'chat_config': chat_config,
-                'annotate_config': annotate_config
-            }
-        )
-
-    @override
     async def recall(self,
-            prompt: IncompleteMemory,
+            prompt: AnyMemory,
             recall_config: RecallConfig = RecallConfig()
         ) -> MemoryDAG:
         return await self._call_tool(TypeAdapter(MemoryDAG), "recall", {
@@ -108,7 +91,7 @@ class ClientEmulator[TransportT: ClientTransport](Emulator):
     @override
     async def annotate(self,
             g: MemoryDAG,
-            response: NodeMemory,
+            response: AnyMemory,
             annotate_config: SampleConfig
         ) -> EdgeAnnotationResult:
         return await self._call_tool(EdgeAnnotationResult, "annotate", {
@@ -119,7 +102,7 @@ class ClientEmulator[TransportT: ClientTransport](Emulator):
     
     @override
     async def insert(self,
-            memory: NodeMemory,
+            memory: DraftMemory,
             recall_config: RecallConfig = RecallConfig(),
             annotate_config: SampleConfig = SampleConfig()
         ) -> CompleteMemory:
@@ -131,7 +114,7 @@ class ClientEmulator[TransportT: ClientTransport](Emulator):
     
     @override
     async def query(self,
-            prompt: NodeMemory,
+            prompt: AnyMemory,
             system_prompt: str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig()
@@ -145,7 +128,7 @@ class ClientEmulator[TransportT: ClientTransport](Emulator):
     
     @override
     async def chat(self,
-            prompt: IncompleteMemory,
+            prompt: CompleteMemory,
             system_prompt: str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig(),

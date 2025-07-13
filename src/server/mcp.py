@@ -22,7 +22,7 @@ from ..emulator._common import EdgeAnnotation
 
 from ._common import AddParameters, AppState, get_appstate, get_repo, mcp
 from ..ipld import CIDv1, CIDResolveError
-from ..models import DraftMemory, Edge, IncompleteMemory, Memory, NodeMemory, RecallConfig, SampleConfig, StopReason, UploadResponse
+from ..memory import AnyMemory, DraftMemory, Edge, Memory, RecallConfig, SampleConfig, SelfData, StopReason, UploadResponse
 from ..prompts import CHAT_PROMPT, QUERY_PROMPT
 from ..emulator.server import AnnotateMessage, ServerEmulator
 
@@ -83,7 +83,7 @@ class MCPEmulator(ServerEmulator):
             *,
             system_prompt: str,
             chat_config: SampleConfig
-        ) -> CreateMessageResult:
+        ) -> DraftMemory:
         agent = Agent(
             model=MCPSamplingModel(
                 session=self.context.request_context.session
@@ -95,19 +95,18 @@ class MCPEmulator(ServerEmulator):
             message_history=list(self.convert_history(messages)),
             model_settings=sample_to_model(chat_config)
         )
-        return CreateMessageResult(
-            role="assistant",
-            content=TextContent(
-                type="text",
-                text=result.output
+        return DraftMemory(
+            data=SelfData(
+                parts=[SelfData.Part(content=result.output)],
+                stop_reason=None
             ),
-            model="mcp"
+            timestamp=int(datetime.now().timestamp())
         )
     
     @override
     async def sample_annotate(self,
             messages: Iterable[AnnotateMessage],
-            response: NodeMemory,
+            response: AnyMemory,
             *,
             system_prompt: str,
             annotate_config: SampleConfig
@@ -213,7 +212,7 @@ async def upload(
 async def insert(
         ctx: Context,
         memory: Annotated[
-            IncompleteMemory,
+            DraftMemory,
             Field(description="Memory to insert.")
         ],
         recall_config: Annotated[
@@ -263,7 +262,7 @@ async def recall(
 async def query(
         ctx: Context,
         prompt: Annotated[
-            IncompleteMemory,
+            DraftMemory,
             Field(description="Prompt for the chat. If `null`, use only the included memories.")
         ],
         system_prompt: Annotated[
@@ -306,7 +305,7 @@ async def query(
 async def chat(
         ctx: Context,
         prompt: Annotated[
-            IncompleteMemory,
+            Memory,
             Field(description="Prompt for the chat. If `null`, use only the included memories.")
         ],
         system_prompt: Annotated[

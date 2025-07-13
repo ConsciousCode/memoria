@@ -3,7 +3,7 @@ from base64 import b64encode
 
 from fastmcp.client.transports import ClientTransport
 
-from .models import UploadResponse
+from .memory import UploadResponse
 from .server._common import AddParameters
 from .emulator.client import ClientEmulator
 

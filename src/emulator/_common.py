@@ -8,11 +8,10 @@ from typing import Annotated, Awaitable, Optional
 from uuid import UUID
 import re
 
-from mcp import CreateMessageResult
 from pydantic import BaseModel, Field, field_validator
 
-from src.ipld import CIDv1
-from src.models import CompleteMemory, DraftMemory, Edge, IncompleteMemory, MemoryDAG, MemoryData, NodeMemory, PartialMemory, RecallConfig, SampleConfig
+from ..ipld import CIDv1
+from ..memory import AnyMemory, CompleteMemory, DraftMemory, Edge, MemoryDAG, PartialMemory, RecallConfig, SampleConfig
 
 __all__ = (
     'EdgeAnnotation',
@@ -87,7 +86,7 @@ class EdgeAnnotationResult(BaseModel):
             return sum(imp.values()) / len(imp)
         return 0
     
-    def apply(self, memory: DraftMemory[MemoryData]):
+    def apply(self, memory: DraftMemory):
         '''Apply the edge annotations to the memory, modifying in-place.'''
         if not memory.edges:
             memory.edges = []
@@ -107,10 +106,10 @@ class QueryResult(BaseModel):
     g: MemoryDAG = Field(
         description="Memory DAG of the query."
     )
-    chatlog: list[PartialMemory[MemoryData]] = Field(
+    chatlog: list[PartialMemory] = Field(
         description="Chatlog of the query."
     )
-    response: CreateMessageResult = Field(
+    response: DraftMemory = Field(
         description="Response from the LLM to the query."
     )
 
@@ -119,7 +118,7 @@ class Emulator(ABC):
 
     @abstractmethod
     def recall(self,
-            prompt: IncompleteMemory[MemoryData],
+            prompt: AnyMemory,
             recall_config: RecallConfig = RecallConfig()
         ) -> Awaitable[MemoryDAG]:
         '''Recall supporting memories for the provided memory.'''
@@ -127,7 +126,7 @@ class Emulator(ABC):
     @abstractmethod
     def annotate(self,
             g: MemoryDAG,
-            response: NodeMemory[MemoryData],
+            response: AnyMemory,
             annotate_config: SampleConfig
         ) -> Awaitable[EdgeAnnotationResult]:
         '''
@@ -137,15 +136,15 @@ class Emulator(ABC):
 
     @abstractmethod
     def insert(self,
-            memory: IncompleteMemory[MemoryData],
+            memory: DraftMemory,
             recall_config: RecallConfig = RecallConfig(),
             annotate_config: SampleConfig = SampleConfig()
-        ) -> Awaitable[CompleteMemory[MemoryData]]:
+        ) -> Awaitable[CompleteMemory]:
         '''Insert a memory into the Memoria system.'''
     
     @abstractmethod
     def query(self,
-            prompt: IncompleteMemory[MemoryData],
+            prompt: AnyMemory,
             system_prompt: str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig()
@@ -154,12 +153,12 @@ class Emulator(ABC):
     
     @abstractmethod
     def chat(self,
-            prompt: IncompleteMemory[MemoryData],
+            prompt: CompleteMemory,
             system_prompt: str,
             recall_config: RecallConfig = RecallConfig(),
             chat_config: SampleConfig = SampleConfig(),
             annotate_config: SampleConfig = SampleConfig(),
-        ) -> Awaitable[list[PartialMemory[MemoryData]]]:
+        ) -> Awaitable[list[PartialMemory]]:
         '''Single-turn chat with the Memoria system.'''
     
     @abstractmethod

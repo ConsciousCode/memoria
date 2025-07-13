@@ -3,12 +3,11 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
 import os
-from typing import TYPE_CHECKING, Final, Optional, Sequence, cast
+from typing import Final, Optional, Sequence, cast
 import inspect
 from uuid import UUID
 import mimetypes
 
-from mcp.types import TextContent
 from tqdm import tqdm
 
 from src.sampling import Sampler
@@ -17,7 +16,7 @@ from src.config import Config
 from src.client import MemoriaClient
 from src.server._common import AddParameters
 from src.ipld import CIDv1
-from src.models import AnyMemory, AnyMemoryData, Edge, FileData, ImportAdapter, ImportFileData, IncompleteMemory, ImportMemory, MetaData, NodeMemory, PartialMemory, RecallConfig, SampleConfig, TextData
+from src.memory import AnyMemory, AnyMemoryData, DraftMemory, Edge, FileData, ImportAdapter, ImportMemory, Memory, MetaData, PartialMemory, RecallConfig, SampleConfig, TextData
 
 SERVER: Final = "http://127.0.0.1:8000/mcp"
 CONFIG: Final = "./private/memoria.toml"
@@ -165,7 +164,7 @@ class MemoriaApp:
             metadata_cid: Optional[CIDv1],
             prev: Optional[CIDv1],
             client: MemoriaClient,
-            memory: NodeMemory[AnyMemoryData]
+            memory: DraftMemory | ImportMemory
         ) -> CIDv1:
         if sona:
             if memory.sonas is None:
@@ -178,13 +177,13 @@ class MemoriaApp:
         if prev:
             memory.edges.append(Edge(target=prev, weight=1.0))
         
-        if isinstance(memory.data, ImportFileData):
-            with open(memory.data.file, "rb") as f:
+        if isinstance(memory, ImportMemory):
+            with open(memory.data.path, "rb") as f:
                 data = f.read()
             if (filename := memory.data.filename):
                 filename = os.path.basename(filename)
             else:
-                filename = memory.data.file
+                filename = memory.data.path
             
             ipfs = self.get_config().ipfs
             params = AddParameters(
@@ -199,7 +198,7 @@ class MemoriaApp:
                 params
             )
             # Substitute for a normal file memory
-            memory = IncompleteMemory(
+            memory = DraftMemory(
                 data=FileData(
                     file=uploaded.cid,
                     filename=filename,
@@ -340,7 +339,7 @@ class MemoriaApp:
                     ts = part.metadata.timestamp
                     md = await self.insert_memory(
                         config, sona, None, None, client,
-                        IncompleteMemory(
+                        DraftMemory(
                             data=MetaData(
                                 metadata=MetaData.Content(
                                     export=MetaData.Content.Export(
@@ -395,7 +394,7 @@ class MemoriaApp:
         config = self.get_config()
         async with self.mcp() as client:
             chatlog = await client.chat(
-                prompt=IncompleteMemory(
+                prompt=Memory(
                     data=TextData(content=message)
                 ),
                 system_prompt=SYSTEM_PROMPT,
@@ -446,7 +445,7 @@ class MemoriaApp:
         config = self.get_config()
         async with self.mcp() as client:
             chatlog = await client.query(
-                prompt=IncompleteMemory(
+                prompt=Memory(
                     data=TextData(content=message),
                 ),
                 system_prompt=SYSTEM_PROMPT,
@@ -474,9 +473,7 @@ class MemoriaApp:
             )
             if verbose:
                 print("<user>", message)
-                content = chatlog.response.content
-                assert isinstance(content, TextContent)
-                print("<assistant>", content.text)
+                print("<assistant>", chatlog.response.document())
 
     async def subcmd_recall(self, *argv: str):
         '''
@@ -510,7 +507,7 @@ class MemoriaApp:
                 sona = self.get_config().sona
 
             g = await client.recall(
-                prompt=IncompleteMemory(
+                prompt=Memory(
                     data=TextData(content=search),
                     sonas=[str(sona)]
                 ),
