@@ -11,7 +11,7 @@ import base64
 
 from fastmcp import Context
 from fastmcp.exceptions import ResourceError, ToolError
-from mcp import CreateMessageResult, SamplingMessage
+from mcp import SamplingMessage
 from mcp.types import ModelPreferences, PromptMessage, TextContent
 from pydantic import Field
 from pydantic_ai import Agent, capture_run_messages
@@ -119,7 +119,7 @@ class MCPEmulator(ServerEmulator):
             instructions=system_prompt,
             name="annotate"
         )
-        print(messages, response)
+        print(list(messages), response)
         raise NotImplementedError("Edge annotation is not yet implemented in MCPEmulator")
         with capture_run_messages() as run_messages:
             try:
@@ -280,22 +280,13 @@ async def query(
     ):
     '''Single-turn conversation returning the response.'''
     with mcp_emu(ctx) as emu:
-        return await emu.query(
+        qr = await emu.query(
             prompt,
             system_prompt or QUERY_PROMPT,
             recall_config,
             chat_config
         )
-        content = qr.response.content
-        assert isinstance(content, TextContent)
-
-        return qr.chatlog + [IncompleteMemory(
-            timestamp=int(datetime.now().timestamp()),
-            data=Memory.SelfData(
-                parts=[Memory.SelfData.Part(content=content.text)],
-                stop_reason=qr.response.stopReason
-            )
-        )]
+        return qr.chatlog + [qr.response]
 
 @mcp.tool(
     annotations=dict(
@@ -342,7 +333,7 @@ async def chat(
         openWorldHint=False
     )
 )
-def act_push(
+def push(
         ctx: Context,
         sona: Annotated[
             UUID|str,
@@ -354,73 +345,10 @@ def act_push(
         ]
     ):
     '''
-    Insert a new memory into the sona, formatted for an ACT
+    Insert a new memory into the sona to be processed by its next ACT
     (Autonomous Cognitive Thread).
     '''
     with mcp_emu(ctx) as emu:
         if u := emu.act_push(sona, include):
             return u
         raise ToolError("Sona not found or prompt memory not found.")
-
-@mcp.tool(
-    annotations=dict(
-        openWorldHint=False
-    )
-)
-def act_stream(
-        ctx: Context,
-        sona: Annotated[
-            UUID|str,
-            Field(description="Sona to push the memory to.")
-        ],
-        delta: Annotated[
-            Optional[str],
-            Field(description="Delta to append to the memory.")
-        ],
-        model: Annotated[
-            Optional[str],
-            Field(description="Model which generated this delta.")
-        ] = None,
-        stop_reason: Annotated[
-            Optional[StopReason],
-            Field(description="Reason for stopping the stream, if applicable.")
-        ] = None,
-    ):
-    '''
-    Stream tokens from the LLM to the sona to be committed to memory in case
-    the LLM is interrupted or the session ends unexpectedly.
-    '''
-    with get_repo() as repo:
-        return repo.act_stream(sona, delta, model, stop_reason)
-
-@mcp.prompt()
-def act_next(
-        ctx: Context,
-        sona: Annotated[
-            str,
-            Field(description="Sona to process, either a name or UUID.")
-        ],
-        timestamp: Annotated[
-            Optional[float],
-            Field(description="Timestamp to use for the recall recency. If `null`, uses the current time.")
-        ] = None,
-        chat_config: Annotated[
-            RecallConfig,
-            Field(description="Configuration for how to weight memory recall.")
-        ] = DEFAULT_RECALL_CONFIG
-    ) -> Optional[list[PromptMessage]]:
-    '''Get the prompt for the next step of an ACT (Autonomous Cognitive Thread).'''
-    raise NotImplementedError()
-    memoria = mcp_context(ctx)
-    g = memoria.act_next(
-        sona,
-        timestamp or datetime.now().timestamp(),
-        chat_config
-    )
-    if g is None:
-        return None
-
-    return [
-        m.prompt_message(include_final=True)
-            for m in [] #serialize_dag(g)
-    ]

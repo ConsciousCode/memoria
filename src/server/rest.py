@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from ._common import AddParameters, AppState, depend_appstate, depend_repo
 from ..ipld import dagcbor, CIDv1
-from ..memoria import Repository
+from ..repo import Repository
 
 rest_api = FastAPI(
     title="Memoria REST API",

@@ -9,7 +9,7 @@ from uuid import UUID
 
 from .db import DatabaseRO, FileRow
 from .ipld import CIDv1, CID
-from .memory import ACThread, AnyMemory, Edge, DraftMemory, Memory, MemoryDAG, MemoryData, RecallConfig, SelfData, Sona, StopReason
+from .memory import ACThread, AnyMemory, Edge, DraftMemory, Memory, MemoryDAG, RecallConfig, SelfData, Sona, StopReason
 from .util import todo_list
 from .ipld import Blocksource
 

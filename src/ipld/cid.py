@@ -278,6 +278,7 @@ class CID(Immutable):
             case bytes():
                 version, raw = raw[0], raw[1:]
                 codec, multihash = multicodec.split_codec(raw)
+                print(codec, multihash)
 
             case _:
                 raise NotImplementedError(f"CID({type(raw)})")
@@ -454,13 +455,13 @@ class CID(Immutable):
                 raise TypeError(
                     f"CIDv0 requires codec {CIDv0.CODEC}, got {codec}"
                 )
-            return CIDv0(multihash(function, data).digest)
+            return CIDv0(multihash(function, data))
         elif version != 1:
             raise TypeError(
                 f"Unsupported CID version {version!r}, expected 0 or 1"
             )
         else:
-            return CIDv1(codec, multihash(function, data).digest)
+            return CIDv1(codec, multihash(function, data))
 
 class CIDv0(CID):
     """ CID version 0 object """
@@ -681,6 +682,7 @@ class CIDv1(CID):
         super().__init__(self.combine(version, codec, multihash))
 
     def __repr__(self):
+        print("CID repr", self.buffer.hex())
         return f"CIDv1({self.codec!r}, {self.multihash!r})"
 
     @classmethod

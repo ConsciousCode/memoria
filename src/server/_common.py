@@ -1,63 +1,27 @@
 '''
 Common server utilities.
 '''
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import contextmanager
 from typing import IO, Annotated, Literal, Optional, override
 from datetime import datetime
 
 from fastapi import Depends, FastAPI
 from fastmcp import FastMCP
-from pydantic import BaseModel, Field, GetCoreSchemaHandler, model_validator
-from pydantic_core import CoreSchema, core_schema
+from pydantic import BaseModel, Field
 
 from ..ipld import CID, BlockCodec, Blockstore, CompositeBlocksource, FlatfsBlockstore
-from ..models import FileData, Memory
-from ..memoria import Repository, database
-
-class UnsupportedError(NotImplementedError):
-    pass
-
-class NotSupportedValidator:
-    def validate_with_field_name(self, value, wrap, info):
-        raise UnsupportedError(info.field_name)
-    
-    def __get_pydantic_core_schema__(self,
-            source_type,
-            handler: GetCoreSchemaHandler,
-        ) -> CoreSchema:
-        return core_schema.with_info_wrap_validator_function(
-            self.validate_with_field_name,
-            handler(source_type)
-        )
-
-def NOT_SUPPORTED(description: str):
-    return Field(
-        description=description + " [NOT SUPPORTED]",
-        json_schema_extra={"not_supported": True} # type: ignore
-    )
+from ..memory import FileData, Memory
+from ..repo import Repository
+from ..db import database
 
 class AddParameters(BaseModel):
     """Kubo /api/v0/add parameters with validation"""
+    '''
     recursive: Annotated[
         bool, NOT_SUPPORTED('Add directory paths recursively.')
     ] = False
     wrap_with_directory: Annotated[
         bool, NOT_SUPPORTED('wrap_with_directory')
-    ] = False
-    pin: Annotated[
-        bool, NOT_SUPPORTED("Pin locally to protect from GC.")
-    ] = False
-    progress: Annotated[
-        bool, NOT_SUPPORTED(description="Stream progress data.")
-    ] = False
-    quiet: Annotated[
-        bool, NOT_SUPPORTED(description="Write minimal output.")
-    ] = False
-    quieter: Annotated[
-        bool, NOT_SUPPORTED(description="Write only final hash.")
-    ] = False
-    silent: Annotated[
-        bool, NOT_SUPPORTED(description="Write no output.")
     ] = False
     only_hash: Annotated[
         bool, NOT_SUPPORTED(description="Only chunk and hash.")
@@ -68,32 +32,19 @@ class AddParameters(BaseModel):
     raw_leaves: Annotated[
         bool, NOT_SUPPORTED(description="Use raw blocks for leaves.")
     ] = True
+    '''
     cid_version: Annotated[
         Literal[0, 1], Field(description="CID version.")
     ] = 1 # We use raw-leaves by default, so CIDv1 is preferred.
     hash: Annotated[
         str, Field(description="Hash function.")
     ] = "sha2-256"
-    chunker: Annotated[
-        Optional[str], NOT_SUPPORTED(description="Chunking algorithm.")
-    ] = None
+    #chunker: Annotated[
+    #    Optional[str], NOT_SUPPORTED(description="Chunking algorithm.")
+    #] = None
     mtime: Annotated[
-        Optional[int], NOT_SUPPORTED(description="File modification time in seconds since epoch.")
+        Optional[int], Field(description="File modification time in seconds since epoch.")
     ] = None
-
-    @model_validator(mode="after")
-    def check_not_supported_fields(self):
-        for name, field in AddParameters.model_fields.items():
-            extra = field.json_schema_extra
-            if callable(extra):
-                continue
-            if extra and extra.get("not_supported"):
-                value = getattr(self, name)
-                default = field.default
-                # If the value is not the default, raise error
-                if value != default:
-                    raise UnsupportedError(f"Field '{name}' is not supported.")
-        return self
 
 class AppState(Blockstore):
     '''Application state for the FastAPI app.'''
@@ -171,10 +122,7 @@ def get_repo():
 def get_appstate():
     '''Context manager to get the application state.'''
     with get_repo() as repo:
-        yield AppState(
-            FlatfsBlockstore("private/blocks"),
-            repo
-        )
+        yield AppState(FlatfsBlockstore("private/blocks"), repo)
 
 depend_appstate = Depends(get_appstate)
 depend_repo = Depends(get_repo)
