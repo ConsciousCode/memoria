@@ -8,11 +8,12 @@ from io import BytesIO
 from typing import Annotated, Iterable, Optional, override
 from uuid import UUID
 import base64
+import json
 
 from fastmcp import Context
 from fastmcp.exceptions import ResourceError, ToolError
 from mcp import SamplingMessage
-from mcp.types import ModelPreferences, PromptMessage, TextContent
+from mcp.types import ModelPreferences, TextContent
 from pydantic import Field
 from pydantic_ai import Agent, capture_run_messages
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart
@@ -22,7 +23,7 @@ from ..emulator._common import EdgeAnnotation
 
 from ._common import AddParameters, AppState, get_appstate, get_repo, mcp
 from ..ipld import CIDv1, CIDResolveError
-from ..memory import AnyMemory, DraftMemory, Edge, Memory, RecallConfig, SampleConfig, SelfData, StopReason, UploadResponse
+from ..memory import AnyMemory, DraftMemory, Edge, Memory, RecallConfig, SampleConfig, SelfData, UploadResponse
 from ..prompts import CHAT_PROMPT, QUERY_PROMPT
 from ..emulator.server import AnnotateMessage, ServerEmulator
 
@@ -65,18 +66,6 @@ class MCPEmulator(ServerEmulator):
         self.context = context
         self.state = state
     
-    def convert_history(self, msgs: Iterable[SamplingMessage]) -> Iterable[ModelMessage]:
-        """Convert SamplingMessages to ModelRequest/ModelResponse history."""
-        for m in msgs:
-            assert isinstance(m.content, TextContent), "Only TextContent is supported"
-            text = m.content.text
-            if m.role == "user":
-                yield ModelRequest.user_text_prompt(text)
-            elif m.role == "assistant":
-                yield ModelResponse(parts=[TextPart(content=text)])
-            else:
-                raise ValueError(f"Unknown role {m.role!r}")
-
     @override
     async def sample_chat(self,
             messages: Iterable[SamplingMessage],
@@ -91,8 +80,19 @@ class MCPEmulator(ServerEmulator):
             instructions=system_prompt,
             name="chat"
         )
+        history: list[ModelMessage] = []
+        for m in messages:
+            assert isinstance(m.content, TextContent), "Only TextContent is supported"
+            text = m.content.text
+            if m.role == "user":
+                history.append(ModelRequest.user_text_prompt(text))
+            elif m.role == "assistant":
+                history.append(ModelResponse(parts=[TextPart(content=text)]))
+            else:
+                raise ValueError(f"Unknown role {m.role!r}")
+        
         result = await agent.run(
-            message_history=list(self.convert_history(messages)),
+            message_history=history,
             model_settings=sample_to_model(chat_config)
         )
         return DraftMemory(
@@ -119,12 +119,14 @@ class MCPEmulator(ServerEmulator):
             instructions=system_prompt,
             name="annotate"
         )
-        print(list(messages), response)
-        raise NotImplementedError("Edge annotation is not yet implemented in MCPEmulator")
+        data = {
+            "history": [m.model_dump() for m in messages],
+            "response": response.model_dump()
+        }
         with capture_run_messages() as run_messages:
             try:
                 result = await agent.run(
-                    message_history=list(self.convert_history(messages)),
+                    json.dumps(data),
                     model_settings=sample_to_model(annotate_config)
                 )
                 return result.output
