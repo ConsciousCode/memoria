@@ -5,7 +5,7 @@ including extracting, adding, and removing prefixes, as well as checking codec v
 '''
 
 from . import varint
-from .multihash import HASH_CODES
+from multihash import HASH_CODES
 
 __all__ = (
     'extract_prefix', 'get_prefix', 'add_prefix', 'remove_prefix',

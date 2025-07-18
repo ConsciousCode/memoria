@@ -7,12 +7,13 @@ from functools import cached_property
 from typing import IO, Callable, Iterable, Literal, Optional, override
 import os
 
-from . import multibase, dag, dagpb
-from ._common import IPLData
-from .unixfs import Data
-from .multihash import multihash
-from .cid import CID, CIDv0, BlockCodec
-from .car import CARv2Index, carv1_iter, carv2_iter
+from ipld.unixfs.wrap import BigFileData, SmallFileData
+from multihash import multihash
+import multibase
+
+from ipld import dag, dagpb, CID, CIDv0, BlockCodec, CARv2Index, carv1_iter, carv2_iter
+
+from ipld import IPLData, unixfs
 
 __all__ = (
     'CIDResolveError', 'RawBlockLink', 'DAGPBNode', 'FileLeaf', 'FileNode',
@@ -42,14 +43,14 @@ class DAGPBNode(dagpb.PBNode):
 
     @cached_property
     def cid(self):
-        return CIDv0(multihash("sha2-256", self.dump()))
+        return CIDv0(multihash("sha2-256", self.marshal()))
 
 class FileLeaf(DAGPBNode):
     '''Leaf of an IPFS UnixFS file.'''
     def __init__(self, data: bytes):
         super().__init__(
             Links=[],
-            Data=Data(Type=Data.File, Data=data).SerializeToString()
+            Data=SmallFileData(data=data).marshal()
         )
         self.size = len(data)
 
@@ -71,11 +72,10 @@ class FileNode(DAGPBNode):
         
         super().__init__(
             Links=links,
-            Data=Data(
-                Type=Data.File,
+            Data=BigFileData(
                 blocksizes=blocksizes,
                 filesize=size
-            ).SerializeToString()
+            ).marshal()
         )
         self.size = size
 
@@ -144,28 +144,33 @@ class Blocksource(ABC):
             raise CIDResolveError(cid)
         
         node = dagpb.unmarshal(node_data)
-        data = Data()
-        data.ParseFromString(node.Data)
         
-        if node.Links:
-            for size, link in zip(data.blocksizes, node.Links):
-                # Skip until we reach the offset
-                if offset >= size:
-                    offset -= size
-                    continue
-                
-                yield from self.ipfs_cat(CID(link.Hash), offset, length)
-                
-                # No more offset from this point
-                offset = 0
+        match unixfs.unmarshal(node.Data):
+            case SmallFileData(data=data):
+                yield data[offset:][:length]
+            
+            case BigFileData(blocksizes=blocksizes):
+                for size, link in zip(blocksizes, node.Links):
+                    # Skip until we reach the offset
+                    if offset >= size:
+                        offset -= size
+                        continue
+                    
+                    yield from self.ipfs_cat(CID(link.Hash), offset, length)
+                    
+                    # No more offset from this point
+                    offset = 0
 
-                # Length upkeep
-                if length is not None:
-                    length -= size
-                    if length <= 0:
-                        break # Early break when we're done
-        else:
-            yield node.Data[offset:][:length]
+                    # Length upkeep
+                    if length is not None:
+                        length -= size
+                        if length <= 0:
+                            break # Early break when we're done
+            
+            case data:
+                raise NotImplementedError(
+                    f"ipfs_cat of {type(data)} is not supported"
+                )
 
 type ChunkingStrategy = Callable[[IO[bytes]], Iterable[bytes]]
 """Strategy for chunking a stream into smaller parts."""
@@ -255,7 +260,7 @@ class Blockstore(Blocksource):
             return blocks[0].cid
 
         return self.block_put(
-            FileNode(blocks).dump(),
+            FileNode(blocks).marshal(),
             cid_version=cid_version,
             codec=codec,
             function=function

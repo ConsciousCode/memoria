@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 from . import dagcbor, dagjson, dagpb
 from ._common import IPLData
-from .cid import CID, BlockCodec
+from cid import CID, BlockCodec
 
 def links(data: IPLData) -> Iterable[CID]:
     """Extract all CIDs from an IPLD data structure."""

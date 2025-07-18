@@ -2,10 +2,12 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Iterable, Iterator, Literal, Optional, override
 
-from . import varint, dagcbor
-from .cid import CIDv1
+import varint
+import dagcbor
+from cid import CIDv1
 
 __all__ = (
+    'CARv2Index',
     'carv1_iter', 'carv2_iter', 'carv1', 'carv2',
 )
 

@@ -4,9 +4,10 @@ DAG-JSON encoding and decoding.
 
 import json
 
-from . import multibase
+import multibase
+
 from ._common import encodec, decodec, IPLData
-from .cid import CID, CIDv0, CIDv1
+from cid import CID, CIDv0, CIDv1
 
 @encodec("DAG-JSON")
 def _dagjson_encode(data):

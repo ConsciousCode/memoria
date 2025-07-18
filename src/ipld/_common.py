@@ -1,10 +1,12 @@
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Self
+from typing import TYPE_CHECKING, Any, Callable, Self
 
 if TYPE_CHECKING:
+    from typing import Mapping, Iterable
     from .cid import CID, CIDv0, CIDv1
 
 type IPLData = Mapping[str, IPLData]|Iterable[IPLData]|CID|CIDv0|CIDv1|bytes|str|int|float|bool|None
+'''A type alias for IPLD-compatible data structures.'''
 
 def encodec(name: str):
     '''Wrap common logic for dag-* encoding functions.'''
@@ -39,6 +41,7 @@ def encodec(name: str):
 def decodec(name: str):
     '''Wrap common logic for dag-* decoding functions.'''
     def staged(pre_decode: Callable[[Any], IPLData]):
+        @wraps(pre_decode)
         def transform(data: Any) -> IPLData:
             if (d := pre_decode(data)) is not None:
                 return d
@@ -53,20 +56,26 @@ def decodec(name: str):
                 
                 case _: raise TypeError(
                     f'{name} Unsupported type in IPLData: {type(data)}'
-                )
+                 )
         return transform
     return staged
 
-class Immutable:
-    '''A base class for immutable objects. Raises on any attempt to modify.'''
-    def __setattr__(self, name, value, /) -> None:
-        raise TypeError(type(self).__name__ + " objects are immutable.")
+class FauxMapping:
+    """A faux mapping class to act as a dictionary for __match_args__."""
+    __match_args__: tuple[str, ...]
+
+    def __getitem__(self, key: str):
+        if key in self.__match_args__:
+            return getattr(self, key)
+        raise KeyError(key)
     
-    def __delattr__(self, name, /) -> None:
-        raise TypeError(type(self).__name__ + " objects are immutable.")
+    def keys(self):
+        yield from self.__match_args__
     
-    def __copy__(self) -> Self:
-        return self
+    def values(self):
+        for key in self.__match_args__:
+            yield getattr(self, key)
     
-    def __deepcopy__(self, memo) -> Self:
-        return self
+    def items(self):
+        for key in self.__match_args__:
+            yield key, getattr(self, key)

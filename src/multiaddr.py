@@ -12,8 +12,9 @@ import base64
 import netaddr
 import idna as m_idna
 
-from . import varint, multibase
-from ._common import Immutable
+import varint
+import multibase
+from immutable import Immutable
 
 __all__ = (
     'ParseError', 'StringParseError', 'BinaryParseError',

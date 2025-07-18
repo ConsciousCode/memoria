@@ -6,8 +6,9 @@ from io import BytesIO
 from typing import Literal, Optional, Self, overload
 import hashlib
 
-from . import varint, multibase
-from ._common import Immutable
+import varint
+import multibase
+from immutable import Immutable
 
 __all__ = (
     'MultihashCodec',

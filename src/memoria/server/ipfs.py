@@ -7,7 +7,8 @@ from typing import AsyncIterable, Literal, Optional
 from fastapi import Depends, FastAPI, Header, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
-from ipld import CID, CIDResolveError, dag
+from ipld import CID, dag
+from ipfs import CIDResolveError
 
 from ._common import AddParameters, AppState, MemoriaBlockstore, get_blockstore
 

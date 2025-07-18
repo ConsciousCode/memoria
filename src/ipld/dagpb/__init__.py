@@ -45,8 +45,8 @@ def marshal(data: PBNode|IPLData) -> bytes:
     '''Marshal DAG-PB data to bytes.'''
     if not isinstance(data, PBNode):
         data = _encode_pbnode(data)
-    return data.dump()
+    return data.marshal()
 
 def unmarshal(data: bytes) -> PBNode:
     '''Unmarshal bytes to DAG-PB data.'''
-    return PBNode.load(data)
+    return PBNode.unmarshal(data)

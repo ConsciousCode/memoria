@@ -1,25 +1,7 @@
 from typing import Iterable, Optional
 from . import dagpb_pb2
 
-class FauxMapping:
-    """A faux mapping class to act as a dictionary for __match_args__."""
-    __match_args__: tuple[str, ...]
-
-    def __getitem__(self, key: str):
-        if key in self.__match_args__:
-            return getattr(self, key)
-        raise KeyError(key)
-    
-    def keys(self):
-        yield from self.__match_args__
-    
-    def values(self):
-        for key in self.__match_args__:
-            yield getattr(self, key)
-    
-    def items(self):
-        for key in self.__match_args__:
-            yield key, getattr(self, key)
+from ipld._common import FauxMapping
 
 class PBLink(FauxMapping):
     """A dag-pb link."""
@@ -55,12 +37,12 @@ class PBNode(FauxMapping):
         self.bytesize = bytesize
 
     @classmethod
-    def load(cls, data: bytes) -> 'PBNode':
+    def unmarshal(cls, data: bytes) -> 'PBNode':
         node = dagpb_pb2.PBNode()
         node.ParseFromString(data)
         return cls(node.Data, _PBNodeLinks(node.Links), len(data))
     
-    def dump(self):
+    def marshal(self):
         return _from_wrap(self).SerializeToString()
 
     def ByteSize(self):
@@ -75,8 +57,8 @@ def _from_wrap(node: PBNode) -> dagpb_pb2.PBNode:
     return dagpb_pb2.PBNode(
         Data=node.Data,
         Links=(
-            dagpb_pb2.PBLink(Hash=link.Hash, Name=link.Name, Tsize=link.Tsize)
-            for link in node.Links
+            dagpb_pb2.PBLink(link.Hash, link.Name, link.Tsize)
+                for link in node.Links
         )
     )
     

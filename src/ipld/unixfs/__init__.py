@@ -2,9 +2,10 @@
 This module provides the protocol buffers definitions for UnixFS data structures.
 '''
 
-from .unixfs_pb2 import Data, Metadata
+from .wrap import RawData, DirectoryData, SmallFileData, BigFileData, MetadataData, SymlinkData, HAMTShardData, UnixFSData, unmarshal
 
 __all__ = (
-    'Data',
-    'Metadata'
+    'RawData', 'DirectoryData', 'SmallFileData', 'BigFileData',
+    'MetadataData', 'SymlinkData', 'HAMTShardData', 'UnixFSData',
+    'unmarshal'
 )
