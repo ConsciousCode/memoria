@@ -1,13 +1,7 @@
-import json
-from typing import Callable, Iterable, Iterator, Mapping, NoReturn, Optional, Protocol, Self, Sequence, overload
-import re
+from typing import Callable, Iterable, Iterator, Mapping, NoReturn, Optional, Protocol, Sequence
 from functools import wraps
 from heapq import heappop
 import sys
-
-from pydantic import BaseModel
-
-from ipld import CID
 
 class JSONStructure(Protocol):
     def __json__(self) -> "json_t": ...
@@ -45,24 +39,6 @@ def set_pop[T](s: set[T], item: T) -> bool:
         return True
     return False
 
-class Lexicographic(Protocol):
-    def __lt__(self, other: Self, /) -> bool: ...
-
-class LeastT:
-    def __init__(self):
-        raise NotImplementedError("LeastT cannot be instantiated directly")
-    
-    def __lt__(self, other: object, /):
-        return True
-    
-    def __gt__(self, other: object, /):
-        return False
-    
-    def __eq__(self, other: object, /):
-        return isinstance(other, LeastT)
-
-Least = LeastT.__new__(LeastT)
-'''A singleton representing the least element in a lexicographical order.'''
 
 def finite(f) -> float:
     '''Return a finite float, or 0.0 if the input is NaN or infinite.'''

@@ -1,5 +1,5 @@
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Callable, Self
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from typing import Mapping, Iterable

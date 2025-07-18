@@ -11,7 +11,7 @@ from pydantic_core import CoreSchema, core_schema
 
 from ipld import dagcbor, CIDv1, CID
 
-from .graph import IGraph
+from graph import IGraph
 
 __all__ = (
     'MemoryKind',

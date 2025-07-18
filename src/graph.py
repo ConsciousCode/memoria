@@ -1,8 +1,25 @@
 from abc import ABC, abstractmethod
-from typing import Callable, Iterable, Optional, overload, override
-from heapq import heapify, heappush
+from typing import Callable, Iterable, Optional, Protocol, Self, overload, override
+from heapq import heapify, heappop, heappush
 
-from .util import Least, Lexicographic, todo_heap
+class Lexicographic(Protocol):
+    def __lt__(self, other: Self, /) -> bool: ...
+
+class LeastT:
+    def __init__(self):
+        raise NotImplementedError("LeastT cannot be instantiated directly")
+    
+    def __lt__(self, other: object, /):
+        return True
+    
+    def __gt__(self, other: object, /):
+        return False
+    
+    def __eq__(self, other: object, /):
+        return isinstance(other, LeastT)
+
+Least = LeastT.__new__(LeastT)
+'''A singleton representing the least element in a lexicographical order.'''
 
 _default = object()
 
@@ -186,7 +203,8 @@ class IGraph[K, E, V, Node](ABC):
                     if deg.value == 0
         ]
         heapify(sources)
-        for _, src in todo_heap(sources):
+        while sources:
+            _, src = heappop(sources)
             yield src
             for dst, _ in indeg.edges(src):
                 indeg[dst] -= 1

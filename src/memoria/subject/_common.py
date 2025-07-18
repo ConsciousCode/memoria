@@ -7,7 +7,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from ipld import CID, BlockCodec, Blockstore, CompositeBlocksource, FlatfsBlockstore
+from ipld import CID, BlockCodec
+from ipfs import Blockstore, CompositeBlocksource, FlatfsBlockstore
 
 from memoria.memory import FileData, Memory
 from memoria.repo import Repository

@@ -8,10 +8,10 @@ import json
 import cbor2
 
 if TYPE_CHECKING:
-    from ipld.dagpb import PBNodeModel
+    from dagpb import PBNodeModel
 
-from . import dagcbor, dagjson, dagpb
 from ._common import IPLData
+import dagcbor, dagjson, dagpb
 from cid import CID, BlockCodec
 
 def links(data: IPLData) -> Iterable[CID]:

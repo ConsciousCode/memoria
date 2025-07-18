@@ -176,8 +176,8 @@ type ChunkingStrategy = Callable[[IO[bytes]], Iterable[bytes]]
 """Strategy for chunking a stream into smaller parts."""
 
 def chunker_size(size: int=256*1024):
+    """Chunk the stream into fixed-size chunks."""
     def chunking_strategy(stream: IO[bytes]) -> Iterable[bytes]:
-        """Chunk the stream into fixed-size chunks."""
         while chunk := stream.read(size):
             yield chunk
     return chunking_strategy

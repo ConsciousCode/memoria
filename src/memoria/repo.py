@@ -7,10 +7,11 @@ from datetime import datetime
 from typing import Iterable, Optional, overload, override
 from uuid import UUID
 
-from ipld import CIDv1, CID, Blocksource
+from ipld import CIDv1, CID
+from ipfs import Blocksource
 
 from .db import DatabaseRO, FileRow
-from .memory import ACThread, AnyMemory, Edge, DraftMemory, Memory, MemoryDAG, RecallConfig, SelfData, Sona, StopReason
+from memory import ACThread, AnyMemory, Edge, DraftMemory, Memory, MemoryDAG, RecallConfig, SelfData, Sona, StopReason
 from .util import todo_list
 
 __all__ = (

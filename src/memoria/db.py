@@ -13,7 +13,7 @@ from uuid_extension import uuid7
 
 from ipld import CIDv1, CID
 
-from .memory import ACThread, AnyACThread, AnyMemory, Edge, FileData, IncompleteACThread, DraftMemory, Memory, MemoryKind, MetaData, OtherData, PartialMemory, RecallConfig, SelfData, TextData
+from memory import ACThread, AnyACThread, AnyMemory, Edge, FileData, IncompleteACThread, DraftMemory, Memory, MemoryKind, MetaData, OtherData, PartialMemory, RecallConfig, SelfData, TextData
 from .util import finite
 
 __all__ = (

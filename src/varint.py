@@ -52,11 +52,10 @@ def encode(number: int) -> bytes:
 
 def decode(src: bytes | IO[bytes] | Iterable[int]) -> int:
     """Read a varint from `src` bytes or stream"""
-    if isinstance(src, bytes):
-        return decode_bytes(src)
-    elif isinstance(src, IO):
-        return decode_stream(src)
-    elif isinstance(src, Iterable):
-        return decode_iter(src)
-    else:
-        raise TypeError("Unsupported source type for varint decoding")
+    match src:
+        case bytes(): return decode_bytes(src)
+        case IO(): return decode_stream(src)
+        case Iterable(): return decode_iter(src)
+        
+        case _:
+            raise TypeError("Unsupported source type for varint decoding")
