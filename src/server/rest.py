@@ -4,10 +4,12 @@ Simple RESTful API separate from the MCP API.
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, Query, Response, UploadFile
+from fastapi import Depends, FastAPI, Header, Query, Response
 from fastapi.responses import JSONResponse
 
-from ._common import AddParameters, AppState, depend_appstate, depend_repo
+from memory import Edge, Memory
+
+from ._common import get_repo
 from ..ipld import dagcbor, CIDv1
 from ..repo import Repository
 
@@ -16,11 +18,20 @@ rest_api = FastAPI(
     description="A RESTful API for the Memoria system."
 )
 
+@rest_api.post("/memory")
+async def add_memory(
+        memory: Memory,
+        repo: Repository = Depends(get_repo)
+    ):
+    '''Add a memory to the Memoria system.'''
+    repo.insert(memory)
+    return JSONResponse({"cid": memory.cid})
+
 @rest_api.get("/memory/{cid}")
 def get_memory(
         cid: CIDv1,
         accept: Annotated[Optional[list[str]], Header()] = None,
-        repo: Repository = depend_repo,
+        repo: Repository = Depends(get_repo),
     ):
     '''Get a memory by CID.'''
     if memory := repo.lookup_memory(cid):
@@ -42,7 +53,7 @@ def list_memories(
             int, Query(description="Number of messages to return per page.")
         ] = 100,
         accept: Annotated[Optional[list[str]], Header()] = None,
-        repo: Repository = depend_repo
+        repo: Repository = Depends(get_repo)
     ):
     '''List messages in the Memoria system.'''
     messages = repo.list_messages(page, perpage)
@@ -55,7 +66,7 @@ def list_memories(
 def get_sona(
         uuid: UUID|str,
         accept: Annotated[Optional[list[str]], Header()] = None,
-        repo: Repository = depend_repo,
+        repo: Repository = Depends(get_repo),
     ):
     '''Get a sona by UUID.'''
     try: uuid = UUID(uuid) # type: ignore
@@ -83,7 +94,7 @@ def list_sonas(
         perpage: Annotated[
             int, Query(description="Number of sonas to return per page.")
         ] = 100,
-        repo: Repository = depend_repo
+        repo: Repository = Depends(get_repo)
     ):
     '''List sonas in the Memoria system.'''
     sonas = repo.list_sonas(page, perpage)
@@ -92,10 +103,42 @@ def list_sonas(
         return dagcbor.marshal(sonas)
     return [sona.human_json() for sona in sonas]
 
+@rest_api.post("/sona/by-name/{name}/act/push")
+async def act_push_by_name(
+        name: str,
+        include: Annotated[
+            list[Edge[CIDv1]],
+            Query(description="List of CIDs to include in the ACT.")
+        ],
+        repo: Repository = Depends(get_repo),
+    ):
+    '''Push an ACT to a sona by name.'''
+    # Selecting sonas by name never fails
+    return JSONResponse(
+        {"uuid": repo.act_push(name, include)}
+    )
+
+@rest_api.post("/sona/{uuid}/act/push")
+async def act_push(
+        uuid: UUID,
+        include: Annotated[
+            list[Edge[CIDv1]],
+            Query(description="List of CIDs to include in the ACT.")
+        ],
+        repo: Repository = Depends(get_repo),
+    ):
+    '''Push an ACT to a sona by UUID.'''
+    if repo.act_push(uuid, include) is None:
+        return Response(
+            status_code=404,
+            content=f"Sona with UUID {uuid} not found."
+        )
+    return JSONResponse({"uuid": uuid})
+
 @rest_api.get("/sona/{uuid}/act/next")
 async def act_next(
         uuid: UUID|str,
-        repo: Repository = depend_repo,
+        repo: Repository = Depends(get_repo),
     ):
     '''Advance the ACT for a sona by UUID.'''
     try: uuid = UUID(uuid) # type: ignore
@@ -113,27 +156,3 @@ async def act_next(
             )
         case True: return JSONResponse(None)
         case g: return JSONResponse(g.adj)
-
-@rest_api.post("/file")
-async def upload_file(
-        file: UploadFile,
-        params: AddParameters = Depends(),
-        state: AppState = depend_appstate
-    ):
-    '''Upload a file to the Memoria system.'''
-    if file.content_type is None:
-        raise ValueError("Content-Type header is required")
-    
-    fstream = file.file
-    created, size, cid = state.upload_file(
-        fstream,
-        file.filename,
-        file.content_type,
-        params
-    )
-    
-    return Response(
-        status_code=201 if created else 200,
-        content=cid,
-        media_type="text/plain"
-    )

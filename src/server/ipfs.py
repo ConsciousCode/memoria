@@ -2,16 +2,16 @@
 Implement the IPFS Trustless Gateway specification and any IPFS-related utilities.
 '''
 import json
-from typing import Literal, Optional
+from typing import AsyncIterable, Literal, Optional
 import traceback
 
-from fastapi import Depends, FastAPI, HTTPException, Header, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Header, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
 import io
 from multipart.multipart import MultipartParser, parse_options_header
 
-from ._common import AddParameters, AppState, depend_appstate
+from ._common import AddParameters, AppState, MemoriaBlockstore, get_blockstore
 from ..ipld import CID, CIDResolveError, dag_dump
 
 ROOT = "private/blocks"
@@ -40,7 +40,7 @@ ipfs_gateway = FastAPI(
 def head_ipfs(
         path: str,
         accept: list[str] = Header(default_factory=list),
-        state: AppState = depend_appstate
+        state: AppState = Depends(get_blockstore)
     ):
     """
     Handle HEAD requests for IPFS blocks.
@@ -84,7 +84,7 @@ def head_ipfs(
 def get_ipfs(
         path: str,
         accept: list[str] = Header(default_factory=list),
-        state: AppState = depend_appstate
+        state: AppState = Depends(get_blockstore)
     ):
     if "/" in path and "application/vnd.ipld.car" not in accept:
         return Response(
@@ -92,7 +92,11 @@ def get_ipfs(
             status_code=400
         )
     
-    if "application/cbor" in accept or "application/vnd.ipld.dag-cbor" in accept:
+    cid = CID(path)
+
+    if cid.codec == "raw":
+        mime = "application/octet-stream"
+    elif "application/cbor" in accept or "application/vnd.ipld.dag-cbor" in accept:
         output_codec = "dag-cbor"
         mime = "application/cbor"
     else:
@@ -119,109 +123,39 @@ ipfs_api = FastAPI(
 ## Root commands ##
 @ipfs_api.post("/add")
 async def ipfs_add(
-        request: Request,
+        files: list[UploadFile],
         params: AddParameters = Depends(),
-        state: AppState = depend_appstate
+        blockstore: MemoriaBlockstore = Depends(get_blockstore)
     ):
     """
     Add files to IPFS - Kubo v0.35 compatible implementation
     """
-    ### Kubo endpoint ###
-    # Read full multipart/form-data body then parse and stream events
-    print(params)
-    if (content_type := request.headers.get("content-type")) is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing Content-Type header"
-        )
-    ctype, pdict = parse_options_header(content_type)
-    if ctype != b"multipart/form-data":
-        raise HTTPException(
-            status_code=415,
-            detail=f"Unsupported Content-Type; expected b'multipart/form-data', got {ctype}"
-        )
-    if (boundary := pdict.get(b"boundary")) is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing boundary in Content-Type header"
-        )
+    async def iter_files(files: list[UploadFile]):
+        for file in files:
+            if file.content_type is None:
+                yield {"Error": "File must have a content type."}
+                continue
 
-    # Parser callbacks and state
-    events: list[dict] = []
-    current_headers: dict[bytes, bytes] = {}
-    current_header_field: Optional[bytes] = None
-    filename: Optional[str] = None
-    mimetype: str = "application/octet-stream"
-    buffer: Optional[io.BytesIO] = None
+            try:
+                created, size, cid = blockstore.upload_file(
+                    file.file, file.filename, file.content_type, params
+                )
+                yield {
+                    "Name": file.filename,
+                    "Hash": str(cid),
+                    "Size": size,
+                    "Mtime": params.mtime
+                }
+            except Exception as exc:
+                yield {"Error": str(exc)}
+    
+    async def json_dumps(data: AsyncIterable[dict]):
+        """Asynchronously serialize data to JSON."""
+        async for item in data:
+            yield json.dumps(item) + "\n"
 
-    def on_part_begin():
-        nonlocal current_headers, current_header_field, filename, mimetype, buffer
-        current_headers = {}
-        current_header_field = None
-        filename = None
-        mimetype = "application/octet-stream"
-        buffer = None
-
-    def on_header_field(data: bytes, start: int, end: int):
-        nonlocal current_header_field
-        current_header_field = data[start:end].lower()
-
-    def on_header_value(data: bytes, start: int, end: int):
-        if current_header_field is not None:
-            current_headers[current_header_field] = data[start:end]
-
-    def on_headers_finished():
-        nonlocal filename, mimetype, buffer
-        if cd := current_headers.get(b"content-disposition"):
-            _, cd_params = parse_options_header(cd)
-            if (fname := cd_params.get(b"filename")) is not None:
-                filename = fname.decode("utf-8", "ignore")
-        if ctype_hdr := current_headers.get(b"content-type"):
-            mimetype = ctype_hdr.decode("latin-1")
-        buffer = io.BytesIO()
-
-    def on_part_data(data: bytes, start: int, end: int):
-        if buffer is not None:
-            buffer.write(data[start:end])
-
-    def on_part_end():
-        if buffer is None:
-            return
-        buffer.seek(0)
-        try:
-            _, size, cid = state.upload_file(
-                buffer, filename, mimetype, params
-            )
-            event = {
-                "Bytes": buffer.tell(),
-                "Hash": str(cid),
-                "Size": str(size)
-            }
-            if filename: event["Name"] = filename
-            if params.mtime: event["Mtime"] = params.mtime
-        except Exception as exc:
-            traceback.print_exc()
-            event = {"Error": str(exc)}
-        events.append(event)
-
-    parser = MultipartParser(boundary, callbacks={
-        "on_part_begin": on_part_begin,
-        "on_header_field": on_header_field,
-        "on_header_value": on_header_value,
-        "on_headers_finished": on_headers_finished,
-        "on_part_data": on_part_data,
-        "on_part_end": on_part_end
-    })
-
-    try:
-        parser.write(await request.body())
-        parser.write(b"")
-    except Exception as exc:
-        events.append({"Error": str(exc)})
-
-    # Yield all parser events
-    return Response(
-        content="\n".join(json.dumps(event) for event in events),
+    return StreamingResponse(
+        json_dumps(iter_files(files)),
         media_type="application/json",
         headers={
             "X-Chunked-Output": "1",
@@ -232,7 +166,7 @@ async def ipfs_add(
 @ipfs_api.get("/cat")
 async def ipfs_cat(
         cid: CID,
-        state: AppState = depend_appstate,
+        state: AppState = Depends(get_blockstore),
         offset: int = Query(
             0, description="Offset in bytes to start reading from the block."
         ),
@@ -254,7 +188,7 @@ async def ipfs_cat(
 @ipfs_api.post("/block/get")
 def ipfs_block_get(
         arg: CID,
-        state: AppState = depend_appstate
+        state: AppState = Depends(get_blockstore)
     ):
     """
     Get a block by CID.
@@ -278,7 +212,7 @@ async def ipfs_block_put(
             default="sha2-256",
             description="Multihash hash function."
         ),
-        state: AppState = depend_appstate
+        state: AppState = Depends(get_blockstore)
     ):
     """
     Add a block to the IPFS blockstore.
@@ -297,7 +231,7 @@ async def ipfs_block_put(
 @ipfs_api.post("/dag/export")
 def ipfs_dag_export(
         cid: CID,
-        state: AppState = depend_appstate
+        state: AppState = Depends(get_blockstore)
     ):
     """Export a DAG starting from the given CID."""
     return StreamingResponse(state.dag_export(cid))
@@ -305,7 +239,7 @@ def ipfs_dag_export(
 @ipfs_api.post("/dag/get")
 def ipfs_dag_get(
         cid: CID,
-        state: AppState = depend_appstate,
+        state: AppState = Depends(get_blockstore),
         output_codec: Optional[SupportedCodec] = Query(
             None,
             description="Output codec for the DAG node. Defaults to 'dag-json'."

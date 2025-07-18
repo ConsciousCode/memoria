@@ -278,7 +278,6 @@ class CID(Immutable):
             case bytes():
                 version, raw = raw[0], raw[1:]
                 codec, multihash = multicodec.split_codec(raw)
-                print(codec, multihash)
 
             case _:
                 raise NotImplementedError(f"CID({type(raw)})")
@@ -682,7 +681,6 @@ class CIDv1(CID):
         super().__init__(self.combine(version, codec, multihash))
 
     def __repr__(self):
-        print("CID repr", self.buffer.hex())
         return f"CIDv1({self.codec!r}, {self.multihash!r})"
 
     @classmethod

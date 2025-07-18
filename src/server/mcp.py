@@ -5,27 +5,24 @@ MCP Server for Memoria
 from contextlib import contextmanager
 from datetime import datetime
 from io import BytesIO
-from typing import Annotated, Iterable, Optional, override
+from typing import Annotated, Optional, cast
 from uuid import UUID
 import base64
-import json
 
-from fastmcp import Context
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ResourceError, ToolError
 from mcp import SamplingMessage
-from mcp.types import ModelPreferences, TextContent
+from mcp.types import ModelPreferences, Role, TextContent
 from pydantic import Field
-from pydantic_ai import Agent, capture_run_messages
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart
-from pydantic_ai.models.mcp_sampling import MCPSamplingModel, MCPSamplingModelSettings
+from pydantic_ai.mcp import ToolResult
+from pydantic_ai.models.mcp_sampling import MCPSamplingModelSettings
 
-from ..emulator._common import EdgeAnnotation
+from repo import Repository
 
-from ._common import AddParameters, AppState, get_appstate, get_repo, mcp
+from ._common import AddParameters, MemoriaBlockstore, context_blockstore, context_repo
 from ..ipld import CIDv1, CIDResolveError
-from ..memory import AnyMemory, DraftMemory, Edge, Memory, RecallConfig, SampleConfig, SelfData, UploadResponse
-from ..prompts import CHAT_PROMPT, QUERY_PROMPT
-from ..emulator.server import AnnotateMessage, ServerEmulator
+from ..memory import AnyMemory, DraftMemory, Edge, OtherData, RecallConfig, SampleConfig, SelfData, TextData, UploadResponse
+from ..prompts import QUERY_PROMPT
 
 DEFAULT_RECALL_CONFIG = RecallConfig()
 
@@ -49,6 +46,76 @@ DEFAULT_CHAT_CONFIG = SampleConfig(
     )
 )
 
+mcp = FastMCP[Repository]("memoria",
+    """Coordinates a "sona" representing a cohesive identity and memory."""
+)
+def build_tags(tags: list[str], timestamp: Optional[float|datetime]) -> str:
+    if timestamp is not None:
+        if not isinstance(timestamp, datetime):
+            timestamp = datetime.fromtimestamp(timestamp)
+        tags.append(timestamp.replace(microsecond=0).isoformat())
+    return f"[{'\t'.join(tags)}]\t"
+
+def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=False) -> tuple[Role, str]:
+    '''Render memory for the context.'''
+    
+    tags = []
+    if final: tags.append("final")
+    tags.append(
+        f"ref:{ref}" + (f"->{','.join(map(str, deps))}" if deps else "")
+    )
+
+    if (ts := memory.timestamp) is not None:
+        ts = datetime.fromtimestamp(ts)
+    
+    match memory.data:
+        case SelfData():
+            if name := memory.data.name:
+                tags.append(f"name:{name}")
+            if sr := memory.data.stop_reason:
+                if sr != "finish":
+                    tags.append(f"stop_reason:{sr}")
+            content = ''.join(p.content for p in memory.data.parts)
+            return ("assistant", build_tags(tags, ts) + content)
+        
+        case TextData():
+            tags.append("kind:raw_text")
+            return ("user", build_tags(tags, ts) + memory.data.content)
+        
+        case OtherData():
+            if name := memory.data.name:
+                tags.append(f"name:{name}")
+            return ("user", build_tags(tags, ts) + memory.data.content)
+        
+            '''
+        case "file":
+            return ConvoMessage(
+                EmbeddedResource(
+                    type="resource",
+                    resource=BlobResourceContents(
+                        uri=AnyUrl(f"memory://{memory.cid}"),
+                        mimeType=memory.data.mimeType or
+                            "application/octet-stream",
+                        blob=memory.data.content
+                    )
+                ),
+                role="user"
+            )
+        '''
+        
+        case _:
+            raise ValueError(f"Unknown memory kind: {memory.data.kind}")
+
+def sampling_message(role: Role, content: str) -> SamplingMessage:
+    '''Create a SamplingMessage from role and content.'''
+    return SamplingMessage(
+        role=role,
+        content=TextContent(
+            type="text",
+            text=content
+        )
+    )
+
 def sample_to_model(sample: SampleConfig) -> MCPSamplingModelSettings:
     """Convert SampleConfig to ModelSettings."""
     settings: MCPSamplingModelSettings = {}
@@ -60,90 +127,16 @@ def sample_to_model(sample: SampleConfig) -> MCPSamplingModelSettings:
         settings["mcp_model_preferences"] = sample.model_preferences
     return settings
 
-class MCPEmulator(ServerEmulator):
-    def __init__(self, context: Context, state: AppState):
-        super().__init__(state.repo)
-        self.context = context
-        self.state = state
-    
-    @override
-    async def sample_chat(self,
-            messages: Iterable[SamplingMessage],
-            *,
-            system_prompt: str,
-            chat_config: SampleConfig
-        ) -> DraftMemory:
-        agent = Agent(
-            model=MCPSamplingModel(
-                session=self.context.request_context.session
-            ),
-            instructions=system_prompt,
-            name="chat"
-        )
-        history: list[ModelMessage] = []
-        for m in messages:
-            assert isinstance(m.content, TextContent), "Only TextContent is supported"
-            text = m.content.text
-            if m.role == "user":
-                history.append(ModelRequest.user_text_prompt(text))
-            elif m.role == "assistant":
-                history.append(ModelResponse(parts=[TextPart(content=text)]))
-            else:
-                raise ValueError(f"Unknown role {m.role!r}")
-        
-        result = await agent.run(
-            message_history=history,
-            model_settings=sample_to_model(chat_config)
-        )
-        return DraftMemory(
-            data=SelfData(
-                parts=[SelfData.Part(content=result.output)],
-                stop_reason=None
-            ),
-            timestamp=int(datetime.now().timestamp())
-        )
-    
-    @override
-    async def sample_annotate(self,
-            messages: Iterable[AnnotateMessage],
-            response: AnyMemory,
-            *,
-            system_prompt: str,
-            annotate_config: SampleConfig
-        ) -> EdgeAnnotation:
-        agent = Agent(
-            model=MCPSamplingModel(
-                session=self.context.request_context.session
-            ),
-            output_type=EdgeAnnotation,
-            instructions=system_prompt,
-            name="annotate"
-        )
-        data = {
-            "history": [m.model_dump() for m in messages],
-            "response": response.model_dump()
-        }
-        with capture_run_messages() as run_messages:
-            try:
-                result = await agent.run(
-                    json.dumps(data),
-                    model_settings=sample_to_model(annotate_config)
-                )
-                return result.output
-            except:
-                print(run_messages)
-                raise
-
 @contextmanager
 def mcp_emu(ctx: Context):
     '''Get the application state from the context.'''
-    with get_appstate() as state:
-        yield MCPEmulator(ctx, state)
+    with context_blockstore() as bs:
+        yield MemoriaBlockstore(bs.repo, bs)
 
 @mcp.resource("ipfs://{cid}")
 def ipfs_resource(ctx: Context, cid: CIDv1):
     '''IPFS resource handler.'''
-    with get_appstate() as state:
+    with context_blockstore() as state:
         try: return state.dag_get(cid)
         except CIDResolveError:
             raise ResourceError(f"CID {cid} not found in IPFS blockstore")
@@ -151,7 +144,7 @@ def ipfs_resource(ctx: Context, cid: CIDv1):
 @mcp.resource("memoria://sona/{uuid}")
 def sona_resource(ctx: Context, uuid: UUID):
     '''Sona resource handler.'''
-    with get_repo() as repo:
+    with context_repo() as repo:
         if m := repo.find_sona(uuid):
             return m
         raise ResourceError("Sona not found")
@@ -159,7 +152,7 @@ def sona_resource(ctx: Context, uuid: UUID):
 @mcp.resource("memoria://memory/{cid}")
 def memory_resource(ctx: Context, cid: CIDv1):
     '''Memory resource handler.'''
-    with get_repo() as repo:
+    with context_repo() as repo:
         if m := repo.lookup_memory(cid):
             return m
         raise ResourceError("Memory not found")
@@ -193,7 +186,7 @@ async def upload(
     Upload a file to the local block store and return its CID.
     '''
     with mcp_emu(ctx) as emu:
-        created, size, cid = emu.state.upload_file(
+        created, size, cid = emu.upload_file(
             BytesIO(base64.b64decode(file)),
             filename=filename,
             mimetype=mimetype or "application/octet-stream",
@@ -204,31 +197,6 @@ async def upload(
             size=size,
             cid=cid
         )
-
-@mcp.tool(
-    annotations=dict(
-        idempotentHint=True,
-        openWorldHint=False
-    )
-)
-async def insert(
-        ctx: Context,
-        memory: Annotated[
-            DraftMemory,
-            Field(description="Memory to insert.")
-        ],
-        recall_config: Annotated[
-            RecallConfig,
-            Field(description="Configuration for how to weight memory recall.")
-        ] = DEFAULT_RECALL_CONFIG,
-        annotate_config: Annotated[
-            SampleConfig,
-            Field(description="Configuration for how to sample the response for edge annotation.")
-        ] = DEFAULT_ANNOTATE_CONFIG
-    ):
-    '''Insert a new memory into the sona.'''
-    with mcp_emu(ctx) as emu:
-        return await emu.insert(memory, recall_config, annotate_config)
 
 @mcp.tool(
     annotations=dict(
@@ -252,8 +220,7 @@ async def recall(
     and their dependencies.
     '''
     with mcp_emu(ctx) as emu:
-        g = await emu.recall(prompt, recall_config)
-        return dict(g.items())
+        return emu.repo.recall(prompt, recall_config).adj
 
 @mcp.tool(
     annotations=dict(
@@ -268,9 +235,9 @@ async def query(
             Field(description="Prompt for the chat. If `null`, use only the included memories.")
         ],
         system_prompt: Annotated[
-            Optional[str],
-            Field(description="System prompt to use for the query. If `null`, uses the default query prompt.")
-        ] = None,
+            str,
+            Field(description="System prompt to use for the query.")
+        ] = QUERY_PROMPT,
         recall_config: Annotated[
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
@@ -282,53 +249,73 @@ async def query(
     ):
     '''Single-turn conversation returning the response.'''
     with mcp_emu(ctx) as emu:
-        qr = await emu.query(
-            prompt,
-            system_prompt or QUERY_PROMPT,
-            recall_config,
-            chat_config
-        )
-        return qr.chatlog + [qr.response]
+        g = emu.repo.recall(prompt, recall_config)
 
-@mcp.tool(
-    annotations=dict(
-        openWorldHint=False,
-    )
-)
-async def chat(
-        ctx: Context,
-        prompt: Annotated[
-            Memory,
-            Field(description="Prompt for the chat. If `null`, use only the included memories.")
-        ],
-        system_prompt: Annotated[
-            Optional[str],
-            Field(description="System prompt to use for the chat. If `null`, uses the default chat prompt.")
-        ] = None,
-        recall_config: Annotated[
-            RecallConfig,
-            Field(description="Configuration for how to weight memory recall.")
-        ] = DEFAULT_RECALL_CONFIG,
-        chat_config: Annotated[
-            SampleConfig,
-            Field(description="Configuration for how to sample the response.")
-        ] = DEFAULT_CHAT_CONFIG,
-        annotate_config: Annotated[
-            SampleConfig,
-            Field(description="Configuration for how to sample the response for edge annotation.")
-        ] = DEFAULT_ANNOTATE_CONFIG
-    ):
-    '''
-    Single-turn conversation returning the response. This is committed to memory.
-    '''
-    with mcp_emu(ctx) as emu:
-        return await emu.chat(
-            prompt,
-            system_prompt or CHAT_PROMPT,
-            recall_config,
-            chat_config,
-            annotate_config
+        refs: dict[CIDv1, int] = {}
+        chatlog: list[AnyMemory] = []
+        messages: list[str | SamplingMessage] = []
+        #for msg in serialize_dag(g, refs):
+        for cid in g.invert().toposort(key=lambda v: v.timestamp):
+            # We need ids for each memory so their edges can be annotated later
+            ref = refs[cid] = len(refs) + 1
+            memory = g[cid]
+            chatlog.append(memory)
+            role, content = memory_to_message(
+                ref,
+                [refs[dst] for dst, _ in g.edges(cid)],
+                memory,
+                final=(ref >= len(refs))
+            )
+            messages.append(
+                SamplingMessage(
+                    role=role,
+                    content=TextContent(type="text", text=content)
+                )
+            )
+        
+        tag = f"ref:{len(messages)}"
+        deps = [refs[e.target] for e in prompt.edges]
+        if deps:
+            tag += f"->{','.join(map(str, deps))}"
+
+        # Inserting prompt before it's been annotated is fine because the
+        # model can figure out the grounding.
+        messages.append(sampling_message(
+            "user", build_tags(
+                ["final", tag], prompt.timestamp or int(datetime.now().timestamp())
+            ) + prompt.document()
+        ))
+
+        response = await ctx.sample(
+            messages,
+            system_prompt=system_prompt,
+            temperature=chat_config.temperature,
+            max_tokens=chat_config.max_tokens,
+            model_preferences=chat_config.model_preferences
         )
+        match response:
+            case TextContent():
+                data=SelfData(
+                    parts=[SelfData.Part(content=response.text)],
+                    stop_reason=None
+                )
+            
+            case _:
+                raise NotImplementedError(
+                    "Query response must be a TextContent, got: "
+                    f"{type(response)}: {response}"
+                )
+        
+        chatlog.append(DraftMemory(
+            data=data,
+            timestamp=int(datetime.now().timestamp())
+        ))
+        # TODO: No support for images, would require inspecting the memories
+        # themselves for content. Don't want to spend more time right now on
+        # a debug endpoint
+        return cast(ToolResult, [
+            m.model_dump() for m in chatlog
+        ])
 
 @mcp.tool(
     annotations=dict(
@@ -351,6 +338,6 @@ def push(
     (Autonomous Cognitive Thread).
     '''
     with mcp_emu(ctx) as emu:
-        if u := emu.act_push(sona, include):
+        if u := emu.repo.act_push(sona, include):
             return u
         raise ToolError("Sona not found or prompt memory not found.")

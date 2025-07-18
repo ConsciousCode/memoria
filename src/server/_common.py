@@ -5,8 +5,6 @@ from contextlib import contextmanager
 from typing import IO, Annotated, Literal, Optional, override
 from datetime import datetime
 
-from fastapi import Depends, FastAPI
-from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from ..ipld import CID, BlockCodec, Blockstore, CompositeBlocksource, FlatfsBlockstore
@@ -46,12 +44,35 @@ class AddParameters(BaseModel):
         Optional[int], Field(description="File modification time in seconds since epoch.")
     ] = None
 
-class AppState(Blockstore):
-    '''Application state for the FastAPI app.'''
-    def __init__(self, blockstore: Blockstore, repo: Repository):
-        self.blockstore = blockstore
+class MemoriaBlockstore(Blockstore):
+    def __init__(self, repo: Repository, blockstore: Blockstore):
         self.repo = repo
-        self.blocksource = CompositeBlocksource(repo, blockstore)
+        self.blockstore = blockstore
+    
+    @override
+    def block_has(self, cid: CID) -> bool:
+        return self.repo.block_has(cid) or self.blockstore.block_has(cid)
+    
+    @override
+    def block_get(self, cid: CID) -> Optional[bytes]:
+        if block := self.repo.block_get(cid):
+            return block
+        return self.blockstore.block_get(cid)
+    
+    @override
+    def block_put(self,
+            block: bytes,
+            *,
+            cid_version: Literal[0, 1] = 1,
+            codec: BlockCodec = 'dag-cbor',
+            function: str = 'sha2-256'
+        ) -> CID:
+        return self.blockstore.block_put(
+            block,
+            cid_version=cid_version,
+            codec=codec,
+            function=function
+        )
     
     def upload_file(self,
             stream: IO[bytes],
@@ -82,6 +103,14 @@ class AppState(Blockstore):
             )
         )
         return created, len(root), cid
+
+class AppState(Blockstore):
+    '''Application state for the FastAPI app.'''
+    def __init__(self, blockstore: Blockstore, repo: Repository):
+        self.blockstore = blockstore
+        self.repo = repo
+        self.blocksource = CompositeBlocksource(repo, blockstore)
+    
     
     @override
     def block_has(self, cid: CID) -> bool:
@@ -106,23 +135,16 @@ class AppState(Blockstore):
             function=function
         )
 
-mcp = FastMCP[Repository]("memoria",
-    """Coordinates a "sona" representing a cohesive identity and memory."""
-)
-mcp_http = mcp.http_app()
-app = FastAPI(lifespan=mcp_http.lifespan)
-
-@contextmanager
 def get_repo():
     '''Dependency to get the repository.'''
     with database("private/memoria.db") as db:
         yield Repository(db)
 
-@contextmanager
-def get_appstate():
-    '''Context manager to get the application state.'''
-    with get_repo() as repo:
-        yield AppState(FlatfsBlockstore("private/blocks"), repo)
+context_repo = contextmanager(get_repo)
 
-depend_appstate = Depends(get_appstate)
-depend_repo = Depends(get_repo)
+def get_blockstore():
+    '''Context manager to get the application state.'''
+    with context_repo() as repo:
+        yield MemoriaBlockstore(repo, FlatfsBlockstore("private/blocks"))
+
+context_blockstore = contextmanager(get_blockstore)

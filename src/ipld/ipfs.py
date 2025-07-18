@@ -261,6 +261,7 @@ class FlatfsBlockstore(Blockstore):
     
     def build_path(self, cid: CID) -> str:
         """Build the full path for a CID in the flatfs."""
+        print("Path", os.path.join(self.root, self.sharding.shard(cid)))
         return os.path.join(self.root, self.sharding.shard(cid))
     
     @override
