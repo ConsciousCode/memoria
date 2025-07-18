@@ -1,3 +1,7 @@
+'''
+Multibase codecs for encoding and decoding data in various formats.
+'''
+
 from abc import ABC, abstractmethod
 from typing import Literal, Optional, overload
 import math
@@ -294,8 +298,7 @@ def codec_of(data: str) -> Base|IdBase:
 def is_encoded(data: str) -> bool:
     """Checks if the given data is encoded or not."""
     if not data: return False
-    d = data[0]
-    if base := CODES.get(d):
+    if base := CODES.get(data[0]):
         return not isinstance(base, ReservedBase)
     return False
 

@@ -1,12 +1,14 @@
+'''
+DAG-JSON encoding and decoding.
+'''
+
 import json
 
 from . import multibase
+from ._common import encodec, decodec, IPLData
 from .cid import CID, CIDv0, CIDv1
-from ._common import _encodec, _decodec, IPLData
 
-__all__ = ("marshal", "unmarshal")
-
-@_encodec("DAG-JSON")
+@encodec("DAG-JSON")
 def _dagjson_encode(data):
     match data:
         case bytes():
@@ -18,7 +20,7 @@ def _dagjson_encode(data):
         case {"/": _}:
             raise TypeError("DAG-JSON doesn't support '/' keys")
 
-@_decodec("DAG-JSON")
+@decodec("DAG-JSON")
 def _dagjson_decode(data: IPLData) -> IPLData:
     match data:
         case {"/": {"bytes": bs}}:
@@ -36,27 +38,11 @@ def _dagjson_decode(data: IPLData) -> IPLData:
             )
 
 def marshal(data: IPLData) -> str:
-    """
-    Convert data to DAG-JSON format.
-    
-    Args:
-        data: The data to convert.
-    
-    Returns:
-        The data in DAG-JSON format.
-    """
+    """Marshal DAG-JSON data to a string."""
     return json.dumps(_dagjson_encode(data), sort_keys=True)
 
 def unmarshal(data: str|bytes) -> IPLData:
-    """
-    Convert DAG-JSON format data back to its original form.
-    
-    Args:
-        data: The DAG-JSON formatted string.
-    
-    Returns:
-        The original data structure.
-    """
+    """Unmarshal data from a DAG-JSON formatted string."""
     if isinstance(data, bytes):
         data = data.decode('utf-8')
     return _dagjson_decode(json.loads(data))

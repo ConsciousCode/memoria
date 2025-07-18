@@ -3,16 +3,13 @@ Implement the IPFS Trustless Gateway specification and any IPFS-related utilitie
 '''
 import json
 from typing import AsyncIterable, Literal, Optional
-import traceback
 
-from fastapi import Depends, FastAPI, File, HTTPException, Header, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, Header, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
-import io
-from multipart.multipart import MultipartParser, parse_options_header
+from ipld import CID, CIDResolveError, dag
 
 from ._common import AddParameters, AppState, MemoriaBlockstore, get_blockstore
-from ..ipld import CID, CIDResolveError, dag_dump
 
 ROOT = "private/blocks"
 
@@ -256,7 +253,7 @@ def ipfs_dag_get(
         
     try:
         return Response(
-            dag_dump(output_codec, state.dag_get(cid)),
+            dag.marshal(output_codec, state.dag_get(cid)),
             media_type=codec_mimetype(output_codec)
         )
     except CIDResolveError:

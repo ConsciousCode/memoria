@@ -7,11 +7,12 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Header, Query, Response
 from fastapi.responses import JSONResponse
 
-from memory import Edge, Memory
+from ipld import dagcbor, CIDv1
+
+from memoria.repo import Repository
+from memoria.memory import Edge, Memory
 
 from ._common import get_repo
-from ..ipld import dagcbor, CIDv1
-from ..repo import Repository
 
 rest_api = FastAPI(
     title="Memoria REST API",

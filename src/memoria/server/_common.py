@@ -7,10 +7,11 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from ..ipld import CID, BlockCodec, Blockstore, CompositeBlocksource, FlatfsBlockstore
-from ..memory import FileData, Memory
-from ..repo import Repository
-from ..db import database
+from ipld import CID, BlockCodec, Blockstore, CompositeBlocksource, FlatfsBlockstore
+
+from memoria.memory import FileData, Memory
+from memoria.repo import Repository
+from memoria.db import database
 
 class AddParameters(BaseModel):
     """Kubo /api/v0/add parameters with validation"""

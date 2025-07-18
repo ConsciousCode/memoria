@@ -1,10 +1,13 @@
+'''
+Classes and functions for working with IPFS blocks and DAGs.
+'''
+
 from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import IO, Callable, Iterable, Literal, Optional, override
 import os
 
-from . import ipld, multibase, dagpb
-
+from . import multibase, dag, dagpb
 from ._common import IPLData
 from .unixfs import Data
 from .multihash import multihash
@@ -25,6 +28,7 @@ class CIDResolveError(Exception):
         super().__init__(str(cid))
 
 class RawBlockLink:
+    """A raw codec block link with a CID and size."""
     def __init__(self, cid: CID, filesize: int):
         self.cid = cid
         self.size = filesize
@@ -33,6 +37,7 @@ class RawBlockLink:
         return self.size
 
 class DAGPBNode(dagpb.PBNode):
+    """Enhanced PBNode with size and CID properties."""
     size: int
 
     @cached_property
@@ -75,6 +80,7 @@ class FileNode(DAGPBNode):
         self.size = size
 
 class Blocksource(ABC):
+    """Abstract base class for IPFS block sources."""
     @abstractmethod
     def block_has(self, cid: CID) -> bool:
         """Check if the node has a local copy of the block."""
@@ -89,7 +95,7 @@ class Blocksource(ABC):
         """Retrieve a DAG node by its CID and return its IPLD model."""
         if (block := self.block_get(cid)) is None:
             raise CIDResolveError(cid)
-        return ipld.dag_load(cid.codec, block)
+        return dag.unmarshal(cid.codec, block)
 
     def dag_export(self,
             cid: CID,
@@ -106,7 +112,7 @@ class Blocksource(ABC):
                 raise CIDResolveError(cid)
             
             yield block
-            for link in ipld.iter_links(cid, block):
+            for link in dag.links(dag.unmarshal(cid.codec, block)):
                 yield from iter_blocks(link)
         
         it = iter_blocks(cid)
@@ -199,6 +205,7 @@ class ShardLast(ShardingStrategy):
         return f"{enc[:-1][-self.last:]}/{enc}.data"
 
 class Blockstore(Blocksource):
+    """Abstract base class for IPFS blockstores."""
     @abstractmethod
     def block_put(self, block: bytes, *,
             cid_version: Literal[0, 1]=1,
@@ -255,6 +262,7 @@ class Blockstore(Blocksource):
         )
 
 class FlatfsBlockstore(Blockstore):
+    """FlatFS blockstore implementation for IPFS."""
     def __init__(self, root: str, sharding: ShardingStrategy = ShardLast(2)):
         self.root = root
         self.sharding = sharding
@@ -293,6 +301,7 @@ class FlatfsBlockstore(Blockstore):
             return None
 
 class CompositeBlocksource(Blocksource):
+    """Block source that aggregates multiple Blocksources."""
     def __init__(self, *sources: Blocksource):
         self.sources = sources
     

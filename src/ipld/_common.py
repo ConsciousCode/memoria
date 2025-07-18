@@ -4,13 +4,10 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Self
 if TYPE_CHECKING:
     from .cid import CID, CIDv0, CIDv1
 
-__all__ = (
-    'IPLData', '_encodec', '_decodec', 'Immutable'
-)
-
 type IPLData = Mapping[str, IPLData]|Iterable[IPLData]|CID|CIDv0|CIDv1|bytes|str|int|float|bool|None
 
-def _encodec(name: str):
+def encodec(name: str):
+    '''Wrap common logic for dag-* encoding functions.'''
     def staged(pre_encode: Callable[[IPLData], Any]):
         @wraps(pre_encode)
         def transform(data: Any) -> IPLData:
@@ -39,7 +36,8 @@ def _encodec(name: str):
         return transform
     return staged
 
-def _decodec(name: str):
+def decodec(name: str):
+    '''Wrap common logic for dag-* decoding functions.'''
     def staged(pre_decode: Callable[[Any], IPLData]):
         def transform(data: Any) -> IPLData:
             if (d := pre_decode(data)) is not None:
@@ -60,6 +58,7 @@ def _decodec(name: str):
     return staged
 
 class Immutable:
+    '''A base class for immutable objects. Raises on any attempt to modify.'''
     def __setattr__(self, name, value, /) -> None:
         raise TypeError(type(self).__name__ + " objects are immutable.")
     

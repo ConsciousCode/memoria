@@ -9,8 +9,9 @@ from mcp.types import ModelPreferences
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, TypeAdapter
 from pydantic_core import CoreSchema, core_schema
 
+from ipld import dagcbor, CIDv1, CID
+
 from .graph import IGraph
-from .ipld import dagcbor, CIDv1, CID
 
 __all__ = (
     'MemoryKind',

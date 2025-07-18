@@ -104,3 +104,11 @@ advance llm input = do
 
 ## TODO
 - Eventually need to implement bitswap to give IPFS nodes access to memories.
+
+## Style
+All modules should order their imports in the following order:
+1. Standard library
+2. Third-party
+3. Local top-level
+4. Parent submodule
+5. Local submodule

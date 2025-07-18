@@ -1,3 +1,9 @@
+'''
+Multicodec is a protocol for identifying data formats and protocols.
+This module provides utilities to work with multicodec prefixes,
+including extracting, adding, and removing prefixes, as well as checking codec validity.
+'''
+
 from . import varint
 from .multihash import HASH_CODES
 

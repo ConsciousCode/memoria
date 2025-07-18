@@ -1,4 +1,4 @@
-from ._common import IPLData
+from ._common import IPLData, Immutable
 from .car import carv1_iter, carv2_iter, carv1, carv2
 from .cid import CID, CIDv0, CIDv1, BlockCodec
 from .multibase import (
@@ -11,7 +11,6 @@ from .multibase import (
     base58, base58btc, base58flickr, base64, base64pad,
     base64url, base64urlpad
 )
-from .ipld import dag_load, dag_dump
 from .ipfs import (
     CIDResolveError, RawBlockLink, DAGPBNode, FileLeaf, FileNode,
     Blocksource, Blockstore,
@@ -19,15 +18,16 @@ from .ipfs import (
     ShardingStrategy, ShardLast,
     ChunkingStrategy, chunker_size
 )
-from .multihash import multihash, Multihash
+from .multihash import MultihashCodec, multihash, Multihash
 from .multiaddr import Multiaddr, MultiaddrCodec
+# These contain lots of stuff which we don't want to import directly
 from . import (
     car, cid, multibase, multicodec,
-    multihash, varint, dagcbor, dagjson
+    multihash, varint, dag, dagcbor, dagjson
 )
 
 __all__ = (
-    'IPLData',
+    'IPLData', 'Immutable',
     
     'carv1_iter', 'carv2_iter', 'carv1', 'carv2',
     
@@ -42,13 +42,15 @@ __all__ = (
     'base45', 'base58', 'base58btc', 'base58flickr',
     'base64', 'base64pad', 'base64url', 'base64urlpad',
 
+    'dag',
+
     'CIDResolveError', 'RawBlockLink', 'DAGPBNode', 'FileLeaf', 'FileNode',
-    'dag_load', 'dag_dump', 'Blocksource', 'Blockstore',
+    'Blocksource', 'Blockstore',
     'FlatfsBlockstore', 'CompositeBlocksource',
     'ShardingStrategy', 'ShardLast',
     'ChunkingStrategy', 'chunker_size',
 
-    'multihash', 'Multihash',
+    'MultihashCodec', 'multihash', 'Multihash',
 
     'Multiaddr', 'MultiaddrCodec',
 

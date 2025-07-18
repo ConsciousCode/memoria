@@ -1,3 +1,7 @@
+'''
+Multihash implementation for handling various hash functions and encodings.
+'''
+
 from io import BytesIO
 from typing import Literal, Optional, Self, overload
 import hashlib
@@ -6,6 +10,7 @@ from . import varint, multibase
 from ._common import Immutable
 
 __all__ = (
+    'MultihashCodec',
     "HASH_CODES", "CODE_HASHES",
     'Multihash',
     'MultihashBuilder',

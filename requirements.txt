@@ -11,3 +11,4 @@ protobuf
 deepmerge
 cbor2
 uuid-extension
+netaddr

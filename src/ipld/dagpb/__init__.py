@@ -1,13 +1,24 @@
-from .._common import IPLData
-from ..cid import CID
+'''
+IPLD DAG-PB (Protocol Buffers) module. In IPLD this is solely used for
+representing unixfs data structures.
+'''
+
+from typing import TypedDict
+from ipld._common import IPLData
+from ipld.cid import CID
+
 from .wrap import PBNode, PBLink
 
-__all__ = (
-    'PBLink',
-    'PBNode',
-    'marshal',
-    'unmarshal'
-)
+class PBLinkModel(TypedDict):
+    """An IPLD model for a DAG-PB link."""
+    Name: str
+    Hash: CID
+    Tsize: int
+
+class PBNodeModel(TypedDict):
+    """An IPLD model for a DAG-PB node."""
+    Links: list[PBLinkModel]
+    Data: bytes
 
 def _encode_pblink(link) -> PBLink:
     match link:
@@ -31,9 +42,11 @@ def _encode_pbnode(node) -> PBNode:
     raise ValueError(f"Invalid PBNode: {node}")
 
 def marshal(data: PBNode|IPLData) -> bytes:
+    '''Marshal DAG-PB data to bytes.'''
     if not isinstance(data, PBNode):
         data = _encode_pbnode(data)
     return data.dump()
 
 def unmarshal(data: bytes) -> PBNode:
+    '''Unmarshal bytes to DAG-PB data.'''
     return PBNode.load(data)

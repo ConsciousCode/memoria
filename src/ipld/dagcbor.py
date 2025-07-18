@@ -1,15 +1,15 @@
+'''
+DAG-CBOR encoding and decoding.
+'''
+
 import cbor2
 
 import struct
 import math
 from typing import Any, Iterable
 
+from ._common import decodec, IPLData
 from .cid import CID
-from ._common import _decodec, IPLData
-
-__all__ = (
-    "marshal", "unmarshal"
-)
 
 LINK_TAG = 42
 '''DAG-CBOR tag for links.'''
@@ -84,7 +84,7 @@ def _encode_float(value: float) -> Iterable[bytes]:
     yield b'\xfb' # major 7, minor 27 (64-bit float always)
     yield struct.pack('>d', value)
 
-@_decodec("DAG-CBOR")
+@decodec("DAG-CBOR")
 def _dagcbor_decode(data) -> IPLData:
     match data:
         case cbor2.CBORTag():
@@ -93,25 +93,9 @@ def _dagcbor_decode(data) -> IPLData:
             raise ValueError(f'DAG-CBOR forbids all tags except {LINK_TAG} (CID). Got {data.tag}')
 
 def marshal(data: IPLData) -> bytes:
-    """
-    Convert data to DAG-CBOR format.
-
-    Args:
-        data: The data to convert.
-
-    Returns:
-        The data in DAG-CBOR format.
-    """
+    """Marshal data to DAG-CBOR format."""
     return b''.join(_encode_item(data))
 
 def unmarshal(data: bytes) -> IPLData:
-    """
-    Convert DAG-CBOR format data back to its original form.
-
-    Args:
-        data: The DAG-CBOR formatted bytes.
-
-    Returns:
-        The original data.
-    """
+    """Unmarshal data from DAG-CBOR format."""
     return _dagcbor_decode(cbor2.loads(data))

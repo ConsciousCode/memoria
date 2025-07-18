@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Callable, Iterable, Optional, overload, override
 from heapq import heapify, heappush
 
-from .util import Least, Lexicographic, ifnone, todo_heap
+from .util import Least, Lexicographic, todo_heap
 
 _default = object()
 
@@ -161,8 +161,12 @@ class IGraph[K, E, V, Node](ABC):
         if key is None:
             key = lambda v: Least
         else:
+            # Replace None with Least in the key function
             _oldkey = key
-            key = lambda v: ifnone(_oldkey(v), Least)
+            def _key(v: V) -> Lexicographic:
+                ok = _oldkey(v)
+                return Least if ok is None else ok
+            key = _key
 
         indeg = SimpleGraph[K, int]()
         for src in self:

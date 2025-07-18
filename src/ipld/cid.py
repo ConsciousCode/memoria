@@ -4,10 +4,9 @@ from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import core_schema
 
-from ._common import Immutable
-
-from .multihash import BaseMultihash, Multihash, multihash
 from . import multibase, multicodec
+from ._common import Immutable
+from .multihash import BaseMultihash, Multihash, multihash
 
 __all__ = (
     'CIDVersion', 'BlockCodec',

@@ -17,12 +17,13 @@ from pydantic import Field
 from pydantic_ai.mcp import ToolResult
 from pydantic_ai.models.mcp_sampling import MCPSamplingModelSettings
 
-from repo import Repository
+from ipld import CIDv1, CIDResolveError
+
+from memoria.repo import Repository
+from memoria.memory import AnyMemory, DraftMemory, Edge, OtherData, RecallConfig, SampleConfig, SelfData, TextData, UploadResponse
+from memoria.prompts import QUERY_PROMPT
 
 from ._common import AddParameters, MemoriaBlockstore, context_blockstore, context_repo
-from ..ipld import CIDv1, CIDResolveError
-from ..memory import AnyMemory, DraftMemory, Edge, OtherData, RecallConfig, SampleConfig, SelfData, TextData, UploadResponse
-from ..prompts import QUERY_PROMPT
 
 DEFAULT_RECALL_CONFIG = RecallConfig()
 
