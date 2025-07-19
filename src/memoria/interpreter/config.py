@@ -1,6 +1,6 @@
 from functools import cached_property
 import os
-from typing import Annotated, Any, Final, Iterable, Literal, Optional
+from typing import Any, Final, Iterable, Optional
 import inspect
 
 from mcp.types import ModelPreferences
@@ -8,8 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
 
-from memory import RecallConfig, SampleConfig
-from .util import warn
+from memory import SampleConfig
+from memoria.util import warn
 
 CHAT_SONA: Final = "chat"
 TEMPERATURE: Final = 0.7
@@ -48,14 +48,6 @@ class ProviderConfig(BaseModel):
 
     model_config = ConfigDict(extra='allow')
 
-class IPFSConfig(BaseModel):
-    cid_version: Annotated[
-        Literal[0, 1], Field(description="CID version.")
-    ] = 1 # We use raw-leaves by default, so CIDv1 is preferred.
-    hash: Annotated[
-        str, Field(description="Hash function.")
-    ] = "sha2-256"
-
 class Config(BaseModel):
     source: str
     '''Original source of the config file.'''
@@ -77,9 +69,6 @@ class Config(BaseModel):
     purposes: dict[str, str] = Field(default_factory=dict)
     '''Map purposes to model names.'''
 
-    ipfs: IPFSConfig = IPFSConfig()
-    recall: RecallConfig = RecallConfig()
-    '''Configuration for how to weight memory recall.'''
     providers: ProviderConfig = Field(default_factory=ProviderConfig)
     '''AI model configuration.'''
 
@@ -279,20 +268,9 @@ class Config(BaseModel):
                     # Piped to file we're reading from
                     raise FileNotFoundError(f"Empty config file: {path}")
         except FileNotFoundError:
-            import json
             source = inspect.cleandoc(f'''
                 ## Generated from defaults ##
-                sona = {json.dumps(CHAT_SONA)}
                 temperature = {TEMPERATURE}
-
-                [recall]
-                # Default weighting for recall
-                #importance = null
-                #recency = null
-                #sona = null
-                #fts = null
-                #vss = null
-                #k = null
 
                 [models]
                 # AI model profiles

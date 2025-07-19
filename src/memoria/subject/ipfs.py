@@ -18,11 +18,12 @@ type SupportedCodec = Literal['raw', 'dag-json', 'dag-cbor', 'dag-pb']
 
 def codec_mimetype(codec: str) -> str:
     """Return the MIME type for a given codec."""
-    return {
-        'dag-json': 'application/json',
-        'dag-cbor': 'application/cbor',
-        'dag-pb': 'application/vnd.ipld.dag-pb'
-    }.get(codec, 'application/octet-stream')
+    match codec:
+        case 'dag-json': return 'application/json'
+        case 'dag-cbor': return 'application/cbor'
+        case 'dag-pb': return 'application/vnd.ipld.dag-pb'
+        case _:
+            return 'application/octet-stream'
 
 ############################
 ## IPFS Trustless Gateway ##

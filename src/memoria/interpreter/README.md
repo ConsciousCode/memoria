@@ -1,0 +1,1 @@
+The *Interpreter* is the component which advances the Subject's state by interpreting and responding to context. It's able to use whatever heuristics, models, and tools it needs to accomplish the task. In the production of new memories, side effects may occur which is desirable; this is how the total agent is able to take any actions at all.
