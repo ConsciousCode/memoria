@@ -7,7 +7,8 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Header, Query, Response
 from fastapi.responses import JSONResponse
 
-from ipld import dagcbor, CIDv1
+from ipld import dagcbor
+from cid import CIDv1
 
 from memoria.repo import Repository
 from memoria.memory import Edge, Memory
@@ -78,7 +79,7 @@ def get_sona(
         accept = accept or []
         if "application/cbor" in accept:
             return dagcbor.marshal(sona)
-        return sona.human_json()
+        return sona.model_dump()
     return Response(
         status_code=404,
         content=f"Sona with UUID {uuid} not found."
@@ -102,7 +103,7 @@ def list_sonas(
     accept = accept or []
     if "application/cbor" in accept:
         return dagcbor.marshal(sonas)
-    return [sona.human_json() for sona in sonas]
+    return [sona.model_dump() for sona in sonas]
 
 @rest_api.post("/sona/by-name/{name}/act/push")
 async def act_push_by_name(
@@ -135,25 +136,3 @@ async def act_push(
             content=f"Sona with UUID {uuid} not found."
         )
     return JSONResponse({"uuid": uuid})
-
-@rest_api.get("/sona/{uuid}/act/next")
-async def act_next(
-        uuid: UUID|str,
-        repo: Repository = Depends(get_repo),
-    ):
-    '''Advance the ACT for a sona by UUID.'''
-    try: uuid = UUID(uuid) # type: ignore
-    except Exception:
-        return Response(
-            status_code=400,
-            content=f"Invalid UUID {uuid}"
-        )
-
-    match repo.act_next(uuid):
-        case False:
-            return Response(
-                status_code=404,
-                content=f"Sona with UUID {uuid} not found."
-            )
-        case True: return JSONResponse(None)
-        case g: return JSONResponse(g.adj)

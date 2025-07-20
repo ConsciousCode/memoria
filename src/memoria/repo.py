@@ -11,7 +11,7 @@ from cid import CIDv1, CID
 from ipfs import Blocksource
 
 from .db import DatabaseRO, FileRow
-from .memory import ACThread, AnyMemory, Edge, Memory, MemoryDAG, MemoryDataAdapter, RecallConfig, SelfData, Sona, StopReason
+from .memory import ACThread, AnyMemory, Edge, Memory, MemoryContext, MemoryDAG, MemoryDataAdapter, RecallConfig, SelfData, Sona, StopReason
 from .util import todo_list
 
 __all__ = (
@@ -118,7 +118,11 @@ class Repository(Blocksource):
             if (mr := self.db.select_memory(cid=origcid)) is None:
                 continue
 
-            g.insert(origcid, mr.to_partial())
+            g.insert(origcid, MemoryContext(
+                memory=mr.to_partial(),
+                timestamp=mr.timestamp,
+                importance=mr.importance
+            ))
 
             energy = score*budget
 
@@ -171,7 +175,11 @@ class Repository(Blocksource):
                 
                 dstcid = CIDv1(dst.cid)
 
-                g.insert(srccid, dst.to_partial())
+                g.insert(srccid, MemoryContext(
+                    memory=dst.to_partial(),
+                    timestamp=dst.timestamp,
+                    importance=dst.importance
+                ))
                 g.add_edge(srccid, dstcid, weight)
 
                 bw.append((energy*weight, dst.rowid, dstcid))
@@ -194,7 +202,9 @@ class Repository(Blocksource):
 
                 srccid = CIDv1(src.cid)
 
-                g.insert(srccid, src.to_partial())
+                g.insert(srccid, MemoryContext(
+                    memory=src.to_partial()
+                ))
                 g.add_edge(srccid, dstcid, weight)
 
                 fw.append((energy*imp, dst_id, dstcid))

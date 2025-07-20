@@ -12,7 +12,7 @@ from pydantic_core import CoreSchema, core_schema
 from ipld import dagcbor, IPLData
 from cid import CID, CIDv1
 
-from graph import IGraph
+from graph import IGraph, IntrusiveGraph
 
 __all__ = (
     'MemoryKind',
@@ -393,22 +393,12 @@ class Sona(BaseModel):
         description="Pending thread for the Sona, if any."
     )
 
-    def human_json(self):
-        '''Return a human-readable JSON representation of the Sona.'''
-        # Need to do this separately because if we use model_dump(),
-        # it will trigger UUID's serialization as a CID and lose the
-        # human-readable UUID.
-        return {
-            "uuid": str(self.uuid),
-            "aliases": self.aliases,
-            "active": self.active and self.active.model_dump(),
-            "pending": self.pending and self.pending.model_dump()
-        }
-
-class MemoryDAG(IGraph[CIDv1, float, PartialMemory, PartialMemory]):
+class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
     '''IPLD data model for memories implementing the IGraph interface.'''
 
-    def __init__(self, keys: dict[CIDv1, PartialMemory]|None = None):
+    type Node = MemoryContext[PartialMemory]
+
+    def __init__(self, keys: dict[CIDv1, Node]|None = None):
         super().__init__()
         self.adj = keys or {}
 
@@ -435,38 +425,46 @@ class MemoryDAG(IGraph[CIDv1, float, PartialMemory, PartialMemory]):
         )
     
     @override
-    def _node(self, value: PartialMemory) -> PartialMemory:
-        copy = value.model_copy(deep=True)
-        copy.edges = []
-        return copy
+    def _node(self, value: Node) -> Node:
+        return MemoryContext(
+            memory=PartialMemory(
+                cid=value.memory.cid,
+                data=value.memory.data,
+                edges=[]
+            ),
+            timestamp=value.timestamp,
+            importance=value.importance,
+            sonas=value.sonas
+        )
     
     @override
-    def _setvalue(self,  node: PartialMemory, value: PartialMemory):
-        node.data = value.data
-        node.edges = value.edges
+    def _setvalue(self,  node: Node, value: Node):
+        node.memory.cid = value.memory.cid
+        node.memory.data = value.memory.data
+        node.memory.edges = value.memory.edges
+        node.timestamp = value.timestamp
+        node.importance = value.importance
+        node.sonas = value.sonas
     
     @override
-    def _valueof(self, node: PartialMemory) -> PartialMemory:
-        return node
-    
-    @override
-    def _edges(self, node: PartialMemory) -> Iterable[tuple[CIDv1, float]]:
-        for edge in node.edges:
+    def _edges(self, node: Node) -> Iterable[tuple[CIDv1, float]]:
+        for edge in node.memory.edges:
             yield edge.target, edge.weight
 
     @override
-    def _add_edge(self, src: PartialMemory, dst: CIDv1, edge: float):
-        if not any(dst == e.target for e in src.edges):
-            src.edges.append(Edge[CIDv1](
+    def _add_edge(self, src: Node, dst: CIDv1, edge: float):
+        es = src.memory.edges
+        if not any(dst == e.target for e in es):
+            es.append(Edge[CIDv1](
                 target=dst,
                 weight=edge
             ))
     
     @override
-    def _pop_edge(self, src: PartialMemory, dst: CIDv1) -> Optional[float]:
-        edges = src.edges
-        for i, edge in enumerate(edges):
+    def _pop_edge(self, src: Node, dst: CIDv1) -> Optional[float]:
+        es = src.memory.edges
+        for i, edge in enumerate(es):
             if edge.target == dst:
-                del edges[i]
+                del es[i]
                 return edge.weight
         return None

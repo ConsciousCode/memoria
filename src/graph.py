@@ -3,20 +3,17 @@ from typing import Callable, Iterable, Optional, Protocol, Self, overload, overr
 from heapq import heapify, heappop, heappush
 
 class Lexicographic(Protocol):
+    '''Protocol for lexicographical order.'''
     def __lt__(self, other: Self, /) -> bool: ...
 
 class LeastT:
     def __init__(self):
         raise NotImplementedError("LeastT cannot be instantiated directly")
     
-    def __lt__(self, other: object, /):
-        return True
-    
-    def __gt__(self, other: object, /):
-        return False
-    
-    def __eq__(self, other: object, /):
-        return isinstance(other, LeastT)
+    def __lt__(self, other: object, /): return True
+    def __gt__(self, other: object, /): return False
+    def __eq__(self, other: object, /): return isinstance(other, LeastT)
+    def __repr__(self): return "Least"
 
 Least = LeastT.__new__(LeastT)
 '''A singleton representing the least element in a lexicographical order.'''
@@ -210,6 +207,13 @@ class IGraph[K, E, V, Node](ABC):
                 indeg[dst] -= 1
                 if indeg[dst] == 0:
                     heappush(sources, (key(self[dst]), dst))
+
+class IntrusiveGraph[K, E, V](IGraph[K, E, V, V]):
+    '''Graph using an intrusive node type.'''
+
+    @override
+    def _valueof(self, node: V) -> V:
+        return node
 
 class SimpleNode[K, V]:
     value: V

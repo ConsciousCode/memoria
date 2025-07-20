@@ -80,7 +80,6 @@ async def interpret(
             memories[cid] = PartialMemory(
                 cid=cid,
                 data=m.data,
-                timestamp=m.timestamp,
                 edges=[e for e in m.edges if e.target not in ir.context]
             )
     

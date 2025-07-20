@@ -288,7 +288,7 @@ async def query(
         for cid in g.invert().toposort(key=lambda v: v.timestamp):
             # We need ids for each memory so their edges can be annotated later
             ref = refs[cid] = len(refs) + 1
-            memory = g[cid]
+            memory = g[cid].memory
             chatlog.append(memory)
             role, content = memory_to_message(
                 ref,
@@ -311,9 +311,7 @@ async def query(
         # Inserting prompt before it's been annotated is fine because the
         # model can figure out the grounding.
         messages.append(sampling_message(
-            "user", build_tags(
-                ["final", tag], prompt.timestamp or int(datetime.now().timestamp())
-            ) + prompt.document()
+            "user", build_tags(["final", tag]) + prompt.document()
         ))
 
         response = await ctx.sample(
