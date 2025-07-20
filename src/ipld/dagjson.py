@@ -5,9 +5,9 @@ DAG-JSON encoding and decoding.
 import json
 
 import multibase
+from cid import CID, CIDv0, CIDv1
 
 from ._common import encodec, decodec, IPLData
-from cid import CID, CIDv0, CIDv1
 
 @encodec("DAG-JSON")
 def _dagjson_encode(data):

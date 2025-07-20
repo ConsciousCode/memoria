@@ -3,8 +3,9 @@ from collections import defaultdict
 from typing import Iterable, Iterator, Literal, Optional, override
 
 import varint
-import dagcbor
 from cid import CIDv1
+
+from . import dagcbor
 
 __all__ = (
     'CARv2Index',

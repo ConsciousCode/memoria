@@ -8,8 +8,9 @@ import struct
 import math
 from typing import Any, Iterable
 
-from ._common import decodec, IPLData
 from cid import CID
+
+from ._common import decodec, IPLData
 
 LINK_TAG = 42
 '''DAG-CBOR tag for links.'''

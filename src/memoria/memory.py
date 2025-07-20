@@ -9,7 +9,8 @@ from mcp.types import ModelPreferences
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, TypeAdapter
 from pydantic_core import CoreSchema, core_schema
 
-from ipld import dagcbor, CIDv1, CID
+from ipld import dagcbor, IPLData
+from cid import CID, CIDv1
 
 from graph import IGraph
 
@@ -78,13 +79,17 @@ class SampleConfig(BaseModel):
 class IPLDModel(BaseModel):
     '''Base model for IPLD objects.'''
 
-    def as_block(self) -> bytes:
+    def ipld_model(self) -> IPLData:
+        '''Return the object as an IPLD model.'''
+        return self.model_dump()
+
+    def ipld_block(self) -> bytes:
         '''Return the object as an IPLD block.'''
-        return dagcbor.marshal(self.model_dump())
+        return dagcbor.marshal(self.ipld_model())
 
     @cached_property
     def cid(self):
-        return CIDv1.hash(self.as_block())
+        return CIDv1.hash(self.ipld_block())
 
 class Edge[T](BaseModel):
     '''Edge from one memory to another.'''
@@ -190,26 +195,16 @@ type AnyMemoryData = Annotated[
 ]
 '''Most permissive type for memory data, including import files.'''
 
+MemoryDataAdapter = TypeAdapter[MemoryData](MemoryData)
+AnyMemoryDataAdapter = TypeAdapter[AnyMemoryData](AnyMemoryData)
+
 class BaseMemory[D: AnyMemoryData=MemoryData](BaseModel):
     '''Base memory model.'''
 
     data: D
-    timestamp: Optional[int] = None
-    edges: list[Edge[CIDv1]] = Field(
-        default_factory=list,
-        description="Edges to other memories."
-    )
-    # Extra metadata not included in the IPLD model
-    importance: Optional[float] = Field(
-        default=None,
-        exclude=True,
-        description="Importance of the memory, used for recall weighting."
-    )
-    sonas: Optional[list[UUID|str]] = Field(
-        default=None,
-        exclude=True,
-        description="Sonas the memory belongs to."
-    )
+    '''Data contained in the memory.'''
+    edges: list[Edge[CIDv1]]
+    '''Edges to other memories.'''
 
     def edge(self, target: CIDv1) -> Optional[Edge[CIDv1]]:
         '''Get the edge to the target memory, if it exists.'''
@@ -246,13 +241,7 @@ class DraftMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
 
     def complete(self) -> 'Memory[D]':
         '''Complete the memory by adding edges and returning a Memory object.'''
-        return Memory(
-            data=self.data,
-            timestamp=self.timestamp,
-            edges=self.edges,
-            importance=self.importance,
-            sonas=self.sonas
-        )
+        return Memory(data=self.data, edges=self.edges)
 
 class PartialMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
     '''
@@ -270,20 +259,19 @@ class Memory[D: AnyMemoryData=MemoryData](BaseMemory[D], IPLDModel):
     model_config = ConfigDict(frozen=True)
 
     @override
-    def as_block(self) -> bytes:
+    def ipld_model(self) -> IPLData:
         # Edges must be sorted by target CID to ensure deterministic ordering
-        self.edges.sort(key=lambda e: e.target)
-        return super().as_block()
+        return {
+            "data": self.data.model_dump(),
+            "edges": sorted(self.edges, key=lambda e: e.target),
+        }
     
-    def partial(self) -> 'PartialMemory[D]':
-        '''Return a PartialMemory with the same data and edges, but without the CID.'''
+    def partial(self) -> PartialMemory[D]:
+        '''Return a PartialMemory with the same data and edges.'''
         return PartialMemory(
-            data=self.data,
-            timestamp=self.timestamp,
-            edges=self.edges,
             cid=self.cid,
-            importance=self.importance,
-            sonas=self.sonas
+            data=self.data,
+            edges=self.edges
         )
 
 type CompleteMemory[D: AnyMemoryData=MemoryData] = PartialMemory[D] | Memory[D]
@@ -291,6 +279,17 @@ type CompleteMemory[D: AnyMemoryData=MemoryData] = PartialMemory[D] | Memory[D]
 
 type AnyMemory[D: AnyMemoryData=MemoryData] = DraftMemory[D] | CompleteMemory[D]
 '''Any kind of instantiable memory.'''
+
+class MemoryContext[M: AnyMemory](BaseModel):
+    memory: M
+    '''The memory itself.'''
+    
+    timestamp: Optional[int] = None
+    '''Timestamp of the memory, if known.'''
+    importance: Optional[float] = None
+    '''Importance of the memory, used for recall weighting.'''
+    sonas: Optional[list[UUID|str]] = None
+    '''Sonas the memory belongs to.'''
 
 class ImportMemory(DraftMemory[ImportFileData]):
     '''Base memory model.'''
@@ -363,18 +362,16 @@ class ACThread(IPLDModel):
     memory: CIDv1
     prev: Optional[CIDv1] = None
 
-type AnyACThread[D: MemoryData=MemoryData] = IncompleteACThread[D] | ACThread
+    @override
+    def ipld_model(self) -> IPLData:
+        '''Return the thread as an IPLD model.'''
+        return {
+            "sona": str(self.sona),
+            "memory": self.memory,
+            "prev": self.prev
+        }
 
-class UploadResponse(BaseModel):
-    created: bool = Field(
-        description="Whether the file was newly inserted."
-    )
-    size: int = Field(
-        description="Size of the uploaded file including IPFS overhead in bytes."
-    )
-    cid: CID = Field(
-        description="CID of the uploaded file."
-    )
+type AnyACThread[D: MemoryData=MemoryData] = IncompleteACThread[D] | ACThread
 
 class Sona(BaseModel):
     '''
@@ -445,11 +442,7 @@ class MemoryDAG(IGraph[CIDv1, float, PartialMemory, PartialMemory]):
     
     @override
     def _setvalue(self,  node: PartialMemory, value: PartialMemory):
-        # We're assigning the discriminant with the data together so despite
-        #  not being technically correct, there is no observable type violations
-        node.kind = value.kind # type: ignore
-        node.data = value.data # type: ignore
-        node.timestamp = value.timestamp
+        node.data = value.data
         node.edges = value.edges
     
     @override

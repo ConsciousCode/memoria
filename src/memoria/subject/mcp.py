@@ -13,15 +13,15 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ResourceError, ToolError
 from mcp import SamplingMessage
 from mcp.types import ModelPreferences, Role, TextContent
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_ai.mcp import ToolResult
 from pydantic_ai.models.mcp_sampling import MCPSamplingModelSettings
 
-from ipld import CIDv1
+from cid import CID, CIDv1
 from ipfs import CIDResolveError
 
 from memoria.repo import Repository
-from memoria.memory import AnyMemory, DraftMemory, Edge, OtherData, RecallConfig, SampleConfig, SelfData, TextData, UploadResponse
+from memoria.memory import AnyMemory, DraftMemory, Edge, OtherData, RecallConfig, SampleConfig, SelfData, TextData
 from memoria.prompts import QUERY_PROMPT
 
 from ._common import AddParameters, MemoriaBlockstore, context_blockstore, context_repo
@@ -51,11 +51,7 @@ DEFAULT_CHAT_CONFIG = SampleConfig(
 mcp = FastMCP[Repository]("memoria",
     """Coordinates a "sona" representing a cohesive identity and memory."""
 )
-def build_tags(tags: list[str], timestamp: Optional[float|datetime]) -> str:
-    if timestamp is not None:
-        if not isinstance(timestamp, datetime):
-            timestamp = datetime.fromtimestamp(timestamp)
-        tags.append(timestamp.replace(microsecond=0).isoformat())
+def build_tags(tags: list[str]) -> str:
     return f"[{'\t'.join(tags)}]\t"
 
 def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=False) -> tuple[Role, str]:
@@ -67,9 +63,6 @@ def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=
         f"ref:{ref}" + (f"->{','.join(map(str, deps))}" if deps else "")
     )
 
-    if (ts := memory.timestamp) is not None:
-        ts = datetime.fromtimestamp(ts)
-    
     match memory.data:
         case SelfData():
             if name := memory.data.name:
@@ -78,16 +71,16 @@ def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=
                 if sr != "finish":
                     tags.append(f"stop_reason:{sr}")
             content = ''.join(p.content for p in memory.data.parts)
-            return ("assistant", build_tags(tags, ts) + content)
+            return ("assistant", build_tags(tags) + content)
         
         case TextData():
             tags.append("kind:raw_text")
-            return ("user", build_tags(tags, ts) + memory.data.content)
+            return ("user", build_tags(tags) + memory.data.content)
         
         case OtherData():
             if name := memory.data.name:
                 tags.append(f"name:{name}")
-            return ("user", build_tags(tags, ts) + memory.data.content)
+            return ("user", build_tags(tags) + memory.data.content)
         
             '''
         case "file":
@@ -159,6 +152,17 @@ def memory_resource(ctx: Context, cid: CIDv1):
             return m
         raise ResourceError("Memory not found")
 
+class UploadResponse(BaseModel):
+    created: bool = Field(
+        description="Whether the file was newly inserted."
+    )
+    size: int = Field(
+        description="Size of the uploaded file including IPFS overhead in bytes."
+    )
+    cid: CID = Field(
+        description="CID of the uploaded file."
+    )
+
 @mcp.tool(
     annotations=dict(
         idempotentHint=True,
@@ -208,10 +212,18 @@ async def upload(
 )
 async def recall(
         ctx: Context,
+        sona: Annotated[
+            Optional[UUID|str],
+            Field(description="Sona to recall memories from.")
+        ],
         prompt: Annotated[
             DraftMemory,
             Field(description="Prompt to base the recall on.")
         ],
+        timestamp: Annotated[
+            Optional[int],
+            Field(description="Timestamp to use for the recall. If not provided, uses the current time.")
+        ] = None,
         recall_config: Annotated[
             RecallConfig,
             Field(description="Configuration for how to weight memory recall.")
@@ -222,7 +234,13 @@ async def recall(
     and their dependencies.
     '''
     with mcp_emu(ctx) as emu:
-        return emu.repo.recall(prompt, recall_config).adj
+        if isinstance(sona, str):
+            try: sona = UUID(sona)
+            except ValueError:
+                pass
+        if timestamp is None:
+            timestamp = int(datetime.now().timestamp())
+        return emu.repo.recall(sona, prompt, timestamp, recall_config).adj
 
 @mcp.tool(
     annotations=dict(
@@ -232,10 +250,18 @@ async def recall(
 )
 async def query(
         ctx: Context,
+        sona: Annotated[
+            Optional[UUID|str],
+            Field(description="Sona to query memories from.")
+        ],
         prompt: Annotated[
             DraftMemory,
             Field(description="Prompt for the chat. If `null`, use only the included memories.")
         ],
+        timestamp: Annotated[
+            Optional[int],
+            Field(description="Timestamp to use for the query. If not provided, uses the current time.")
+        ] = None,
         system_prompt: Annotated[
             str,
             Field(description="System prompt to use for the query.")
@@ -251,7 +277,9 @@ async def query(
     ):
     '''Single-turn conversation returning the response.'''
     with mcp_emu(ctx) as emu:
-        g = emu.repo.recall(prompt, recall_config)
+        if timestamp is None:
+            timestamp = int(datetime.now().timestamp())
+        g = emu.repo.recall(sona, prompt, timestamp, recall_config)
 
         refs: dict[CIDv1, int] = {}
         chatlog: list[AnyMemory] = []
@@ -308,10 +336,8 @@ async def query(
                     f"{type(response)}: {response}"
                 )
         
-        chatlog.append(DraftMemory(
-            data=data,
-            timestamp=int(datetime.now().timestamp())
-        ))
+        # TODO: empty edges?
+        chatlog.append(DraftMemory(data=data, edges=[]))
         # TODO: No support for images, would require inspecting the memories
         # themselves for content. Don't want to spend more time right now on
         # a debug endpoint

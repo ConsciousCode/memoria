@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from typing import Callable, Iterable, Literal, Optional, Protocol, cast, overload
+from typing import Any, Callable, Iterable, Iterator, Optional, Self, Sequence, cast, overload
 import sqlite3
 from uuid import UUID
 import os
@@ -11,9 +11,9 @@ import sqlite_vec
 from fastembed import TextEmbedding
 from uuid_extension import uuid7
 
-from ipld import CIDv1, CID
+from cid import CID, CIDv1
 
-from memory import ACThread, AnyACThread, AnyMemory, Edge, FileData, IncompleteACThread, DraftMemory, Memory, MemoryKind, MetaData, OtherData, PartialMemory, RecallConfig, SelfData, TextData
+from .memory import ACThread, AnyMemory, Edge, IncompleteACThread, DraftMemory, Memory, MemoryDataAdapter, PartialMemory, RecallConfig
 from .util import finite
 
 __all__ = (
@@ -41,9 +41,6 @@ type JSONB = str
 ## - this allows us to avoid processing columns we don't need
 ## PrimaryKey aliases also give us little semantic type hints for the linter
 
-class Factory(Protocol):
-    factory: Callable
-
 class FileRow(BaseModel):
     type PrimaryKey = bytes
 
@@ -52,39 +49,6 @@ class FileRow(BaseModel):
     mimetype: str
     filesize: int
     overhead: int
-
-    @classmethod
-    def factory(cls, cid, filename, mimetype, filesize, overhead) -> 'FileRow':
-        '''Create a FileRow from a raw database row.'''
-        return cls(
-            cid=cid,
-            filename=filename,
-            mimetype=mimetype,
-            filesize=filesize,
-            overhead=overhead
-        )
-
-@overload
-def memory_data(kind: Literal["self"], json: str) -> SelfData: ...
-@overload
-def memory_data(kind: Literal["other"], json: str) -> OtherData: ...
-@overload
-def memory_data(kind: Literal["text"], json: str) -> TextData: ...
-@overload
-def memory_data(kind: Literal["image", "file"], json: str) -> FileData: ...
-@overload
-def memory_data(kind: Literal["metadata"], json: str) -> MetaData: ...
-
-def memory_data(kind: MemoryKind, json: str):
-    '''Build memory data based on the kind.'''
-    match kind:
-        case "self": return SelfData.model_validate_json(json)
-        case "other": return OtherData.model_validate_json(json)
-        case "text": return TextData.model_validate_json(json)
-        case "image" | "file": return FileData.model_validate_json(json)
-        case "metadata": return MetaData.model_validate_json(json)
-        case _:
-            raise ValueError(f"Unknown memory kind: {kind}")
 
 class BaseMemoryRow(BaseModel):
     '''
@@ -95,95 +59,45 @@ class BaseMemoryRow(BaseModel):
 
     rowid: PrimaryKey
     timestamp: Optional[int]
-    kind: MemoryKind
     data: JSONB
     importance: Optional[float]
 
     @classmethod
-    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'AnyMemoryRow':
+    def factory(cls, **row) -> 'AnyMemoryRow':
         '''Create a MemoryRow from a raw database row.'''
-        return (MemoryRow if cid else IncompleteMemoryRow).factory(
-            rowid, cid, timestamp, kind, data, importance
+        if row['cid']:
+            return MemoryRow(**row)
+        else:
+            return IncompleteMemoryRow(**row)
+    
+    def to_draft(self, edges: Iterable[Edge[CIDv1]]=()) -> DraftMemory:
+        '''Convert this MemoryRow to a DraftMemory object.'''
+        return DraftMemory(
+            data=MemoryDataAdapter.validate_python(self.data),
+            edges=list(edges)
         )
 
 class MemoryRow(BaseMemoryRow):
     '''A completed memory, has a CID.'''
-    cid: CIDv1
+    cid: bytes
 
-    @classmethod
-    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'MemoryRow':
-        '''Create a MemoryRow from a raw database row.'''
-        if timestamp and not timestamp.is_integer():
-            raise TypeError("Timestamp must be an integer.")
-        return MemoryRow(
-            rowid=rowid,
-            cid=cid and CIDv1(cid),
-            timestamp=timestamp,
-            kind=kind,
-            data=data,
-            importance=importance
-        )
-    
-    def to_draft(self, edges: list[Edge[CIDv1]] = []):
-        '''Convert this row to an IncompleteMemory object.'''
-        return DraftMemory(
-            data=memory_data(self.kind, self.data),
-            timestamp=self.timestamp,
-            edges=edges,
-            importance=self.importance
-        )
-    
-    def to_partial(self, edges: list[Edge[CIDv1]] = []) -> PartialMemory:
-        '''Convert this row to a Memory object without finalizing it.'''
+    def to_partial(self, edges: Iterable[Edge[CIDv1]]=()) -> PartialMemory:
         return PartialMemory(
-            cid=self.cid,
-            data=memory_data(self.kind, self.data),
-            timestamp=self.timestamp,
-            edges=edges,
-            importance=self.importance
+            cid=CIDv1(self.cid),
+            data=MemoryDataAdapter.validate_python(self.data),
+            edges=list(edges)
         )
-    
-    def to_memory(self, edges: list[Edge[CIDv1]]) -> Memory:
-        '''Convert this row to a Memory object.'''
+
+    def to_memory(self, edges: Iterable[Edge[CIDv1]]=()) -> Memory:
+        '''Convert this MemoryRow to a Memory object.'''
         return Memory(
-            data=memory_data(self.kind, self.data),
-            timestamp=self.timestamp,
-            edges=edges,
-            importance=self.importance
+            data=MemoryDataAdapter.validate_python(self.data),
+            edges=list(edges),
         )
 
 class IncompleteMemoryRow(BaseMemoryRow):
     '''An incomplete memory, does not have a CID.'''
     cid: None = None
-
-    @classmethod
-    def factory(cls, rowid, cid, timestamp, kind, data, importance) -> 'IncompleteMemoryRow':
-        '''Create an IncompleteMemoryRow from a raw database row.'''
-        return IncompleteMemoryRow(
-            rowid=rowid,
-            cid=cid,
-            timestamp=timestamp,
-            kind=kind,
-            data=data,
-            importance=importance
-        )
-    
-    def to_draft(self, edges: list[Edge[CIDv1]] = []):
-        '''Convert this row to an IncompleteMemory object.'''
-        return DraftMemory(
-            data=memory_data(self.kind, self.data),
-            timestamp=self.timestamp,
-            edges=edges,
-            importance=self.importance
-        )
-    
-    def to_memory(self, edges: list[Edge[CIDv1]]) -> Memory:
-        return Memory(
-            data=memory_data(self.kind, self.data),
-            timestamp=self.timestamp,
-            edges=edges,
-            importance=self.importance
-        )
 
 type AnyMemoryRow = MemoryRow | IncompleteMemoryRow
 
@@ -192,15 +106,6 @@ class EdgeRow(BaseModel):
     dst_id: MemoryRow.PrimaryKey
     weight: float
 
-    @classmethod
-    def factory(cls, src_id, dst_id, weight) -> 'EdgeRow':
-        '''Create an EdgeRow from a raw database row.'''
-        return cls(
-            src_id=src_id,
-            dst_id=dst_id,
-            weight=weight
-        )
-
 class SonaRow(BaseModel):
     type PrimaryKey = int
 
@@ -208,16 +113,6 @@ class SonaRow(BaseModel):
     uuid: bytes
     active_id: Optional['ACThreadRow.PrimaryKey']
     pending_id: Optional['ACThreadRow.PrimaryKey']
-
-    @classmethod
-    def factory(cls, rowid, uuid, active_id, pending_id) -> 'SonaRow':
-        '''Create a SonaRow from a raw database row.'''
-        return cls(
-            rowid=rowid,
-            uuid=uuid,
-            active_id=active_id,
-            pending_id=pending_id
-        )
 
 class BaseACThreadRow(BaseModel):
     '''
@@ -232,41 +127,20 @@ class BaseACThreadRow(BaseModel):
     prev_id: Optional[int]
 
     @classmethod
-    def factory(cls, rowid, cid, sona_id, memory_id, prev_id) -> 'AnyACThreadRow':
+    def factory(cls, **row) -> 'AnyACThreadRow':
         '''Create an ACThreadRow from a raw database row.'''
-        return (ACThreadRow if cid else IncompleteACThreadRow).factory(
-            rowid, cid, sona_id, memory_id, prev_id
-        )
+        if row['cid']:
+            return ACThreadRow(**row)
+        else:
+            return IncompleteACThreadRow(**row)
 
 class ACThreadRow(BaseACThreadRow):
     '''A completed act thread, has a CID.'''
-    cid: CIDv1
-
-    @classmethod
-    def factory(cls, rowid, cid, sona_id, memory_id, prev_id) -> 'ACThreadRow':
-        '''Create an ACThreadRow from a raw database row.'''
-        return ACThreadRow(
-            rowid=rowid,
-            cid=CIDv1(cid),
-            sona_id=sona_id,
-            memory_id=memory_id,
-            prev_id=prev_id
-        )
+    cid: bytes
 
 class IncompleteACThreadRow(BaseACThreadRow):
     '''An incomplete act thread, does not have a CID.'''
     cid: None = None
-
-    @classmethod
-    def factory(cls, rowid, cid, sona_id, memory_id, prev_id) -> 'IncompleteACThreadRow':
-        '''Create an IncompleteACThread from a raw database row.'''
-        return IncompleteACThreadRow(
-            rowid=rowid,
-            cid=cid,
-            sona_id=sona_id,
-            memory_id=memory_id,
-            prev_id=prev_id
-        )
 
 type AnyACThreadRow = ACThreadRow | IncompleteACThreadRow
 
@@ -306,26 +180,63 @@ def database(db_path: str=":memory:"):
     else:
         db.commit()
 
-class DatabaseRO:
-    '''
-    Provides read-only access to the database. This is used to prevent
-    accidental mutations to the database when only read access is needed.
-    '''
+class Cursor[T]:
+    '''Type-safe(r) cursor interface.'''
+
+    def __init__(self, cursor: sqlite3.Cursor):
+        self.cursor = cursor
+    
+    def __iter__(self) -> Iterator[T]:
+        return iter(self.cursor)
+
+    def execute(self, query: str, params: dict[str, object]|Sequence[object]=()) -> Self:
+        self.cursor.execute(query, params)
+        return self
+    
+    def executemany(self, query: str, params: Iterable[Sequence[object]]) -> Self:
+        self.cursor.executemany(query, params)
+        return self
+    
+    def fetchone(self) -> Optional[T]:
+        return self.cursor.fetchone()
+    
+    def fetchall(self) -> list[T]:
+        return self.cursor.fetchall()
+    
+    @property
+    def lastrowid(self):
+        return self.cursor.lastrowid
+
+class Database:
+    '''Type-safe(r) database interface.'''
+
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
 
-    def cursor(self, factory: Optional[Factory|Callable]=None):
+    @overload
+    def cursor(self) -> Cursor[tuple[Any, *tuple[Any, ...]]]: ...
+    @overload
+    def cursor[T](self, factory: Callable[..., T]) -> Cursor[T]: ...
+    @overload
+    def cursor[T](self, *, return_type: type[T]) -> Cursor[T]: ...
+
+    def cursor[T](self, factory: Optional[Callable[..., T]]=None, *, return_type: Optional[type[T]] = None):
         cur = self.conn.cursor()
         if factory:
-            if f := getattr(factory, "factory", None):
-                cur.row_factory = lambda cur, row: row and f(*row)
-            else:
-                cur.row_factory = lambda cur, row: row and factory(*row) # type: ignore
-        return cur
+            cur.row_factory = lambda cur, row: factory(**{
+                desc[0]: row[i] for i, desc in enumerate(cur.description)
+            })
+        return Cursor[T](cur)
     
     def commit(self): self.conn.commit()
     def rollback(self): self.conn.rollback()
     def close(self): self.conn.close()
+
+class DatabaseRO(Database):
+    '''
+    Provides read-only access to the database. This is used to prevent
+    accidental mutations to the database when only read access is needed.
+    '''
     
     @contextmanager
     def transaction(self):
@@ -354,155 +265,93 @@ class DatabaseRO:
         cur.execute("""
             SELECT 1 FROM acthreads WHERE cid = ?
         """, (cid.buffer,))
-        if cur.fetchone():
-            return True
-        
-        return False
+
+        return bool(cur.fetchone())
     
-    def lookup_ipld_memory(self, cid: CIDv1) -> Optional[Memory]:
-        '''Lookup an IPLD memory object by CID, returning its IPLD model.'''
-        cur = self.cursor(MemoryRow)
-        mem: Optional[MemoryRow] = cur.execute("""
+    @overload
+    def select_memory(self, *, cid: CIDv1) -> Optional[MemoryRow]: ...
+    @overload
+    def select_memory(self, *, rowid: int) -> Optional[AnyMemoryRow]: ...
+    
+    def select_memory(self, *,
+            cid: Optional[CIDv1]=None,
+            rowid: Optional[int]=None
+        ) -> Optional[AnyMemoryRow]:
+        '''Lookup a memory object by CID or rowid.'''
+        cur = self.cursor(BaseMemoryRow.factory)
+        return cur.execute("""
             SELECT
-                rowid, cid, timestamp, kind,
-                JSON(data), importance
+                rowid, cid, timestamp, kind, JSON(data), importance
             FROM memories
             WHERE cid = ?
-        """, (cid.buffer,)).fetchone()
-        if mem is None:
-            return None
-        
-        cur = self.cursor()
-        cur.execute("""
-            SELECT dst.cid, weight
-            FROM edges
-                JOIN memories dst ON dst.rowid = edges.dst_id
-            WHERE src_id = ?
-        """, (mem.rowid,))
-
-        m = mem.to_memory([
-            Edge(target=CIDv1(dst), weight=weight)
-                for dst, weight in cur
-        ])
-        if m.cid != cid:
-            raise ValueError(f"Memory CID {m.cid} does not match requested CID {cid}")
-        
-        return m
+        """, (cid and cid.buffer, rowid)).fetchone()
     
-    def lookup_ipld_act(self, cid: CIDv1) -> Optional[ACThread]:
-        '''Lookup an IPLD act thread by CID.'''
-        cur = self.cursor()
-        row = cur.execute("""
-            SELECT s.uuid, m.cid, p.cid
-            FROM acthreads act
-                JOIN sonas s ON s.rowid = act.sona_id
-                JOIN memories m ON m.rowid = act.memory_id
-                JOIN acthreads p ON p.rowid = act.prev_id
-            WHERE act.cid = ?
-        """, (cid.buffer,)).fetchone()
-        if row is None:
-            return None
-        
-        s, m, p = row
-        t = ACThread(
-            sona=UUID(s),
-            memory=CIDv1(m),
-            prev=p and CIDv1(p)
-        )
-        if t.cid != cid:
-            raise ValueError(f"ACT CID {t.cid} does not match requested CID {cid}")
-        return t
-
-    def lookup_ipld(self, cid: CIDv1):
+    def select_memory_ipld(self, *, cid: CIDv1) -> Optional[Memory]:
         '''
-        Lookup a CID in the database, returning the associated row if it exists.
+        Lookup a memory by CID, returning the complete Memory object.
+        This is used to retrieve the memory data and edges.
         '''
-        return (
-            self.lookup_ipld_memory(cid)
-            or self.lookup_ipld_act(cid)
-            #or self.lookup_file(cid)
-            #or self.lookup_sona(cid)
-        )
+        if mr := self.select_memory(cid=cid):
+            return mr.to_memory(
+                self.backward_edges(rowid=mr.rowid)
+            )
     
-    def lookup_ipld_file(self, cid: CID) -> Optional[FileRow]:
+    @overload
+    def select_act(self, *, cid: CIDv1) -> Optional[ACThreadRow]: ...
+    @overload
+    def select_act(self, *, rowid: int) -> Optional[AnyACThreadRow]: ...
+
+    def select_act(self, *, 
+            cid: Optional[CIDv1]=None,
+            rowid: Optional[int]=None
+        ) -> Optional[AnyACThreadRow]:
+        '''Lookup an ACT by CID or rowid.'''
+        cur = self.cursor(BaseACThreadRow.factory)
+        return cur.execute("""
+            SELECT rowid, cid, sona_id, memory_id, prev_id
+            FROM acthreads
+            WHERE cid = ? OR rowid = ?
+        """, (cid and cid.buffer, rowid)).fetchone()
+    
+    def select_act_ipld(self, *, cid: CID) -> Optional[ACThread]:
+        '''
+        Lookup an ACT by CID, returning the complete ACThread object.
+        '''
+        cur = self.cursor(ACThread)
+        return cur.execute("""
+            SELECT s.uuid AS sona, m.cid AS memory, prev.cid AS prev,
+                JOIN sonas s ON acthreads.sona_id = sonas.rowid
+                JOIN memories m ON acthreads.memory_id = m.rowid
+                JOIN acthreads prev ON acthreads.prev_id = prev.rowid
+            FROM acthreads act WHERE cid = ?
+        """, (cid.buffer,)).fetchone()
+
+    @overload
+    def select_file(self, *, cid: CID) -> Optional[FileRow]: ...
+    @overload
+    def select_file(self, *, rowid: int) -> Optional[FileRow]: ...
+
+    def select_file(self, *,
+            cid: Optional[CID]=None,
+            rowid: Optional[int]=None
+        ) -> Optional[FileRow]:
         '''
         Lookup an IPLD file by CID, returning its FileRow. The Database
-        doesn't handle block storage so this is naturally only useful for
-        metadata purposes.
+        doesn't handle block storage so this is only useful for metadata.
         '''
         cur = self.cursor(FileRow)
-        row = cur.execute("""
+        return cur.execute("""
             SELECT cid, filename, mimetype, filesize, overhead
-            FROM ipfs_files WHERE cid = ?
-        """, (cid.buffer,)).fetchone()
-        if row is None:
-            return None
-        return FileRow.factory(*row)
+            FROM ipfs_files WHERE cid = ? OR rowid = ?
+        """, (cid and cid.buffer, rowid)).fetchone()
 
     def select_sona_aliases(self, rowid: int) -> list[str]:
         '''Select all aliases for a sona by its rowid.'''
-        cur = self.cursor()
+        cur = self.cursor(return_type=tuple[str])
         rows = cur.execute("""
             SELECT name FROM sona_aliases WHERE sona_id = ?
         """, (rowid,))
         return [name for (name,) in rows]
-    
-    def select_act(self, rowid: int) -> Optional[AnyACThread]:
-        '''Select an act thread by its rowid.'''
-        cur = self.cursor(ACThreadRow)
-        row: Optional[AnyACThreadRow] = cur.execute("""
-            SELECT rowid, cid, sona_id, memory_id, prev_id
-            FROM acthreads WHERE rowid = ?
-        """, (rowid,)).fetchone()
-        if row is None:
-            return None
-        
-        sona = self.select_sona_rowid(row.sona_id)
-        if sona is None:
-            raise ValueError(f"Sona with rowid {row.sona_id} does not exist.")
-        
-        memory = self.select_memory_rowid(row.memory_id)
-        if memory is None:
-            raise ValueError(f"Memory with rowid {row.memory_id} does not exist.")
-
-        prev = row.prev_id
-        if prev is not None:
-            prev = self.select_memory_rowid(prev)
-
-        if row.cid is None:
-            return IncompleteACThread(
-                sona=UUID(bytes=sona.uuid),
-                memory=memory.to_draft(),
-                prev=prev and prev.cid
-            )
-        
-        return ACThread(
-            sona=UUID(bytes=sona.uuid),
-            memory=CIDv1(row.cid),
-            prev=prev and prev.cid
-        )
-
-    def select_act_row(self, rowid: int) -> Optional[AnyACThreadRow]:
-        '''Select an act thread by its rowid.'''
-        cur = self.cursor()
-        row = cur.execute("""
-            SELECT rowid, cid, sona_id, memory_id, prev_id
-            FROM acthreads WHERE rowid = ?
-        """, (rowid,)).fetchone()
-        if row is None:
-            return None
-        
-        if row[1] is None:
-            return IncompleteACThreadRow.factory(*row)
-        else:
-            return ACThreadRow.factory(*row)
-
-    def select_fts_rowid(self, rowid: int) -> list[str]:
-        cur = self.cursor()
-        rows = cur.execute("""
-            SELECT content FROM memory_fts WHERE rowid = ?
-        """, (rowid,))
-        return [content for (content,) in rows]
 
     def get_act_active(self, sona_id: int) -> Optional[ACThreadRow]:
         '''Get the sona's active thread node currently receiving updates.'''
@@ -510,7 +359,7 @@ class DatabaseRO:
         return cur.execute("""
             SELECT act.rowid, cid, sona_id, memory_id, prev_id
             FROM sonas s
-            JOIN acthreads act ON act.rowid = s.active_id
+                JOIN acthreads act ON s.active_id = act.rowid
             WHERE s.rowid = ?
         """, (sona_id,)).fetchone()
 
@@ -520,87 +369,54 @@ class DatabaseRO:
         return cur.execute("""
             SELECT act.rowid, cid, sona_id, memory_id, prev_id
             FROM sonas s
-            JOIN acthreads act ON act.rowid = s.pending_id
+                JOIN acthreads act ON s.pending_id = act.rowid
             WHERE s.rowid = ?
         """, (sona_id,)).fetchone()
     
-    def select_memory_rowid(self, rowid: int) -> Optional[AnyMemoryRow]:
-        cur = self.cursor(BaseMemoryRow)
-        return cur.execute("""
-            SELECT
-                rowid, cid, timestamp, kind,
-                JSON(data), importance
-            FROM memories WHERE rowid = ?
-        """, (rowid,)).fetchone()
-    
-    def select_memory_cid(self, cid: CIDv1) -> Optional[MemoryRow]:
-        cur = self.cursor(MemoryRow)
-        return cur.execute("""
-            SELECT
-                rowid, cid, timestamp, kind,
-                JSON(data), importance
-            FROM memories WHERE cid = ?
-        """, (cid.buffer,)).fetchone()
+    @overload
+    def select_sona(self, *, rowid: int) -> Optional[SonaRow]: ...
+    @overload
+    def select_sona(self, *, uuid: UUID) -> Optional[SonaRow]: ...
 
-    def select_sona_rowid(self, rowid: int) -> Optional[SonaRow]:
+    def select_sona(self, *,
+            rowid: Optional[int]=None,
+            uuid: Optional[UUID]=None
+        ) -> Optional[SonaRow]:
         '''Select a sona by its rowid.'''
         cur = self.cursor(SonaRow)
         return cur.execute("""
             SELECT rowid, uuid, active_id, pending_id
-            FROM sonas WHERE rowid = ?
-        """, (rowid,)).fetchone()
+            FROM sonas
+            WHERE rowid = ? OR uuid = ?
+        """, (rowid, uuid and uuid.bytes)).fetchone()
     
-    def select_sona_uuid(self, uuid: UUID) -> Optional[SonaRow]:
-        '''Select a sona by its UUID.'''
-        cur = self.cursor(SonaRow)
-        return cur.execute("""
-            SELECT rowid, uuid, active_id, pending_id
-            FROM sonas WHERE uuid = ?
-        """, (uuid.bytes,)).fetchone()
-
-    def ipld_memory_rowid(self, rowid: int) -> Optional[AnyMemory]:
-        '''
-        Build a Memory object from a memory rowid. This will also fetch the
-        edges for the memory.
-        '''
-        if (mr := self.select_memory_rowid(rowid)) is None:
-            return None
-        
-        cur = self.cursor()
-        cur.execute("""
-            SELECT dst.cid, weight
-            FROM edges
-                JOIN memories dst ON dst.rowid = edges.dst_id
-            WHERE src_id = ?
-        """, (rowid,))
-        
-        return mr.to_memory([
-            Edge(target=CIDv1(dst), weight=weight)
-                for dst, weight in cur
-        ])
-
     def get_incomplete_act(self, rowid: int) -> Optional[IncompleteACThread]:
         '''Get the act thread for a sona and memory.'''
-        cur = self.cursor()
+        cur = self.cursor(
+            return_type=tuple[
+                int, Optional[bytes],
+                JSONB,
+                Optional[bytes], Optional[bytes]
+            ]
+        )
         row = cur.execute("""
             SELECT
                 a1.rowid, a1.cid, -- IncompleteACThread
-                m.timestamp, m.kind, m.data, m.metadata, -- IncompleteMemory
-                s.cid, a2.cid -- {Sona, Previous} CID
+                m.data, -- IncompleteMemory
+                s.uuid, a2.cid -- Sona, Previous CID
             FROM acthreads a1
                 JOIN acthreads a2 ON a1.prev_id = a2.rowid
                 JOIN memories m ON a1.memory_id = m.rowid
                 JOIN sona s ON a1.sona_id = s.rowid
             WHERE memory_id = ?
         """, (rowid,)).fetchone()
-
         if row is None:
             return None
         
         (
             a1_rowid, a1_cid, # IncompleteACThread
-            m_timestamp, m_kind, m_data, m_md, # IncompleteMemory
-            s_cid, a2_cid # {Sona, Previous} CID
+            m_data, # IncompleteMemory
+            s_cid, a2_cid # Sona, Previous CID
         ) = row
         # Just to double-check that this is actually an incomplete ACT
         if a1_cid is not None:
@@ -609,14 +425,13 @@ class DatabaseRO:
         return IncompleteACThread(
             sona=UUID(bytes=s_cid),
             memory=DraftMemory(
-                data=memory_data(m_kind, m_data),
-                timestamp=m_timestamp,
+                data=MemoryDataAdapter.validate_json(m_data),
                 edges=[
-                    Edge(target=e.target.cid, weight=e.weight)
-                        for e in self.backward_edges(rowid)
+                    Edge(target=CIDv1(e.target.cid), weight=e.weight)
+                        for e in self.dependencies(rowid=rowid)
                 ]
             ),
-            prev=a2_cid and CIDv1(a2_cid)
+            prev=None if a2_cid is None else CIDv1(a2_cid)
         )
     
     def list_memory_sonas(self, memory_id: int) -> Iterable[SonaRow]:
@@ -633,12 +448,12 @@ class DatabaseRO:
 
     def select_embedding(self, memory_id: int) -> Optional[ndarray]:
         cur = self.cursor()
-        cur.execute("""
+        row = cur.execute("""
             SELECT embedding FROM memory_vss WHERE memory_id = ?
-        """, (memory_id,))
-        if row := cur.fetchone():
-            return numpy.frombuffer(row[0], dtype=numpy.float32)
-        return None
+        """, (memory_id,)).fetchone()
+        if row is None:
+            return None
+        return numpy.frombuffer(row[0], dtype=numpy.float32)
     
     def get_last_act(self, sona_id: int) -> Optional[ACThreadRow]:
         '''
@@ -652,90 +467,99 @@ class DatabaseRO:
             ORDER BY rowid DESC LIMIT 1
         """, (sona_id,)).fetchone()
 
-    def backward_edges(self, src_id: int) -> Iterable[Edge[MemoryRow]]:
-        '''
-        Get all edges leading to the given memory, returning the source id
-        and weight of the edge.
-        '''
-        cur = self.cursor()
-        cur.execute("""
-            SELECT
-                m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance,
-                e.weight
-            FROM edges e JOIN memories m ON m.rowid = e.dst_id
-            WHERE e.src_id = ?
-            ORDER BY e.weight DESC
-        """, (src_id,))
-        
-        for row in cur:
-            yield Edge(
-                target=MemoryRow.factory(*row[:6]),
-                weight=row[6]
-            )
+    @overload
+    def backward_edges(self, *, rowid: int) -> Iterable[Edge[CIDv1]]: ...
+    @overload
+    def backward_edges(self, *, cid: CIDv1) -> Iterable[Edge[CIDv1]]: ...
 
-    def backward_edges_cid(self, cid: CIDv1) -> Iterable[Edge[MemoryRow]]:
+    def backward_edges(self, *,
+            rowid: Optional[int]=None,
+            cid: Optional[CIDv1]=None
+        ) -> Iterable[Edge[CIDv1]]:
+        '''Get all edges leading from the given memory.'''
+        cur = self.cursor(Edge[CIDv1])
+        return cur.execute("""
+            SELECT dst.cid AS target, e.weight AS weight
+            FROM edges e
+                JOIN memories dst ON e.dst_id = dst.rowid
+                LEFT JOIN memories src ON e.src_id = src.rowid
+            WHERE src.cid = ? OR src.rowid = ?
+        """, (cid and cid.buffer, rowid))
+
+    @overload
+    def dependencies(self, *, rowid: int) -> Iterable[Edge[MemoryRow]]: ...
+    @overload
+    def dependencies(self, *, cid: CIDv1) -> Iterable[Edge[MemoryRow]]: ...
+
+    def dependencies(self, *,
+            rowid: Optional[int]=None,
+            cid: Optional[CIDv1]=None
+        ) -> Iterable[Edge[MemoryRow]]:
         '''
         Get all edges leading to the given memory, returning the source id
         and weight of the edge.
         '''
-        cur = self.cursor()
+        cur = self.cursor(return_type=tuple[int, bytes, int, JSONB, Optional[float], float])
         cur.execute("""
             SELECT
-                m2.rowid, m2.cid, m2.timestamp, m2.kind,
-                    JSON(m2.data), m2.importance,
+                dst.rowid, dst.cid, dst.timestamp,
+                JSON(dst.data), dst.importance,
                 e.weight
-            FROM memories m1
-                JOIN edges e ON e.src_id = m1.rowid
-                JOIN memories m2 ON e.dst_id = m2.rowid
-            WHERE m1.cid = ?
-            ORDER BY e.weight DESC
-        """, (cid.buffer,))
+            FROM edges e
+                JOIN memories dst ON e.dst_id = dst.rowid
+                LEFT JOIN memories src ON e.src_d = src.rowid
+            WHERE src.cid = ? OR src.rowid = ?
+        """, (cid and cid.buffer, rowid))
         
-        for row in cur:
+        for rowid, mcid, ts, data, imp, weight in cur:
             yield Edge(
-                target=MemoryRow.factory(*row[:6]),
-                weight=row[6]
+                target=MemoryRow(
+                    rowid=rowid,
+                    cid=mcid,
+                    timestamp=ts,
+                    data=data,
+                    importance=imp
+                ),
+                weight=weight
             )
     
-    def forward_edges(self, dst_id: int) -> Iterable[Edge[AnyMemoryRow]]:
+    def references(self, *, rowid: int) -> Iterable[Edge[AnyMemoryRow]]:
         '''
         Get all edges leading from the given memory, returning the destination id
         and weight of the edge.
         '''
-        cur = self.cursor()
+        cur = self.cursor(return_type=tuple[int, Optional[bytes], int, JSONB, Optional[float], float])
         cur.execute("""
             SELECT
-                m.rowid, m.cid, m.timestamp, m.kind, JSON(m.data), m.importance,
+                m.rowid, m.cid, m.timestamp, JSON(m.data), m.importance,
                 e.weight
             FROM edges e JOIN memories m ON m.rowid = e.src_id
             WHERE e.dst_id = ?
-            ORDER BY m.importance DESC
-        """, (dst_id,))
+        """, (rowid,))
         
-        for row in cur:
-            which = MemoryRow if row[1] else IncompleteMemoryRow
+        for rowid, mcid, ts, data, imp, weight in cur:
             yield Edge(
-                weight=row[6],
-                target=which.factory(*row[:6])
+                weight=weight,
+                target=BaseMemoryRow.factory(
+                    rowid=rowid,
+                    cid=mcid,
+                    timestamp=ts,
+                    data=data,
+                    importance=imp
+                )
             )
     
-    def list_memories(self, page: int, perpage: int) -> Iterable[tuple[int, DraftMemory]]:
+    def list_memories(self, page: int, perpage: int) -> Iterable[MemoryRow]:
         '''List messages in the database, paginated.'''
         cur = self.cursor(MemoryRow)
-        cur.execute("""
+        return cur.execute("""
             SELECT
                 rowid, cid, timestamp, kind,
-                JSON(data), importance
+                JSON(data) AS data, importance
             FROM memories
             ORDER BY rowid DESC
             LIMIT ? OFFSET ?
         """, (perpage, (page - 1) * perpage))
-
-        for mr in cur:
-            yield mr.rowid, mr.to_maybe([
-                Edge(target=e.target.cid, weight=e.weight)
-                    for e in self.backward_edges(mr.rowid)
-            ])
     
     def list_sonas(self, page: int, perpage: int) -> Iterable[SonaRow]:
         '''List sonas in the database, paginated.'''
@@ -786,9 +610,9 @@ class DatabaseRW(DatabaseRO):
             UPDATE memories SET cid = ?
             WHERE rowid = ?
         """, (
-            (cid.buffer, rowid)
+            (cid, rowid)
             for (rowid,) in mids
-                if (m := self.select_memory_rowid(rowid))
+                if (m := self.select_memory(rowid=rowid))
                     if (cid := m.cid)
         ))
         cur.executemany("""
@@ -797,8 +621,11 @@ class DatabaseRW(DatabaseRO):
 
         return True
     
-    def find_sona_embedding(self, sona: UUID|str) -> Optional[ndarray]:
+    def find_sona_embedding(self, sona: Optional[UUID|str]) -> Optional[ndarray]:
         '''Select the embedding for a sona by its UUID.'''
+        if sona is None:
+            return None
+        
         if isinstance(sona, str):
             sona = UUID(bytes=self.find_sona(sona).uuid)
         
@@ -814,27 +641,26 @@ class DatabaseRW(DatabaseRO):
         return None
 
     def recall(self,
+            sona: Optional[UUID|str],
             prompt: AnyMemory,
+            timestamp: Optional[int]=None,
             config: Optional[RecallConfig]=None
         ) -> Iterable[tuple[MemoryRow, float]]:
         config = config or RecallConfig()
         
-        index = prompt.document()
-        if index:
+        if index := prompt.document():
             e, = nomic_text.embed(index)
         else:
-            e = numpy.zeros(768, dtype=numpy.float32)
-        s = numpy.zeros(768, dtype=numpy.float32)
-        if ps := prompt.sonas:
-            for sona in ps:
-                if (se := self.find_sona_embedding(sona)) is None:
-                    raise ValueError(f"Sona with rowid {sona} does not exist.")
-                s += se
-            s /= len(ps)
-        else:
-            config.sona = 0.0
+            e = None
         
-        cur = self.cursor()
+        if se := self.find_sona_embedding(sona):
+            s = se.astype(numpy.float32)
+        else:
+            s = None
+        
+        cur = self.cursor(
+            return_type=tuple[int, bytes, Optional[int], JSONB, Optional[float], float]
+        )
         cur.execute("""
             WITH
                 fts AS (
@@ -854,19 +680,19 @@ class DatabaseRW(DatabaseRO):
                     WHERE embedding MATCH :sona_e AND k = :k
                 )
             SELECT
-                m.rowid, m.cid, m.timestamp, m.kind,
-                JSON(m.data), m.importance,
+                m.rowid, m.cid, m.timestamp, JSON(m.data), m.importance,
                 (
-                    IFNULL(:w_importance * m.importance, 0) +
-                    IFNULL(:w_recency * POWER(
+                    + IFNULL(:w_importance * m.importance, 0)
+                    + IFNULL(:w_recency * POWER(
                         :timestamp - m.timestamp,
                         -:decay * IFNULL(EXP(-POWER(m.importance, 2)), 1)
-                    ), 0) +
-                    IFNULL(:w_fts *
+                    ), 0)
+                    + IFNULL(:w_fts *
                         (fts.score - MIN(fts.score) OVER())
-                        / (MAX(fts.score) OVER() - MIN(fts.score) OVER()), 0) +
-                    IFNULL(:w_vss / (1 + mvss.distance), 0) +
-                    IFNULL(:w_sona / (1 + svss.distance), 0)
+                        / (MAX(fts.score) OVER() - MIN(fts.score) OVER()), 0)
+                    + IFNULL(:w_vss / (1 + mvss.distance), 0)
+                    -- If the sona vss fails, treat it like a match
+                    + IFNULL(:w_sona / (1 + svss.distance), 1)
                 ) / (:w_importance + :w_recency + :w_fts + :w_vss + :w_sona) AS score
             FROM memories m
                 LEFT JOIN sona_memories sm ON sm.memory_id = m.rowid
@@ -882,9 +708,9 @@ class DatabaseRW(DatabaseRO):
             LIMIT :k
         """, {
             "index": index,
-            "vss_e": e.astype(numpy.float32),
-            "sona_e": s.astype(numpy.float32),
-            "timestamp": prompt.timestamp,
+            "vss_e": e and e.astype(numpy.float32),
+            "sona_e": s and s.astype(numpy.float32),
+            "timestamp": timestamp,
             "w_importance": finite(config.importance),
             "w_recency": finite(config.recency),
             "w_fts": finite(config.fts),
@@ -893,25 +719,32 @@ class DatabaseRW(DatabaseRO):
             "k": int(config.k),
             "decay": finite(config.decay)
         })
-        for row in cur:
-            yield MemoryRow.factory(*row[:-1]), row[-1]
+        for rowid, cid, ts, data, imp, score in cur:
+            m = MemoryRow(
+                rowid=rowid,
+                cid=cid,
+                timestamp=ts,
+                data=data,
+                importance=imp
+            )
+            yield m, score
     
     def finalize_memory(self, rowid: int) -> Memory:
         '''
         Finalize a memory by setting its CID and returning the memory object.
         This is used after all edges have been linked to the memory.
         '''
-        if (mr := self.select_memory_rowid(rowid)) is None:
+        if (mr := self.select_memory(rowid=rowid)) is None:
             raise ValueError(f"Memory with rowid {rowid} does not exist.")
         
         if mr.cid is not None:
             raise ValueError(f"Memory with rowid {rowid} already has a CID: {mr.cid}")
         
         # Build the CID from the memory data
-        m = mr.to_memory([
-            Edge(target=e.target.cid, weight=e.weight)
-                for e in self.backward_edges(rowid)
-        ])
+        m = Memory(
+            data=MemoryDataAdapter.validate_python(mr.data),
+            edges=list(self.backward_edges(rowid=rowid))
+        )
         cur = self.cursor()
         cur.execute("""
             UPDATE memories SET cid = ? WHERE rowid = ?
@@ -921,25 +754,17 @@ class DatabaseRW(DatabaseRO):
     def finalize_act(self, rowid: int) -> ACThread:
         '''Finalize an ACT by setting its CID and returning it.'''
 
-        cur = self.cursor()
+        cur = self.cursor(ACThread)
         cur.execute("""
-            SELECT s.cid, m.cid, p.cid
+            SELECT s.cid AS sona, m.cid AS memory, p.cid AS prev
             FROM acthreads act
-                JOIN sonas s ON s.rowid = act.sona_id
-                JOIN memories m ON m.rowid = act.memory_id
-                LEFT JOIN acthreads p ON p.rowid = act.prev_id
+                JOIN sonas s ON act.sona_id = s.rowid
+                JOIN memories m ON act.memory_id = m.rowid
+                LEFT JOIN acthreads p ON act.prev_id = p.rowid
             WHERE act.rowid = ?
         """, (rowid,))
-        if (row := cur.fetchone()) is None:
+        if (act := cur.fetchone()) is None:
             raise ValueError(f"ACT with rowid {rowid} does not exist.")
-        
-        s, m, p = row
-
-        act = ACThread(
-            sona=UUID(s),
-            memory=CIDv1(m),
-            prev=p and CIDv1(p)
-        )
 
         cur.execute("""
             UPDATE acthreads SET cid = ?
@@ -972,9 +797,9 @@ class DatabaseRW(DatabaseRO):
         '''Find or create the sona closest to the given name.'''
 
         if isinstance(name, UUID):
-            return self.select_sona_uuid(name)
+            return self.select_sona(uuid=name)
 
-        cur = self.cursor()        
+        cur = self.cursor(SonaRow)        
         cur.execute("""
             SELECT rowid, uuid, active_id, pending_id
             FROM sona_aliases
@@ -983,13 +808,7 @@ class DatabaseRW(DatabaseRO):
         """, (name,))
         
         if row := cur.fetchone():
-            rowid, uuid, active_id, pending_id = row
-            return SonaRow(
-                rowid=rowid,
-                uuid=uuid,
-                active_id=active_id,
-                pending_id=pending_id
-            )
+            return row
 
         e, = nomic_text.embed(name)
         ebs = e.astype(numpy.float32)
@@ -1003,8 +822,8 @@ class DatabaseRW(DatabaseRO):
             cur.execute("""
                 INSERT INTO sona_aliases (sona_id, name)
                 VALUES (?, ?)
-            """, (row[0], name))
-            return SonaRow.factory(*row)
+            """, (row.rowid, name))
+            return row
         
         # Doesn't exist, create a new one.
         
@@ -1022,7 +841,12 @@ class DatabaseRW(DatabaseRO):
             INSERT INTO sona_aliases (sona_id, name) VALUES (?, ?)
         """, (rowid, name))
         
-        return SonaRow.factory(rowid, u.bytes, None, None)
+        return SonaRow(
+            rowid=rowid,
+            uuid=u.bytes,
+            active_id=None,
+            pending_id=None
+        )
 
     def insert_text_embedding(self, memory_id: int, index: str):
         '''Insert a text embedding for a memory.'''
@@ -1050,7 +874,11 @@ class DatabaseRW(DatabaseRO):
             VALUES (?, ?)
         """, (memory_id, index))
 
-    def insert_memory(self, memory: AnyMemory) -> int:
+    def insert_memory(self,
+            memory: Memory,
+            timestamp: Optional[int] = None,
+            importance: Optional[float] = None
+        ) -> int:
         cid = memory.cid
         cid = cid and cid.buffer
         cur = self.cursor()
@@ -1060,13 +888,12 @@ class DatabaseRW(DatabaseRO):
                     VALUES (?, ?, ?, JSONB(?), ?)
         """, (
             cid,
-            memory.timestamp,
+            timestamp,
             memory.data.kind,
             memory.data.model_dump_json(exclude={"kind"}),
-            memory.importance
+            importance
         ))
         
-        # 0 (ignored) or None (error)
         if rowid := cur.lastrowid:
             # Continue insertion
             self.link_memory_edges(rowid, memory.edges or [])
@@ -1075,31 +902,20 @@ class DatabaseRW(DatabaseRO):
                 self.insert_text_embedding(rowid, index)
                 self.insert_text_fts(rowid, index)
             
-            for sona in memory.sonas or []:
-                # Link memory to sonas
-                # TODO: Could be more efficient by batching
-                if sona and (sona_row := self.find_sona(sona)):
-                    self.link_sona(sona_row.rowid, rowid)
-            
             # Propagate the memory's importance
-            if memory.importance is not None:
-                cur.execute("""
-                    UPDATE memories AS m2
-                        SET importance = -- M2 <- M1
-                            (1 - e.weight) * ? + e.weight * m1.importance
-                    FROM edges e
-                        JOIN memories m1 ON e.src_id = m1.rowid
-                    WHERE m2.rowid = e.dst_id AND m1.rowid = ?
-                """, (memory.importance, rowid))
-        elif cid:
+            if importance is not None:
+                self.propagate_importance(memory.cid)
+        # 0 (ignored) or None (error)
+        else:
             # Memory already exists
-            rowid, = cur.execute("""
+            row = cur.execute("""
                 SELECT rowid FROM memories WHERE cid = ?
             """, (cid,)).fetchone()
-        else:
-            raise RuntimeError(
-                "Failed to insert memory, it may already exist."
-            )
+            if row is None:
+                raise RuntimeError(
+                    "Failed to either insert memory or lookup by CID."
+                )
+            rowid = row[0]
         
         return rowid
     

@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from typing import Mapping, Iterable
-    from .cid import CID, CIDv0, CIDv1
+    from cid import CID, CIDv0, CIDv1
 
 type IPLData = Mapping[str, IPLData]|Iterable[IPLData]|CID|CIDv0|CIDv1|bytes|str|int|float|bool|None
 '''A type alias for IPLD-compatible data structures.'''

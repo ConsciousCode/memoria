@@ -1,7 +1,7 @@
 from typing import Iterable, Optional
-from . import dagpb_pb2
 
-from ipld._common import FauxMapping
+from .._common import FauxMapping
+from . import dagpb_pb2
 
 class PBLink(FauxMapping):
     """A dag-pb link."""

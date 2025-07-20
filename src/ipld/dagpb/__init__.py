@@ -2,11 +2,11 @@
 IPLD DAG-PB (Protocol Buffers) module. In IPLD this is solely used for
 representing unixfs data structures.
 '''
-
 from typing import TypedDict
-from ipld._common import IPLData
-from ipld.cid import CID
 
+from cid import CID
+
+from .._common import IPLData
 from .wrap import PBNode, PBLink
 
 class PBLinkModel(TypedDict):

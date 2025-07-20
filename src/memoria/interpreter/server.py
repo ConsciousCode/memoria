@@ -3,10 +3,11 @@ import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
-from ipld import dag, CID
-from memoria.memory import Memory, SelfData
+from ipld import dag
+from cid import CIDv1
+from memoria.memory import Memory, OtherData, PartialMemory, SelfData
 from memoria.subject.client import SubjectClient
 from memoria.prompts import CHAT_PROMPT
 
@@ -47,15 +48,16 @@ def build_history(history: list[Memory]) -> Iterable[ModelMessage]:
                         "updated_at": memory.updated_at.isoformat()
                     }
                 )
-        yield ModelMessage(
-            role="user",
-            content=memory.content,
-            metadata={
-                "cid": str(memory.cid),
-                "created_at": memory.created_at.isoformat(),
-                "updated_at": memory.updated_at.isoformat()
-            }
-        )
+            
+            case OtherData(name=name, content=content):
+                yield ModelRequest(
+                    content=content,
+                    metadata={
+                        "cid": str(memory.cid),
+                        "created_at": memory.created_at.isoformat(),
+                        "updated_at": memory.updated_at.isoformat()
+                    }
+                )
 
 @app.post("/interpret")
 async def interpret(
@@ -66,13 +68,20 @@ async def interpret(
     """
     async with httpx.AsyncClient(base_url="http://localhost:8000") as http:
         subject = SubjectClient(http)
-        memories: dict[CID, Memory] = {}
+        memories: dict[CIDv1, PartialMemory] = {}
         for cid in ir.context:
             if (bs := await subject.ipfs(cid)) is None:
                 continue
             
-            memories[cid] = Memory.model_validate(
+            m = Memory.model_validate(
                 dag.unmarshal(cid.codec, bs)
+            )
+            # Strip edges that aren't in the context subgraph
+            memories[cid] = PartialMemory(
+                cid=cid,
+                data=m.data,
+                timestamp=m.timestamp,
+                edges=[e for e in m.edges if e.target not in ir.context]
             )
     
     response = await agent.run(

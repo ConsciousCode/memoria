@@ -6,11 +6,10 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS memories (
     rowid INTEGER PRIMARY KEY,
     cid BLOB UNIQUE, -- NULL indicates an incomplete memory
-    timestamp REAL,
-    kind TEXT NOT NULL CHECK (kind IN ('self', 'other', 'text', 'file')),
     data JSONB NOT NULL,
-    metadata JSONB,
-    importance REAL
+    timestamp REAL,
+    importance REAL,
+    metadata JSONB
 );
 
 /**

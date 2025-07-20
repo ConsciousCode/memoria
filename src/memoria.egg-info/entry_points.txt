@@ -1,0 +1,4 @@
+[console_scripts]
+cli = memoria.cli:main
+interpreter = memoria.interpreter.server:main
+subject = memoria.subject.server:main

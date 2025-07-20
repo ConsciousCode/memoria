@@ -3,16 +3,14 @@ Utilities for working with IPLD data structures without knowing the specific
 codec used.
 '''
 
-from typing import TYPE_CHECKING, Iterable, Literal, overload
+from typing import Iterable, Literal, overload
 import json
 import cbor2
 
-if TYPE_CHECKING:
-    from dagpb import PBNodeModel
+from cid import CID, BlockCodec
 
 from ._common import IPLData
-import dagcbor, dagjson, dagpb
-from cid import CID, BlockCodec
+from . import dagcbor, dagjson, dagpb
 
 def links(data: IPLData) -> Iterable[CID]:
     """Extract all CIDs from an IPLD data structure."""
@@ -27,7 +25,7 @@ def links(data: IPLData) -> Iterable[CID]:
                 yield from links(x)
 
 @overload
-def unmarshal(codec: Literal["dag-pb"], block: bytes) -> 'PBNodeModel': ...
+def unmarshal(codec: Literal["dag-pb"], block: bytes) -> dagpb.PBNodeModel: ...
 @overload
 def unmarshal(codec: BlockCodec, block: bytes) -> IPLData: ...
 

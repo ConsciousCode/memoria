@@ -1,7 +1,7 @@
 from uuid import UUID
 from pydantic import BaseModel
 
-from ipld import CID
+from cid import CIDv1
 
 class SonaContext(BaseModel):
     """The sona within which to interpret."""
@@ -11,4 +11,4 @@ class SonaContext(BaseModel):
 class InterpretRequest(BaseModel):
     """Request model for the interpreter endpoint."""
     sona: SonaContext
-    context: list[CID]
+    context: list[CIDv1]
