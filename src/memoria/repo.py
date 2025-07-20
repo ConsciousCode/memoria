@@ -11,7 +11,8 @@ from cid import CIDv1, CID
 from ipfs import Blocksource
 
 from .db import DatabaseRO, FileRow
-from .memory import ACThread, AnyMemory, Edge, Memory, MemoryContext, MemoryDAG, MemoryDataAdapter, RecallConfig, SelfData, Sona, StopReason
+from .memory import ACThread, AnyMemory, Edge, Memory, MemoryContext, MemoryDAG, MemoryDataAdapter, SelfData, Sona, StopReason
+from .config import RecallConfig
 from .util import todo_list
 
 __all__ = (
@@ -68,10 +69,14 @@ class Repository(Blocksource):
     def lookup_file(self, cid: CID) -> Optional[FileRow]:
         return self.db.select_file(cid=cid)
 
-    def insert(self, memory: Memory):
+    def insert(self,
+            memory: Memory,
+            timestamp: Optional[int] = None,
+            importance: Optional[float] = None
+        ):
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
-            db.insert_memory(memory)
+            db.insert_memory(memory, timestamp, importance)
 
     def propogate_importance(self, memory: CIDv1):
         with self.db.transaction() as db:

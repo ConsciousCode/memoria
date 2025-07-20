@@ -7,12 +7,12 @@ from functools import cached_property
 from typing import IO, Callable, Iterable, Literal, Optional, override
 import os
 
-from ipld.unixfs.wrap import BigFileData, SmallFileData
+from ipld.unixfs import BigFileData, SmallFileData
 from multihash import multihash
 import multibase
 
-from ipld import dag, dagpb, CID, CIDv0, BlockCodec, CARv2Index, carv1_iter, carv2_iter
-
+from cid import CID, CIDv0, BlockCodec
+from ipld import dag, dagpb, CARv2Index, carv1_iter, carv2_iter
 from ipld import IPLData, unixfs
 
 __all__ = (

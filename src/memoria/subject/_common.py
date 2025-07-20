@@ -7,7 +7,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from ipld import CID, BlockCodec
+from cid import CID, BlockCodec
 from ipfs import Blockstore, CompositeBlocksource, FlatfsBlockstore
 
 from memoria.memory import FileData, Memory
@@ -101,8 +101,9 @@ class MemoriaBlockstore(Blockstore):
                     mimetype=mimetype,
                     filesize=stream.tell()
                 ),
-                timestamp=timestamp or int(datetime.now().timestamp())
-            )
+                edges=[]
+            ),
+            timestamp=timestamp or int(datetime.now().timestamp())
         )
         return created, len(root), cid
 

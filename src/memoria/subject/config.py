@@ -4,7 +4,7 @@ import inspect
 
 from pydantic import BaseModel, Field
 
-from memory import RecallConfig, SampleConfig
+from memoria.config import RecallConfig, SampleConfig
 
 CHAT_SONA: Final = "chat"
 TEMPERATURE: Final = 0.7

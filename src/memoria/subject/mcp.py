@@ -1,5 +1,5 @@
 '''
-MCP Server for Memoria
+MCP Server for the Memoria Subject
 '''
 
 from contextlib import contextmanager
@@ -21,7 +21,8 @@ from cid import CID, CIDv1
 from ipfs import CIDResolveError
 
 from memoria.repo import Repository
-from memoria.memory import AnyMemory, DraftMemory, Edge, OtherData, RecallConfig, SampleConfig, SelfData, TextData
+from memoria.memory import AnyMemory, DraftMemory, Edge, OtherData, SelfData, TextData
+from memoria.config import RecallConfig, SampleConfig
 from memoria.prompts import QUERY_PROMPT
 
 from ._common import AddParameters, MemoriaBlockstore, context_blockstore, context_repo
@@ -65,8 +66,6 @@ def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=
 
     match memory.data:
         case SelfData():
-            if name := memory.data.name:
-                tags.append(f"name:{name}")
             if sr := memory.data.stop_reason:
                 if sr != "finish":
                     tags.append(f"stop_reason:{sr}")
@@ -78,8 +77,6 @@ def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=
             return ("user", build_tags(tags) + memory.data.content)
         
         case OtherData():
-            if name := memory.data.name:
-                tags.append(f"name:{name}")
             return ("user", build_tags(tags) + memory.data.content)
         
             '''

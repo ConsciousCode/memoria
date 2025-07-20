@@ -1,6 +1,6 @@
 import httpx
 
-from ipld.cid import CID
+from cid import CID
 
 class SubjectClient:
     '''
