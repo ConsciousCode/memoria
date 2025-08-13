@@ -71,12 +71,13 @@ class Repository(Blocksource):
 
     def insert(self,
             memory: Memory,
+            index: Optional[list[str]] = None,
             timestamp: Optional[int] = None,
             importance: Optional[float] = None
         ):
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
-            db.insert_memory(memory, timestamp, importance)
+            db.insert_memory(memory, index, timestamp, importance)
 
     def propogate_importance(self, memory: CIDv1):
         with self.db.transaction() as db:
@@ -293,7 +294,9 @@ class Repository(Blocksource):
             edges: list[Edge[CIDv1]] = []
             for e in db.dependencies(rowid=memory_id):
                 prompt = e.target.to_partial()
-                for row, score in db.recall(sona, prompt, timestamp, config):
+                # Don't bother with index, it should've been used for insertion
+                # before this point.
+                for row, score in db.recall(sona, prompt, None, timestamp, config):
                     if cid := row.cid:
                         edges.append(Edge(
                             target=CIDv1(cid),
@@ -301,57 +304,6 @@ class Repository(Blocksource):
                         ))
             
             return self.build_subgraph(edges)
-
-    def act_stream(self,
-            sona: UUID|str,
-            delta: Optional[str],
-            model: Optional[str]=None,
-            stop_reason: Optional[StopReason] = None
-        ) -> Optional[str]:
-        '''
-        Stream a delta to the active thread of the sona.
-        
-        Returns a failure reason.
-        '''
-        with self.db.transaction() as db:
-            if (sona_row := db.find_sona(sona)) is None:
-                return "sona not found"
-            
-            if (thread := db.get_act_active(sona_row.rowid)) is None:
-                # No active thread, check for pending
-                if (thread := db.get_act_pending(sona_row.rowid)) is None:
-                    return "no active or pending thread"
-                
-                # Move pending to active as long as we're not ending immediately
-                if stop_reason is None:
-                    db.sona_stage_active(sona_row.rowid)
-            
-            # Update the memory data
-            if (mr := db.select_memory(rowid=thread.memory_id)) is None:
-                return "thread memory not found"
-            
-            draft = mr.to_draft()
-            data = draft.data
-            if data.kind != "self":
-                return "thread memory is not self memory"
-            
-            last = data.parts[-1] if data.parts else None
-            if last and (model is None or last.model == model):
-                last.content += delta or ""
-            else:
-                data.parts.append(SelfData.Part(
-                    content=delta or "",
-                    model=model
-                ))
-            
-            # Commit the updates
-            if stop_reason:
-                data.stop_reason = stop_reason
-                db.update_sona_active(sona_row.rowid, None)
-                db.finalize_memory(mr.rowid)
-                db.finalize_act(thread.rowid)
-            
-            db.update_memory_data(mr.rowid, data.model_dump_json())
     
     def update_invalid(self) -> bool:
         with self.db.transaction() as db:
@@ -361,6 +313,7 @@ class Repository(Blocksource):
             sona: Optional[UUID|str],
             prompt: AnyMemory,
             timestamp: int,
+            index: Optional[list[str]]=None,
             config: Optional[RecallConfig]=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
@@ -369,7 +322,7 @@ class Repository(Blocksource):
                 prompt.edges + [
                     Edge(target=CIDv1(row.cid), weight=score)
                         for row, score in db.recall(
-                            sona, prompt, timestamp, config
+                            sona, prompt, index, timestamp, config
                         )
                 ]
             )

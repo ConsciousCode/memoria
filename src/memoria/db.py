@@ -3,6 +3,7 @@ from typing import Any, Callable, Iterable, Iterator, Optional, Self, Sequence, 
 import sqlite3
 from uuid import UUID
 import os
+import json
 
 from pydantic import BaseModel
 from numpy import ndarray
@@ -62,19 +63,43 @@ class BaseMemoryRow(BaseModel):
     timestamp: Optional[int]
     data: JSONB
     importance: Optional[float]
+    metadata: Optional[JSONB]
 
     @classmethod
-    def factory(cls, **row) -> 'AnyMemoryRow':
+    def factory(cls, *,
+            cid: Optional[bytes],
+            rowid: PrimaryKey,
+            timestamp: Optional[int],
+            data: JSONB,
+            importance: Optional[float],
+            metadata: Optional[JSONB]
+        ) -> 'AnyMemoryRow':
         '''Create a MemoryRow from a raw database row.'''
-        if row['cid']:
-            return MemoryRow(**row)
+        if cid:
+            return MemoryRow(
+                cid=cid,
+                rowid=rowid,
+                timestamp=timestamp,
+                data=data,
+                importance=importance,
+                metadata=metadata
+            )
         else:
-            return IncompleteMemoryRow(**row)
+            return IncompleteMemoryRow(
+                cid=None,
+                rowid=rowid,
+                timestamp=timestamp,
+                data=data,
+                importance=importance,
+                metadata=metadata
+            )
     
     def to_draft(self, edges: Iterable[Edge[CIDv1]]=()) -> DraftMemory:
         '''Convert this MemoryRow to a DraftMemory object.'''
+        md = self.metadata
         return DraftMemory(
             data=MemoryDataAdapter.validate_python(self.data),
+            metadata=None if md is None else json.loads(md),
             edges=list(edges)
         )
 
@@ -83,16 +108,20 @@ class MemoryRow(BaseMemoryRow):
     cid: bytes
 
     def to_partial(self, edges: Iterable[Edge[CIDv1]]=()) -> PartialMemory:
+        md = self.metadata
         return PartialMemory(
             cid=CIDv1(self.cid),
             data=MemoryDataAdapter.validate_python(self.data),
+            metadata=None if md is None else json.loads(md),
             edges=list(edges)
         )
 
     def to_memory(self, edges: Iterable[Edge[CIDv1]]=()) -> Memory:
         '''Convert this MemoryRow to a Memory object.'''
+        md = self.metadata
         return Memory(
             data=MemoryDataAdapter.validate_python(self.data),
+            metadata=None if md is None else json.loads(md),
             edges=list(edges),
         )
 
@@ -500,11 +529,13 @@ class DatabaseRO(Database):
         Get all edges leading to the given memory, returning the source id
         and weight of the edge.
         '''
-        cur = self.cursor(return_type=tuple[int, bytes, int, JSONB, Optional[float], float])
+        cur = self.cursor(return_type=tuple[
+            int, bytes, int, JSONB, Optional[float], Optional[JSONB], float
+        ])
         cur.execute("""
             SELECT
                 dst.rowid, dst.cid, dst.timestamp,
-                JSON(dst.data), dst.importance,
+                JSON(dst.data), dst.importance, JSON(dst.metadata),
                 e.weight
             FROM edges e
                 JOIN memories dst ON e.dst_id = dst.rowid
@@ -512,14 +543,15 @@ class DatabaseRO(Database):
             WHERE src.cid = ? OR src.rowid = ?
         """, (cid and cid.buffer, rowid))
         
-        for rowid, mcid, ts, data, imp, weight in cur:
+        for rowid, mcid, ts, data, imp, md, weight in cur:
             yield Edge(
                 target=MemoryRow(
                     rowid=rowid,
                     cid=mcid,
                     timestamp=ts,
                     data=data,
-                    importance=imp
+                    importance=imp,
+                    metadata=md
                 ),
                 weight=weight
             )
@@ -529,16 +561,21 @@ class DatabaseRO(Database):
         Get all edges leading from the given memory, returning the destination id
         and weight of the edge.
         '''
-        cur = self.cursor(return_type=tuple[int, Optional[bytes], int, JSONB, Optional[float], float])
+        cur = self.cursor(return_type=tuple[
+            int, Optional[bytes], int, JSONB,
+            Optional[float], Optional[JSONB],
+            float
+        ])
         cur.execute("""
             SELECT
-                m.rowid, m.cid, m.timestamp, JSON(m.data), m.importance,
+                m.rowid, m.cid, m.timestamp, JSON(m.data),
+                m.importance, JSON(m.metadata),
                 e.weight
             FROM edges e JOIN memories m ON m.rowid = e.src_id
             WHERE e.dst_id = ?
         """, (rowid,))
         
-        for rowid, mcid, ts, data, imp, weight in cur:
+        for rowid, mcid, ts, data, imp, md, weight in cur:
             yield Edge(
                 weight=weight,
                 target=BaseMemoryRow.factory(
@@ -546,7 +583,8 @@ class DatabaseRO(Database):
                     cid=mcid,
                     timestamp=ts,
                     data=data,
-                    importance=imp
+                    importance=imp,
+                    metadata=md
                 )
             )
     
@@ -644,13 +682,14 @@ class DatabaseRW(DatabaseRO):
     def recall(self,
             sona: Optional[UUID|str],
             prompt: AnyMemory,
+            index: Optional[list[str]]=None,
             timestamp: Optional[int]=None,
             config: Optional[RecallConfig]=None
         ) -> Iterable[tuple[MemoryRow, float]]:
         config = config or RecallConfig()
         
-        if index := prompt.document():
-            e, = nomic_text.embed(index)
+        if index:
+            e = numpy.mean(list(nomic_text.embed(index)))
         else:
             e = None
         
@@ -659,9 +698,11 @@ class DatabaseRW(DatabaseRO):
         else:
             s = None
         
-        cur = self.cursor(
-            return_type=tuple[int, bytes, Optional[int], JSONB, Optional[float], float]
-        )
+        cur = self.cursor(return_type=tuple[
+            int, bytes, Optional[int], JSONB,
+            Optional[float], Optional[JSONB],
+            float
+        ])
         cur.execute("""
             WITH
                 fts AS (
@@ -681,7 +722,8 @@ class DatabaseRW(DatabaseRO):
                     WHERE embedding MATCH :sona_e AND k = :k
                 )
             SELECT
-                m.rowid, m.cid, m.timestamp, JSON(m.data), m.importance,
+                m.rowid, m.cid, m.timestamp, JSON(m.data),
+                m.importance, JSON(m.metadata),
                 (
                     + IFNULL(:w_importance * m.importance, 0)
                     + IFNULL(:w_recency * POWER(
@@ -720,13 +762,14 @@ class DatabaseRW(DatabaseRO):
             "k": int(config.k),
             "decay": finite(config.decay)
         })
-        for rowid, cid, ts, data, imp, score in cur:
+        for rowid, cid, ts, data, imp, md, score in cur:
             m = MemoryRow(
                 rowid=rowid,
                 cid=cid,
                 timestamp=ts,
                 data=data,
-                importance=imp
+                importance=imp,
+                metadata=md
             )
             yield m, score
     
@@ -877,6 +920,7 @@ class DatabaseRW(DatabaseRO):
 
     def insert_memory(self,
             memory: Memory,
+            index: Optional[list[str]]=None,
             timestamp: Optional[int] = None,
             importance: Optional[float] = None
         ) -> int:
@@ -899,9 +943,9 @@ class DatabaseRW(DatabaseRO):
             # Continue insertion
             self.link_memory_edges(rowid, memory.edges or [])
 
-            if index := memory.document():
-                self.insert_text_embedding(rowid, index)
-                self.insert_text_fts(rowid, index)
+            for doc in index or []:
+                self.insert_text_embedding(rowid, doc)
+                self.insert_text_fts(rowid, doc)
             
             # Propagate the memory's importance
             if importance is not None:

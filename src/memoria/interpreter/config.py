@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
 
-from memory import SampleConfig
+from memoria.config import SampleConfig
 from memoria.util import warn
 
 CHAT_SONA: Final = "chat"

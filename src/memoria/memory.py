@@ -1,9 +1,7 @@
-from abc import abstractmethod
 from datetime import datetime
 from functools import cached_property
 from typing import Annotated, Iterable, Literal, Optional, override
 from uuid import UUID
-import json
 
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, TypeAdapter
 from pydantic_core import CoreSchema, core_schema
@@ -12,11 +10,12 @@ from ipld import dagcbor, IPLData
 from cid import CID, CIDv1
 
 from graph import IntrusiveGraph
+from memoria.util import json_t
 
 __all__ = (
     'MemoryKind',
     'StopReason',
-    'IPLDModel',
+    'IPLDModel', 'IPLDRoot',
     'Edge', 'BaseMemory',
     'DraftMemory', 'PartialMemory', 'Memory',
     'CompleteMemory', 'AnyMemory',
@@ -34,6 +33,9 @@ class IPLDModel(BaseModel):
         '''Return the object as an IPLD model.'''
         return self.model_dump()
 
+class IPLDRoot(IPLDModel):
+    '''Base model faor IPLD objects which can get a CID.'''
+
     def ipld_block(self) -> bytes:
         '''Return the object as an IPLD block.'''
         return dagcbor.marshal(self.ipld_model())
@@ -47,111 +49,107 @@ class Edge[T](BaseModel):
     target: T
     weight: float
 
-class Documenting(BaseModel):
-    @abstractmethod
-    def document(self) -> str:
-        '''Return the document representation of the memory.'''
-
-class SelfData(Documenting):
-    '''A memory from the agent's own perspective.'''
-    class Part(BaseModel):
-        content: str = ""
-        model: Optional[str] = None
+class SelfData(IPLDModel):
+    '''The agent's own transparent inner monologue.'''
+    class TextPart(IPLDModel):
+        '''Transparent thoughts by the model.'''
+        kind: Literal["text"] = "text"
+        content: str
     
+    class ThinkPart(IPLDModel):
+        '''Opaque thoughts by the model.'''
+        kind: Literal["think"] = "think"
+        content: str
+        think_id: Optional[str] = None
+        signature: Optional[str] = None
+
+        @override
+        def ipld_model(self) -> IPLData:
+            data = {
+                "kind": self.kind,
+                "content": self.content
+            }
+            if self.think_id: data["think_id"] = self.think_id
+            if self.signature: data["signature"] = self.signature
+            
+            return data
+    
+    class ToolPart(IPLDModel):
+        '''Tool call paired with its results.'''
+        kind: Literal["tool"] = "tool"
+        name: str
+        args: dict[str, json_t]
+        result: json_t = None
+        call_id: Optional[str] = None
+
+        @override
+        def ipld_model(self) -> IPLData:
+            data = {
+                "kind": self.kind,
+                "name": self.name,
+                "args": self.args,
+                "result": self.result
+            }
+            if self.call_id: data["call_id"] = self.call_id
+            
+            return data
+
+    type Part = Annotated[
+        TextPart | ThinkPart | ToolPart,
+        Field(discriminator="kind")
+    ]
+
     kind: Literal["self"] = "self"
     parts: list[Part]
-    stop_reason: Optional[StopReason] = None
+    '''Parts comprising the completion.'''
+    model: Optional[str] = None
+    '''The model which originated this memory.'''
 
     @override
-    def document(self):
-        return "".join(part.content for part in self.parts)
+    def ipld_model(self):
+        '''Return the object as an IPLD model.'''
+        return {
+            "kind": self.kind,
+            "parts": [part.ipld_model() for part in self.parts],
+            "model": self.model
+        }
 
-class OtherData(Documenting):
-    '''A memory produced by someone else (eg a user).'''
-    kind: Literal["other"] = "other"
-    content: str
-
-    @override
-    def document(self):
-        return self.content
-
-class TextData(Documenting):
-    '''A text memory, which is just a string.'''
+class TextData(IPLDModel):
+    '''External text memory.'''
     kind: Literal["text"] = "text"
     content: str
 
-    @override
-    def document(self):
-        return self.content
-
-class FileData(Documenting):
-    '''A file memory, which contains a file and metadata about it.'''
+class FileData(IPLDModel):
+    '''A file memory containing a file CID and metadata about it.'''
     kind: Literal["file"] = "file"
     file: CID
     filename: Optional[str] = None
     mimetype: str
     filesize: int
 
-    @override
-    def document(self): # ???
-        return "" # self.content
-
-class MetaData(Documenting):
-    '''A memory which is just metadata.'''
-    class Content(BaseModel):
-        class Export(BaseModel):
-            '''Metadata about exports from different providers.'''
-            provider: Literal['anthropic', 'openai']
-            convo_uuid: Optional[UUID] = None
-            convo_title: Optional[str] = None
-        
-        export: Optional[Export] = None
-
+class MetaData(IPLDModel):
+    '''
+    A memory which is just metadata. Used primarily for coordinating context
+    like provenance.
+    '''
     kind: Literal["metadata"] = "metadata"
-    metadata: Optional[Content]
-    
-    @override
-    def document(self):
-        return json.dumps(self.metadata)
-
-class ImportFileData(BaseModel):
-    '''
-    A memory which is an imported file. This will never appear in the
-    IPLD model, but is used for importing files into the memory system.
-    '''
-    kind: Literal["import"] = "import"
-    path: str = Field(
-        description="File path or URL of the file to import."
-    )
-    filename: Optional[str] = Field(
-        default=None,
-        description="Filename to use for the imported file, if different from the original."
-    )
-    mimetype: Optional[str] = Field(
-        default=None,
-        description="MIME type of the file to import, if known."
-    )
+    metadata: dict[str, json_t]
 
 type MemoryData = Annotated[
-    SelfData | OtherData | TextData | FileData | MetaData,
+    SelfData | TextData | FileData | MetaData,
     Field(discriminator="kind")
 ]
 '''Memory data which can actually be stored.'''
 
-type AnyMemoryData = Annotated[
-    SelfData | OtherData | TextData | FileData | MetaData | ImportFileData,
-    Field(discriminator="kind")
-]
-'''Most permissive type for memory data, including import files.'''
-
 MemoryDataAdapter = TypeAdapter[MemoryData](MemoryData)
-AnyMemoryDataAdapter = TypeAdapter[AnyMemoryData](AnyMemoryData)
 
-class BaseMemory[D: AnyMemoryData=MemoryData](BaseModel):
+class BaseMemory[D: MemoryData=MemoryData](BaseModel):
     '''Base memory model.'''
 
     data: D
     '''Data contained in the memory.'''
+    metadata: Optional[dict[str, json_t]] = None
+    '''Freeform metadata about the memory.'''
     edges: list[Edge[CIDv1]]
     '''Edges to other memories.'''
 
@@ -165,12 +163,7 @@ class BaseMemory[D: AnyMemoryData=MemoryData](BaseModel):
     def has_edge(self, target: CIDv1):
         return any(target == e.target for e in self.edges)
 
-    def document(self) -> str:
-        if isinstance(self.data, Documenting):
-            return self.data.document()
-        return ""
-
-class DraftMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
+class DraftMemory[D: MemoryData=MemoryData](BaseMemory[D]):
     '''
     A memory which is incomplete and in the process of being created.
     Cannot be assigned a CID.
@@ -192,7 +185,7 @@ class DraftMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
         '''Complete the memory by adding edges and returning a Memory object.'''
         return Memory(data=self.data, edges=self.edges)
 
-class PartialMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
+class PartialMemory[D: MemoryData=MemoryData](BaseMemory[D]):
     '''
     A memory which is complete but does not have its full contents. The
     CID can't be calculated and must be provided explicitly.
@@ -202,7 +195,7 @@ class PartialMemory[D: AnyMemoryData=MemoryData](BaseMemory[D]):
     def partial(self):
         return self
 
-class Memory[D: AnyMemoryData=MemoryData](BaseMemory[D], IPLDModel):
+class Memory[D: MemoryData=MemoryData](BaseMemory[D], IPLDRoot):
     '''A completed memory which can be referred to by CID.'''
 
     model_config = ConfigDict(frozen=True)
@@ -211,7 +204,7 @@ class Memory[D: AnyMemoryData=MemoryData](BaseMemory[D], IPLDModel):
     def ipld_model(self) -> IPLData:
         # Edges must be sorted by target CID to ensure deterministic ordering
         return {
-            "data": self.data.model_dump(),
+            "data": self.data.ipld_model(),
             "edges": sorted(self.edges, key=lambda e: e.target),
         }
     
@@ -223,10 +216,10 @@ class Memory[D: AnyMemoryData=MemoryData](BaseMemory[D], IPLDModel):
             edges=self.edges
         )
 
-type CompleteMemory[D: AnyMemoryData=MemoryData] = PartialMemory[D] | Memory[D]
+type CompleteMemory[D: MemoryData=MemoryData] = PartialMemory[D] | Memory[D]
 '''A memory with a CID.'''
 
-type AnyMemory[D: AnyMemoryData=MemoryData] = DraftMemory[D] | CompleteMemory[D]
+type AnyMemory[D: MemoryData=MemoryData] = DraftMemory[D] | CompleteMemory[D]
 '''Any kind of instantiable memory.'''
 
 class MemoryContext[M: AnyMemory](BaseModel):
@@ -234,69 +227,11 @@ class MemoryContext[M: AnyMemory](BaseModel):
     '''The memory itself.'''
     
     timestamp: Optional[int] = None
-    '''Timestamp of the memory, if known.'''
+    '''Timestamp of the memory, if any.'''
     importance: Optional[float] = None
     '''Importance of the memory, used for recall weighting.'''
     sonas: Optional[list[UUID|str]] = None
     '''Sonas the memory belongs to.'''
-
-class ImportMemory(DraftMemory[ImportFileData]):
-    '''Base memory model.'''
-    type: Literal['memory'] = "memory"
-    '''Used to disambiguate this memory from ImportConvo.'''
-    
-    deps: Optional[list[DraftMemory[MemoryData]]] = Field(
-        default=None,
-        description="Non-conversational dependencies of the memory, if any."
-    )
-
-class ImportConvo(BaseModel):
-    '''Request to insert a sequence of memories.'''
-    class Metadata(BaseModel):
-        timestamp: Optional[datetime] = Field(
-            default=None,
-            description="Date and time when the conversation was created."
-        )
-        provider: Literal['anthropic', 'openai'] = Field(
-            description="Provider of the conversation data."
-        )
-        uuid: UUID = Field(
-            description="Unique identifier for the conversation."
-        )
-        title: str = Field(
-            description="Title of the conversation."
-        )
-        importance: Optional[float] = Field(
-            default=None,
-            description="Importance of the conversation, used for recall weighting."
-        )
-    
-    type: Literal['convo'] = "convo"
-
-    sona: Optional[UUID|str] = Field(
-        default=None,
-        description="Sona to insert the memories into."
-    )
-    metadata: Optional[Metadata] = Field(
-        description="Metadata about the conversation being inserted."
-    )
-    prev: Optional[CIDv1] = Field(
-        default=None,
-        description="CID of the previous memory in the thread, if any."
-    )
-    chatlog: list[ImportMemory] = Field(
-        description="Chatlog to insert into the system."
-    )
-
-type ImportData = Annotated[
-    ImportMemory | ImportConvo,
-    Field(
-        discriminator="type",
-        description="Data to import into the system. Can be a memory or a conversation."
-    )
-]
-type AnyImport = ImportData | list[ImportData]
-ImportAdapter = TypeAdapter[AnyImport](AnyImport)
 
 class IncompleteACThread[D: MemoryData=MemoryData](BaseModel):
     '''A thread of memories in the agent's context.'''
@@ -305,7 +240,7 @@ class IncompleteACThread[D: MemoryData=MemoryData](BaseModel):
     memory: DraftMemory[D] # Can't be referred to by cid
     prev: Optional[CIDv1] = None
 
-class ACThread(IPLDModel):
+class ACThread(IPLDRoot):
     '''A thread of memories in the agent's context.'''
     sona: UUID
     memory: CIDv1

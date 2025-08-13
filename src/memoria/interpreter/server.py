@@ -1,13 +1,18 @@
 from typing import Iterable
+import random
+
 import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
+from pydantic_ai.mcp import ToolResult
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ModelResponsePart, TextPart, ThinkingPart, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.usage import Usage
 
 from ipld import dag
 from cid import CIDv1
-from memoria.memory import Memory, OtherData, PartialMemory, SelfData
+from multibase import base58
+from memoria.memory import Memory, TextData, PartialMemory, SelfData
 from memoria.subject.client import SubjectClient
 from memoria.prompts import CHAT_PROMPT
 
@@ -35,29 +40,60 @@ agent = Agent(
     output_type=Output
 )
 
-def build_history(history: list[Memory]) -> Iterable[ModelMessage]:
+def build_history(refs: dict[CIDv1, int], history: list[PartialMemory]) -> Iterable[ModelMessage]:
     """Build a message history from a list of Memory objects."""
-    for memory in history:
+    for ref, memory in enumerate(history):
         match memory.data:
-            case SelfData(name=name, parts=parts, stop_reason=stop_reason):
+            case SelfData(parts=parts, model=model):
+                msg_parts: list[ModelResponsePart] = []
+                results: list[ToolReturnPart] = []
+                for part in parts:
+                    match part:
+                        case SelfData.TextPart(content=content):
+                            msg_parts.append(TextPart(content=content))
+
+                        case SelfData.ThinkPart(
+                                content=content, think_id=think_id,
+                                signature=signature
+                            ):
+                            msg_parts.append(ThinkingPart(
+                                content=content,
+                                id=think_id,
+                                signature=signature
+                            ))
+                        
+                        case SelfData.ToolPart(
+                                name=name, args=args, result=result,
+                                call_id=call_id
+                            ):
+                            if call_id is None:
+                                bs = random.randbytes(32)
+                                call_id = f"memoria-{base58.encode(bs)}"
+                            
+                            msg_parts.append(ToolCallPart(
+                                tool_name=name,
+                                args=args,
+                                tool_call_id=call_id
+                            ))
+                            results.append(ToolReturnPart(
+                                tool_name=name,
+                                content=result,
+                                tool_call_id=call_id
+                            ))
+                
                 yield ModelResponse(
-                    content=memory.content,
-                    metadata={
-                        "cid": str(memory.cid),
-                        "created_at": memory.created_at.isoformat(),
-                        "updated_at": memory.updated_at.isoformat()
-                    }
+                    parts=msg_parts,
+                    usage=Usage(),
+                    model_name=model
                 )
             
-            case OtherData(name=name, content=content):
+            case TextData(content=content):
                 yield ModelRequest(
-                    content=content,
-                    metadata={
-                        "cid": str(memory.cid),
-                        "created_at": memory.created_at.isoformat(),
-                        "updated_at": memory.updated_at.isoformat()
-                    }
+                    parts=[UserPromptPart(content=content)]
                 )
+            
+            case data:
+                raise NotImplementedError(f"Memory part {type(data)}")
 
 @app.post("/interpret")
 async def interpret(
@@ -68,8 +104,9 @@ async def interpret(
     """
     async with httpx.AsyncClient(base_url="http://localhost:8000") as http:
         subject = SubjectClient(http)
-        memories: dict[CIDv1, PartialMemory] = {}
-        for cid in ir.context:
+        history: list[PartialMemory] = []
+        refs: dict[CIDv1, int] = {}
+        for ref, cid in enumerate(ir.context):
             if (bs := await subject.ipfs(cid)) is None:
                 continue
             
@@ -77,15 +114,18 @@ async def interpret(
                 dag.unmarshal(cid.codec, bs)
             )
             # Strip edges that aren't in the context subgraph
-            memories[cid] = PartialMemory(
+            m = PartialMemory(
                 cid=cid,
                 data=m.data,
                 edges=[e for e in m.edges if e.target not in ir.context]
             )
+            refs[m.cid] = ref
+            history.append(m)
     
     response = await agent.run(
-        message_history=list(build_history(history))
+        message_history=list(build_history(refs, history))
     )
+    response.output
 
 def main():
     import uvicorn

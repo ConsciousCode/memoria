@@ -21,7 +21,7 @@ from cid import CID, CIDv1
 from ipfs import CIDResolveError
 
 from memoria.repo import Repository
-from memoria.memory import AnyMemory, DraftMemory, Edge, OtherData, SelfData, TextData
+from memoria.memory import AnyMemory, DraftMemory, Edge, TextData, SelfData
 from memoria.config import RecallConfig, SampleConfig
 from memoria.prompts import QUERY_PROMPT
 
@@ -66,17 +66,15 @@ def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=
 
     match memory.data:
         case SelfData():
-            if sr := memory.data.stop_reason:
-                if sr != "finish":
-                    tags.append(f"stop_reason:{sr}")
-            content = ''.join(p.content for p in memory.data.parts)
-            return ("assistant", build_tags(tags) + content)
+            return ("assistant", build_tags(tags) + ''.join(
+                getattr(p, 'content', '') for p in memory.data.parts
+            ))
+        
+        #case TextData():
+        #    tags.append("kind:raw_text")
+        #    return ("user", build_tags(tags) + memory.data.content)
         
         case TextData():
-            tags.append("kind:raw_text")
-            return ("user", build_tags(tags) + memory.data.content)
-        
-        case OtherData():
             return ("user", build_tags(tags) + memory.data.content)
         
             '''
@@ -217,6 +215,10 @@ async def recall(
             DraftMemory,
             Field(description="Prompt to base the recall on.")
         ],
+        index: Annotated[
+            Optional[list[str]],
+            Field(description="List of representative samples of the memory for use in vector similarity searching.")
+        ] = None,
         timestamp: Annotated[
             Optional[int],
             Field(description="Timestamp to use for the recall. If not provided, uses the current time.")
@@ -237,7 +239,9 @@ async def recall(
                 pass
         if timestamp is None:
             timestamp = int(datetime.now().timestamp())
-        return emu.repo.recall(sona, prompt, timestamp, recall_config).adj
+        return emu.repo.recall(
+            sona, prompt, timestamp, index, recall_config
+        ).adj
 
 @mcp.tool(
     annotations=dict(
@@ -255,6 +259,10 @@ async def query(
             DraftMemory,
             Field(description="Prompt for the chat. If `null`, use only the included memories.")
         ],
+        index: Annotated[
+            Optional[list[str]],
+            Field(description="List of representative samples of the memory for use in vector similarity searching.")
+        ] = None,
         timestamp: Annotated[
             Optional[int],
             Field(description="Timestamp to use for the query. If not provided, uses the current time.")
@@ -276,7 +284,7 @@ async def query(
     with mcp_emu(ctx) as emu:
         if timestamp is None:
             timestamp = int(datetime.now().timestamp())
-        g = emu.repo.recall(sona, prompt, timestamp, recall_config)
+        g = emu.repo.recall(sona, prompt, timestamp, index, recall_config)
 
         refs: dict[CIDv1, int] = {}
         chatlog: list[AnyMemory] = []
@@ -300,17 +308,6 @@ async def query(
                 )
             )
         
-        tag = f"ref:{len(messages)}"
-        deps = [refs[e.target] for e in prompt.edges]
-        if deps:
-            tag += f"->{','.join(map(str, deps))}"
-
-        # Inserting prompt before it's been annotated is fine because the
-        # model can figure out the grounding.
-        messages.append(sampling_message(
-            "user", build_tags(["final", tag]) + prompt.document()
-        ))
-
         response = await ctx.sample(
             messages,
             system_prompt=system_prompt,
@@ -321,8 +318,7 @@ async def query(
         match response:
             case TextContent():
                 data=SelfData(
-                    parts=[SelfData.Part(content=response.text)],
-                    stop_reason=None
+                    parts=[SelfData.TextPart(content=response.text)]
                 )
             
             case _:
@@ -336,9 +332,7 @@ async def query(
         # TODO: No support for images, would require inspecting the memories
         # themselves for content. Don't want to spend more time right now on
         # a debug endpoint
-        return cast(ToolResult, [
-            m.model_dump() for m in chatlog
-        ])
+        return [m.model_dump() for m in chatlog]
 
 @mcp.tool(
     annotations=dict(

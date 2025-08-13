@@ -21,12 +21,14 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart
 from fastmcp.client.sampling import SamplingParams
 
-from src.util import argparse, check_overflow, expected, named_value, warn
-from src.config import Config
-from src.client import MemoriaClient
-from src.server._common import AddParameters
-from src.ipld import CIDv1
-from src.memory import AnyMemory, DraftMemory, Edge, FileData, ImportAdapter, ImportMemory, Memory, MetaData, PartialMemory, RecallConfig, SampleConfig, TextData
+from cid import CIDv1
+
+from memoria.util import argparse, check_overflow, expected, named_value, warn
+from memoria.subject.config import Config
+from memoria.subject.client import SubjectClient
+from memoria.subject._common import AddParameters
+from memoria.memory import DraftMemory, Edge, FileData, ImportAdapter, ImportMemory, Memory, MetaData, PartialMemory
+from memoria.config import RecallConfig, SampleConfig
 
 SERVER: Final = "http://127.0.0.1:8000/mcp"
 CONFIG: Final = "./private/memoria.toml"
@@ -103,13 +105,13 @@ class MemoriaApp:
         self.help = help
         self.config = config or CONFIG
     
-    def tagname(self, memory: AnyMemory):
+    def tagname(self, memory: PartialMemory):
         match memory.data.kind:
             case "self": return "assistant"
             case "other": return "user"
             case kind: return kind
 
-    def print_memory(self, memory: AnyMemory, refs: dict[CIDv1, int], verbose=True, extra=True):
+    def print_memory(self, memory: PartialMemory, refs: dict[CIDv1, int], verbose=True, extra=True):
         """Print a message to the user."""
         if extra:
             parts = []
@@ -124,15 +126,11 @@ class MemoriaApp:
             else:
                 parts.append(f"ref={ref}")
             
-            if ts := memory.timestamp:
-                dt = datetime.fromtimestamp(ts).replace(microsecond=0)
-                parts.append(f"{dt.isoformat()}")
-            
             after = ' ' + ' '.join(parts) if verbose and parts else ""
             print(f"<{self.tagname(memory)}{after}> ", end='')
         print(memory.data.document())
     
-    def print_chatlog(self, log: Sequence[AnyMemory], refs: dict[CIDv1, int], meta=False, verbose=True, extra=True):
+    def print_chatlog(self, log: Sequence[PartialMemory], refs: dict[CIDv1, int], meta=False, verbose=True, extra=True):
         """
         Print the chat log in a readable format.
         
@@ -227,14 +225,14 @@ class MemoriaApp:
             StreamableHttpTransport(config.server),
             sampling_handler=sampler.sampling_handler
         ) as client:
-            yield MemoriaClient(client)
+            yield SubjectClient(client)
     
     async def insert_memory(self,
             config: Config,
             sona: Optional[UUID|str],
             metadata_cid: Optional[CIDv1],
             prev: Optional[CIDv1],
-            client: MemoriaClient,
+            client: SubjectClient,
             memory: DraftMemory | ImportMemory
         ) -> CIDv1:
         if sona:
