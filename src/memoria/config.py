@@ -9,10 +9,6 @@ from pydantic import BaseModel, Field
 
 class RecallConfig(BaseModel):
     '''Configuration for how to weight memory recall.'''
-    importance: Annotated[
-        float,
-        Field(description="Weight of memory importance.")
-    ] = 0.30
     recency: Annotated[
         float,
         Field(description="Weight of the recency of the memory.")

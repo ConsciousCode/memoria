@@ -8,7 +8,6 @@ CREATE TABLE IF NOT EXISTS memories (
     cid BLOB UNIQUE, -- NULL indicates an incomplete memory
     data JSONB NOT NULL,
     timestamp REAL,
-    importance REAL,
     metadata JSONB
 );
 

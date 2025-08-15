@@ -62,7 +62,6 @@ class BaseMemoryRow(BaseModel):
     rowid: PrimaryKey
     timestamp: Optional[int]
     data: JSONB
-    importance: Optional[float]
     metadata: Optional[JSONB]
 
     @classmethod
@@ -71,7 +70,6 @@ class BaseMemoryRow(BaseModel):
             rowid: PrimaryKey,
             timestamp: Optional[int],
             data: JSONB,
-            importance: Optional[float],
             metadata: Optional[JSONB]
         ) -> 'AnyMemoryRow':
         '''Create a MemoryRow from a raw database row.'''
@@ -81,7 +79,6 @@ class BaseMemoryRow(BaseModel):
                 rowid=rowid,
                 timestamp=timestamp,
                 data=data,
-                importance=importance,
                 metadata=metadata
             )
         else:
@@ -90,7 +87,6 @@ class BaseMemoryRow(BaseModel):
                 rowid=rowid,
                 timestamp=timestamp,
                 data=data,
-                importance=importance,
                 metadata=metadata
             )
     
@@ -311,7 +307,7 @@ class DatabaseRO(Database):
         cur = self.cursor(BaseMemoryRow.factory)
         return cur.execute("""
             SELECT
-                rowid, cid, timestamp, kind, JSON(data), importance
+                rowid, cid, timestamp, kind, JSON(data)
             FROM memories
             WHERE cid = ?
         """, (cid and cid.buffer, rowid)).fetchone()
@@ -530,12 +526,12 @@ class DatabaseRO(Database):
         and weight of the edge.
         '''
         cur = self.cursor(return_type=tuple[
-            int, bytes, int, JSONB, Optional[float], Optional[JSONB], float
+            int, bytes, int, JSONB, Optional[JSONB], float
         ])
         cur.execute("""
             SELECT
                 dst.rowid, dst.cid, dst.timestamp,
-                JSON(dst.data), dst.importance, JSON(dst.metadata),
+                JSON(dst.data), JSON(dst.metadata),
                 e.weight
             FROM edges e
                 JOIN memories dst ON e.dst_id = dst.rowid
@@ -543,14 +539,13 @@ class DatabaseRO(Database):
             WHERE src.cid = ? OR src.rowid = ?
         """, (cid and cid.buffer, rowid))
         
-        for rowid, mcid, ts, data, imp, md, weight in cur:
+        for rowid, mcid, ts, data, md, weight in cur:
             yield Edge(
                 target=MemoryRow(
                     rowid=rowid,
                     cid=mcid,
                     timestamp=ts,
                     data=data,
-                    importance=imp,
                     metadata=md
                 ),
                 weight=weight
@@ -563,19 +558,19 @@ class DatabaseRO(Database):
         '''
         cur = self.cursor(return_type=tuple[
             int, Optional[bytes], int, JSONB,
-            Optional[float], Optional[JSONB],
+            Optional[JSONB],
             float
         ])
         cur.execute("""
             SELECT
                 m.rowid, m.cid, m.timestamp, JSON(m.data),
-                m.importance, JSON(m.metadata),
+                JSON(m.metadata),
                 e.weight
             FROM edges e JOIN memories m ON m.rowid = e.src_id
             WHERE e.dst_id = ?
         """, (rowid,))
         
-        for rowid, mcid, ts, data, imp, md, weight in cur:
+        for rowid, mcid, ts, data, md, weight in cur:
             yield Edge(
                 weight=weight,
                 target=BaseMemoryRow.factory(
@@ -583,7 +578,6 @@ class DatabaseRO(Database):
                     cid=mcid,
                     timestamp=ts,
                     data=data,
-                    importance=imp,
                     metadata=md
                 )
             )
@@ -593,8 +587,7 @@ class DatabaseRO(Database):
         cur = self.cursor(MemoryRow)
         return cur.execute("""
             SELECT
-                rowid, cid, timestamp, kind,
-                JSON(data) AS data, importance
+                rowid, cid, timestamp, kind, JSON(data) AS data
             FROM memories
             ORDER BY rowid DESC
             LIMIT ? OFFSET ?
@@ -699,8 +692,7 @@ class DatabaseRW(DatabaseRO):
             s = None
         
         cur = self.cursor(return_type=tuple[
-            int, bytes, Optional[int], JSONB,
-            Optional[float], Optional[JSONB],
+            int, bytes, Optional[int], JSONB, Optional[JSONB],
             float
         ])
         cur.execute("""
@@ -723,12 +715,10 @@ class DatabaseRW(DatabaseRO):
                 )
             SELECT
                 m.rowid, m.cid, m.timestamp, JSON(m.data),
-                m.importance, JSON(m.metadata),
+                JSON(m.metadata),
                 (
-                    + IFNULL(:w_importance * m.importance, 0)
                     + IFNULL(:w_recency * POWER(
-                        :timestamp - m.timestamp,
-                        -:decay * IFNULL(EXP(-POWER(m.importance, 2)), 1)
+                        :timestamp - m.timestamp, -:decay
                     ), 0)
                     + IFNULL(:w_fts *
                         (fts.score - MIN(fts.score) OVER())
@@ -736,7 +726,7 @@ class DatabaseRW(DatabaseRO):
                     + IFNULL(:w_vss / (1 + mvss.distance), 0)
                     -- If the sona vss fails, treat it like a match
                     + IFNULL(:w_sona / (1 + svss.distance), 1)
-                ) / (:w_importance + :w_recency + :w_fts + :w_vss + :w_sona) AS score
+                ) / (:w_recency + :w_fts + :w_vss + :w_sona) AS score
             FROM memories m
                 LEFT JOIN sona_memories sm ON sm.memory_id = m.rowid
                 LEFT JOIN fts ON fts.rowid = m.rowid
@@ -754,7 +744,6 @@ class DatabaseRW(DatabaseRO):
             "vss_e": e and e.astype(numpy.float32),
             "sona_e": s and s.astype(numpy.float32),
             "timestamp": timestamp,
-            "w_importance": finite(config.importance),
             "w_recency": finite(config.recency),
             "w_fts": finite(config.fts),
             "w_vss": finite(config.vss),
@@ -762,13 +751,12 @@ class DatabaseRW(DatabaseRO):
             "k": int(config.k),
             "decay": finite(config.decay)
         })
-        for rowid, cid, ts, data, imp, md, score in cur:
+        for rowid, cid, ts, data, md, score in cur:
             m = MemoryRow(
                 rowid=rowid,
                 cid=cid,
                 timestamp=ts,
                 data=data,
-                importance=imp,
                 metadata=md
             )
             yield m, score
@@ -816,21 +804,6 @@ class DatabaseRW(DatabaseRO):
         """, (act.cid.buffer, rowid))
 
         return act
-    
-    def propagate_importance(self, memory: CIDv1):
-        '''
-        Propagate the importance of a memory to its edges, updating the edges
-        in the database.
-        '''
-        cur = self.cursor()
-        cur.execute("""
-            UPDATE memories AS m2
-                SET importance = -- M2 <- M1
-                    (1 - e.weight) * m2.importance + e.weight * m1.importance
-            FROM edges e
-                JOIN memories m1 ON e.src_id = m1.rowid
-            WHERE m2.rowid = e.dst_id AND m1.cid = ?
-        """, (memory.buffer,))
 
     @overload
     def find_sona(self, name: UUID) -> Optional[SonaRow]: ...
@@ -921,22 +894,20 @@ class DatabaseRW(DatabaseRO):
     def insert_memory(self,
             memory: Memory,
             index: Optional[list[str]]=None,
-            timestamp: Optional[int] = None,
-            importance: Optional[float] = None
+            timestamp: Optional[int] = None
         ) -> int:
         cid = memory.cid
         cid = cid and cid.buffer
         cur = self.cursor()
         cur.execute("""
             INSERT OR IGNORE INTO memories
-                (cid, timestamp, kind, data, importance)
+                (cid, timestamp, kind, data)
                     VALUES (?, ?, ?, JSONB(?), ?)
         """, (
             cid,
             timestamp,
             memory.data.kind,
-            memory.data.model_dump_json(exclude={"kind"}),
-            importance
+            memory.data.model_dump_json(exclude={"kind"})
         ))
         
         if rowid := cur.lastrowid:
@@ -946,10 +917,6 @@ class DatabaseRW(DatabaseRO):
             for doc in index or []:
                 self.insert_text_embedding(rowid, doc)
                 self.insert_text_fts(rowid, doc)
-            
-            # Propagate the memory's importance
-            if importance is not None:
-                self.propagate_importance(memory.cid)
         # 0 (ignored) or None (error)
         else:
             # Memory already exists

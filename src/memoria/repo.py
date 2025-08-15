@@ -72,16 +72,11 @@ class Repository(Blocksource):
     def insert(self,
             memory: Memory,
             index: Optional[list[str]] = None,
-            timestamp: Optional[int] = None,
-            importance: Optional[float] = None
+            timestamp: Optional[int] = None
         ):
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
-            db.insert_memory(memory, index, timestamp, importance)
-
-    def propogate_importance(self, memory: CIDv1):
-        with self.db.transaction() as db:
-            db.propagate_importance(memory)
+            db.insert_memory(memory, index, timestamp)
 
     @overload
     def find_sona(self, sona: UUID) -> Optional[Sona]: ...
@@ -126,8 +121,7 @@ class Repository(Blocksource):
 
             g.insert(origcid, MemoryContext(
                 memory=mr.to_partial(),
-                timestamp=mr.timestamp,
-                importance=mr.importance
+                timestamp=mr.timestamp
             ))
 
             energy = score*budget
@@ -147,6 +141,8 @@ class Repository(Blocksource):
                 
                 bw.append((energy*weight, dst.rowid, CIDv1(dst.cid)))
             
+            # TODO: Forward recall previously depended on importance
+            raise NotImplementedError
             b = 0
             for edge in self.db.references(rowid=mr.rowid):
                 weight, src = edge.weight, edge.target
@@ -183,8 +179,7 @@ class Repository(Blocksource):
 
                 g.insert(srccid, MemoryContext(
                     memory=dst.to_partial(),
-                    timestamp=dst.timestamp,
-                    importance=dst.importance
+                    timestamp=dst.timestamp
                 ))
                 g.add_edge(srccid, dstcid, weight)
 
@@ -202,7 +197,6 @@ class Repository(Blocksource):
                 if src.cid is None:
                     continue
                 
-                b += (imp := src.importance or 0)
                 if b >= energy:
                     break
 
@@ -213,6 +207,8 @@ class Repository(Blocksource):
                 ))
                 g.add_edge(srccid, dstcid, weight)
 
+                # TODO: Again forward recall previously depended on importance
+                raise NotImplementedError
                 fw.append((energy*imp, dst_id, dstcid))
         return g
 

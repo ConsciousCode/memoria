@@ -228,8 +228,6 @@ class MemoryContext[M: AnyMemory](BaseModel):
     
     timestamp: Optional[int] = None
     '''Timestamp of the memory, if any.'''
-    importance: Optional[float] = None
-    '''Importance of the memory, used for recall weighting.'''
     sonas: Optional[list[UUID|str]] = None
     '''Sonas the memory belongs to.'''
 
@@ -317,7 +315,6 @@ class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
                 edges=[]
             ),
             timestamp=value.timestamp,
-            importance=value.importance,
             sonas=value.sonas
         )
     
@@ -327,7 +324,6 @@ class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
         node.memory.data = value.memory.data
         node.memory.edges = value.memory.edges
         node.timestamp = value.timestamp
-        node.importance = value.importance
         node.sonas = value.sonas
     
     @override
