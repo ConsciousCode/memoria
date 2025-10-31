@@ -1,6 +1,7 @@
-from datetime import datetime
 from functools import cached_property
-from typing import Annotated, Iterable, Literal, Optional, override
+from typing import Annotated, Callable, Literal, override
+from collections.abc import Iterable
+from typing_extensions import ClassVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, TypeAdapter
@@ -55,13 +56,13 @@ class SelfData(IPLDModel):
         '''Transparent thoughts by the model.'''
         kind: Literal["text"] = "text"
         content: str
-    
+
     class ThinkPart(IPLDModel):
         '''Opaque thoughts by the model.'''
         kind: Literal["think"] = "think"
         content: str
-        think_id: Optional[str] = None
-        signature: Optional[str] = None
+        think_id: str | None = None
+        signature: str | None = None
 
         @override
         def ipld_model(self) -> IPLData:
@@ -71,16 +72,16 @@ class SelfData(IPLDModel):
             }
             if self.think_id: data["think_id"] = self.think_id
             if self.signature: data["signature"] = self.signature
-            
+
             return data
-    
+
     class ToolPart(IPLDModel):
         '''Tool call paired with its results.'''
         kind: Literal["tool"] = "tool"
         name: str
         args: dict[str, json_t]
         result: json_t = None
-        call_id: Optional[str] = None
+        call_id: str | None = None
 
         @override
         def ipld_model(self) -> IPLData:
@@ -91,7 +92,7 @@ class SelfData(IPLDModel):
                 "result": self.result
             }
             if self.call_id: data["call_id"] = self.call_id
-            
+
             return data
 
     type Part = Annotated[
@@ -102,7 +103,7 @@ class SelfData(IPLDModel):
     kind: Literal["self"] = "self"
     parts: list[Part]
     '''Parts comprising the completion.'''
-    model: Optional[str] = None
+    model: str | None = None
     '''The model which originated this memory.'''
 
     @override
@@ -123,7 +124,7 @@ class FileData(IPLDModel):
     '''A file memory containing a file CID and metadata about it.'''
     kind: Literal["file"] = "file"
     file: CID
-    filename: Optional[str] = None
+    filename: str | None = None
     mimetype: str
     filesize: int
 
@@ -132,7 +133,7 @@ class MetaData(IPLDModel):
     A memory which is just metadata. Used primarily for coordinating context
     like provenance.
     '''
-    kind: Literal["metadata"] = "metadata"
+    kind: Literal["meta"] = "meta"
     metadata: dict[str, json_t]
 
 type MemoryData = Annotated[
@@ -148,12 +149,12 @@ class BaseMemory[D: MemoryData=MemoryData](BaseModel):
 
     data: D
     '''Data contained in the memory.'''
-    metadata: Optional[dict[str, json_t]] = None
+    metadata: dict[str, json_t] | None = None
     '''Freeform metadata about the memory.'''
     edges: list[Edge[CIDv1]]
     '''Edges to other memories.'''
 
-    def edge(self, target: CIDv1) -> Optional[Edge[CIDv1]]:
+    def edge(self, target: CIDv1) -> Edge[CIDv1] | None:
         '''Get the edge to the target memory, if it exists.'''
         for edge in self.edges:
             if edge.target == target:
@@ -175,7 +176,7 @@ class DraftMemory[D: MemoryData=MemoryData](BaseMemory[D]):
         '''Insert an edge to the target memory with the given weight.'''
         if self.edge(target) is not None:
             raise ValueError(f"Edge to {target} already exists")
-        
+
         self.edges.append(Edge(
             target=target,
             weight=weight
@@ -198,7 +199,7 @@ class PartialMemory[D: MemoryData=MemoryData](BaseMemory[D]):
 class Memory[D: MemoryData=MemoryData](BaseMemory[D], IPLDRoot):
     '''A completed memory which can be referred to by CID.'''
 
-    model_config = ConfigDict(frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
     @override
     def ipld_model(self) -> IPLData:
@@ -207,13 +208,14 @@ class Memory[D: MemoryData=MemoryData](BaseMemory[D], IPLDRoot):
             "data": self.data.ipld_model(),
             "edges": sorted(self.edges, key=lambda e: e.target),
         }
-    
-    def partial(self) -> PartialMemory[D]:
+
+    def partial(self, edge_filter: Callable[[Edge[CIDv1]], bool] | None) -> PartialMemory[D]:
         '''Return a PartialMemory with the same data and edges.'''
         return PartialMemory(
             cid=self.cid,
             data=self.data,
-            edges=self.edges
+            edges=[e for e in self.edges if edge_filter(e)]
+                if edge_filter else self.edges
         )
 
 type CompleteMemory[D: MemoryData=MemoryData] = PartialMemory[D] | Memory[D]
@@ -225,10 +227,10 @@ type AnyMemory[D: MemoryData=MemoryData] = DraftMemory[D] | CompleteMemory[D]
 class MemoryContext[M: AnyMemory](BaseModel):
     memory: M
     '''The memory itself.'''
-    
-    timestamp: Optional[int] = None
+
+    timestamp: int | None = None
     '''Timestamp of the memory, if any.'''
-    sonas: Optional[list[UUID|str]] = None
+    sonas: list[UUID|str] | None = None
     '''Sonas the memory belongs to.'''
 
 class IncompleteACThread[D: MemoryData=MemoryData](BaseModel):
@@ -236,13 +238,13 @@ class IncompleteACThread[D: MemoryData=MemoryData](BaseModel):
     cid: None = None # Incomplete threads can't have a cid
     sona: UUID
     memory: DraftMemory[D] # Can't be referred to by cid
-    prev: Optional[CIDv1] = None
+    prev: CIDv1 | None = None
 
 class ACThread(IPLDRoot):
     '''A thread of memories in the agent's context.'''
     sona: UUID
     memory: CIDv1
-    prev: Optional[CIDv1] = None
+    prev: CIDv1 | None = None
 
     @override
     def ipld_model(self) -> IPLData:
@@ -266,11 +268,11 @@ class Sona(BaseModel):
     aliases: list[str] = Field(
         description="List of aliases for the Sona."
     )
-    active: Optional[IncompleteACThread] = Field(
+    active: IncompleteACThread | None = Field(
         default=None,
         description="Active thread for the Sona, if any."
     )
-    pending: Optional[IncompleteACThread] = Field(
+    pending: IncompleteACThread | None = Field(
         default=None,
         description="Pending thread for the Sona, if any."
     )
@@ -305,7 +307,7 @@ class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
                 lambda instance: instance.adj
             )
         )
-    
+
     @override
     def _node(self, value: Node) -> Node:
         return MemoryContext(
@@ -317,7 +319,7 @@ class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
             timestamp=value.timestamp,
             sonas=value.sonas
         )
-    
+
     @override
     def _setvalue(self,  node: Node, value: Node):
         node.memory.cid = value.memory.cid
@@ -325,7 +327,7 @@ class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
         node.memory.edges = value.memory.edges
         node.timestamp = value.timestamp
         node.sonas = value.sonas
-    
+
     @override
     def _edges(self, node: Node) -> Iterable[tuple[CIDv1, float]]:
         for edge in node.memory.edges:
@@ -339,9 +341,9 @@ class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
                 target=dst,
                 weight=edge
             ))
-    
+
     @override
-    def _pop_edge(self, src: Node, dst: CIDv1) -> Optional[float]:
+    def _pop_edge(self, src: Node, dst: CIDv1) -> float | None:
         es = src.memory.edges
         for i, edge in enumerate(es):
             if edge.target == dst:
