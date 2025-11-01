@@ -2,7 +2,6 @@ from functools import cached_property
 from typing import Annotated, Callable, Literal, override
 from collections.abc import Iterable
 from typing_extensions import ClassVar
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, TypeAdapter
 from pydantic_core import CoreSchema, core_schema
@@ -17,11 +16,9 @@ __all__ = (
     'MemoryKind',
     'StopReason',
     'IPLDModel', 'IPLDRoot',
-    'Edge', 'BaseMemory',
-    'DraftMemory', 'PartialMemory', 'Memory',
-    'CompleteMemory', 'AnyMemory',
-    'AnyACThread', 'IncompleteACThread', 'ACThread',
-    'Sona', 'MemoryDAG'
+    'BaseMemory', 'DraftMemory', 'PartialMemory',
+    'Memory', 'CompleteMemory', 'AnyMemory',
+    'MemoryDAG'
 )
 
 type MemoryKind = Literal["self", "other", "text", "image", "file", "metadata"]
@@ -44,11 +41,6 @@ class IPLDRoot(IPLDModel):
     @cached_property
     def cid(self):
         return CIDv1.hash(self.ipld_block())
-
-class Edge[T](BaseModel):
-    '''Edge from one memory to another.'''
-    target: T
-    weight: float
 
 class SelfData(IPLDModel):
     '''The agent's own transparent inner monologue.'''
@@ -151,18 +143,8 @@ class BaseMemory[D: MemoryData=MemoryData](BaseModel):
     '''Data contained in the memory.'''
     metadata: dict[str, json_t] | None = None
     '''Freeform metadata about the memory.'''
-    edges: list[Edge[CIDv1]]
+    edges: set[CIDv1]
     '''Edges to other memories.'''
-
-    def edge(self, target: CIDv1) -> Edge[CIDv1] | None:
-        '''Get the edge to the target memory, if it exists.'''
-        for edge in self.edges:
-            if edge.target == target:
-                return edge
-        return None
-
-    def has_edge(self, target: CIDv1):
-        return any(target == e.target for e in self.edges)
 
 class DraftMemory[D: MemoryData=MemoryData](BaseMemory[D]):
     '''
@@ -172,15 +154,12 @@ class DraftMemory[D: MemoryData=MemoryData](BaseMemory[D]):
 
     cid: None = None
 
-    def insert_edge(self, target: CIDv1, weight: float):
+    def insert_edge(self, target: CIDv1):
         '''Insert an edge to the target memory with the given weight.'''
-        if self.edge(target) is not None:
+        if target in self.edges:
             raise ValueError(f"Edge to {target} already exists")
 
-        self.edges.append(Edge(
-            target=target,
-            weight=weight
-        ))
+        self.edges.add(target)
 
     def complete(self) -> 'Memory[D]':
         '''Complete the memory by adding edges and returning a Memory object.'''
@@ -206,16 +185,16 @@ class Memory[D: MemoryData=MemoryData](BaseMemory[D], IPLDRoot):
         # Edges must be sorted by target CID to ensure deterministic ordering
         return {
             "data": self.data.ipld_model(),
-            "edges": sorted(self.edges, key=lambda e: e.target),
+            "edges": sorted(self.edges),
         }
 
-    def partial(self, edge_filter: Callable[[Edge[CIDv1]], bool] | None) -> PartialMemory[D]:
+    def partial(self, edge_filter: Callable[[CIDv1], bool] | None) -> PartialMemory[D]:
         '''Return a PartialMemory with the same data and edges.'''
         return PartialMemory(
             cid=self.cid,
             data=self.data,
-            edges=[e for e in self.edges if edge_filter(e)]
-                if edge_filter else self.edges
+            edges=set(filter(edge_filter, self.edges))
+                if edge_filter is not None else self.edges
         )
 
 type CompleteMemory[D: MemoryData=MemoryData] = PartialMemory[D] | Memory[D]
@@ -230,52 +209,6 @@ class MemoryContext[M: AnyMemory](BaseModel):
 
     timestamp: int | None = None
     '''Timestamp of the memory, if any.'''
-    sonas: list[UUID|str] | None = None
-    '''Sonas the memory belongs to.'''
-
-class IncompleteACThread[D: MemoryData=MemoryData](BaseModel):
-    '''A thread of memories in the agent's context.'''
-    cid: None = None # Incomplete threads can't have a cid
-    sona: UUID
-    memory: DraftMemory[D] # Can't be referred to by cid
-    prev: CIDv1 | None = None
-
-class ACThread(IPLDRoot):
-    '''A thread of memories in the agent's context.'''
-    sona: UUID
-    memory: CIDv1
-    prev: CIDv1 | None = None
-
-    @override
-    def ipld_model(self) -> IPLData:
-        '''Return the thread as an IPLD model.'''
-        return {
-            "sona": str(self.sona),
-            "memory": self.memory,
-            "prev": self.prev
-        }
-
-type AnyACThread[D: MemoryData=MemoryData] = IncompleteACThread[D] | ACThread
-
-class Sona(BaseModel):
-    '''
-    Sona model for returning from memory queries. It is not immutable and
-    is thus referred to by UUID rather than CID.
-    '''
-    uuid: UUID = Field(
-        description="Unique identifier for the Sona."
-    )
-    aliases: list[str] = Field(
-        description="List of aliases for the Sona."
-    )
-    active: IncompleteACThread | None = Field(
-        default=None,
-        description="Active thread for the Sona, if any."
-    )
-    pending: IncompleteACThread | None = Field(
-        default=None,
-        description="Pending thread for the Sona, if any."
-    )
 
 class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
     '''IPLD data model for memories implementing the IGraph interface.'''
@@ -284,7 +217,7 @@ class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
 
     def __init__(self, keys: dict[CIDv1, Node]|None = None):
         super().__init__()
-        self.adj = keys or {}
+        self.adj: dict[CIDv1, MemoryDAG.Node] = keys or {}
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -314,10 +247,9 @@ class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
             memory=PartialMemory(
                 cid=value.memory.cid,
                 data=value.memory.data,
-                edges=[]
+                edges=set()
             ),
-            timestamp=value.timestamp,
-            sonas=value.sonas
+            timestamp=value.timestamp
         )
 
     @override
@@ -326,10 +258,9 @@ class MemoryDAG(IntrusiveGraph[CIDv1, float, MemoryContext[PartialMemory]]):
         node.memory.data = value.memory.data
         node.memory.edges = value.memory.edges
         node.timestamp = value.timestamp
-        node.sonas = value.sonas
 
     @override
-    def _edges(self, node: Node) -> Iterable[tuple[CIDv1, float]]:
+    def _edges(self, node: Node) -> Iterable[CIDv1]:
         for edge in node.memory.edges:
             yield edge.target, edge.weight
 

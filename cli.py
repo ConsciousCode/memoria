@@ -615,8 +615,6 @@ class MemoriaApp:
                 ])
             raise CmdError(f"Unknown argument {argv[0]!r} for config command.")
 
-        print(config.source)
-
     def subcmd_help(self, *argv: str):
         '''
         [cmd]

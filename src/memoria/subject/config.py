@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 
 from memoria.config import RecallConfig, SampleConfig
 
-CHAT_SONA: Final = "chat"
 TEMPERATURE: Final = 0.7
 
 class ModelConfig(BaseModel):
@@ -23,14 +22,9 @@ class IPFSConfig(BaseModel):
     ] = "sha2-256"
 
 class Config(BaseModel):
-    source: str
-    '''Original source of the config file.'''
-
-    server: str
+    server: str = ""
     '''MCP server URL to connect to.'''
-    sona: Optional[str] = None
-    '''Default sona to use for chat.'''
-    temperature: Optional[float] = None
+    temperature: float | None = None
     '''Default temperature for chat responses.'''
     
     chat: SampleConfig = Field(default_factory=SampleConfig)
@@ -47,25 +41,21 @@ class Config(BaseModel):
         try:
             with open(os.path.expanduser(path), 'r') as f:
                 if source := f.read():
-                    data: dict[str, Any] = tomllib.loads(source)
+                    data = Config.model_validate(tomllib.loads(source))
                 else:
                     # Piped to file we're reading from
                     raise FileNotFoundError(f"Empty config file: {path}")
         except FileNotFoundError:
-            import json
             source = inspect.cleandoc(f'''
                 ## Generated from defaults ##
-                sona = {json.dumps(CHAT_SONA)}
-                
                 [recall]
                 # Default weighting for recall
                 #importance = null
                 #recency = null
-                #sona = null
                 #fts = null
                 #vss = null
                 #k = null
             ''')
-            data = {}
+            data = Config()
         
-        return Config(source=source, **data)
+        return data

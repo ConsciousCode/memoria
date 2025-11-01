@@ -2,7 +2,7 @@
 Common server utilities.
 '''
 from contextlib import contextmanager
-from typing import IO, Annotated, Literal, Optional, override
+from typing import IO, Annotated, Literal, override
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -40,23 +40,23 @@ class AddParameters(BaseModel):
         str, Field(description="Hash function.")
     ] = "sha2-256"
     #chunker: Annotated[
-    #    Optional[str], NOT_SUPPORTED(description="Chunking algorithm.")
+    #    str | None, NOT_SUPPORTED(description="Chunking algorithm.")
     #] = None
     mtime: Annotated[
-        Optional[int], Field(description="File modification time in seconds since epoch.")
+        int | None, Field(description="File modification time in seconds since epoch.")
     ] = None
 
 class MemoriaBlockstore(Blockstore):
     def __init__(self, repo: Repository, blockstore: Blockstore):
-        self.repo = repo
-        self.blockstore = blockstore
+        self.repo: Repository = repo
+        self.blockstore: Blockstore = blockstore
     
     @override
     def block_has(self, cid: CID) -> bool:
         return self.repo.block_has(cid) or self.blockstore.block_has(cid)
     
     @override
-    def block_get(self, cid: CID) -> Optional[bytes]:
+    def block_get(self, cid: CID) -> bytes | None:
         if block := self.repo.block_get(cid):
             return block
         return self.blockstore.block_get(cid)
@@ -78,7 +78,7 @@ class MemoriaBlockstore(Blockstore):
     
     def upload_file(self,
             stream: IO[bytes],
-            filename: Optional[str],
+            filename: str | None,
             mimetype: str,
             params: AddParameters
         ) -> tuple[bool, int, CID]:
@@ -110,9 +110,9 @@ class MemoriaBlockstore(Blockstore):
 class AppState(Blockstore):
     '''Application state for the FastAPI app.'''
     def __init__(self, blockstore: Blockstore, repo: Repository):
-        self.blockstore = blockstore
-        self.repo = repo
-        self.blocksource = CompositeBlocksource(repo, blockstore)
+        self.blockstore: Blockstore = blockstore
+        self.repo: Repository = repo
+        self.blocksource: CompositeBlocksource = CompositeBlocksource(repo, blockstore)
     
     
     @override
@@ -120,7 +120,7 @@ class AppState(Blockstore):
         return self.blocksource.block_has(cid)
 
     @override
-    def block_get(self, cid: CID) -> Optional[bytes]:
+    def block_get(self, cid: CID) -> bytes | None:
         return self.blocksource.block_get(cid)
     
     @override

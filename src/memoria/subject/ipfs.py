@@ -2,7 +2,8 @@
 Implement the IPFS Trustless Gateway specification and any IPFS-related utilities.
 '''
 import json
-from typing import AsyncIterable, Literal, Optional
+from typing import Literal
+from collections.abc import AsyncIterable
 
 from fastapi import Depends, FastAPI, Header, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
@@ -46,14 +47,10 @@ def head_ipfs(
     Handle HEAD requests for IPFS blocks.
     This endpoint checks if a block exists and returns the appropriate headers.
     """
-    if accept is None:
-        accept = []
     
     if "application/cbor" in accept or "application/vnd.ipld.dag-cbor" in accept:
-        output_codec = "dag-cbor"
         mime = "application/cbor"
     else:
-        output_codec = "dag-json"
         mime = "application/json"
     
     # Special case for the empty block
@@ -97,10 +94,8 @@ def get_ipfs(
     if cid.codec == "raw":
         mime = "application/octet-stream"
     elif "application/cbor" in accept or "application/vnd.ipld.dag-cbor" in accept:
-        output_codec = "dag-cbor"
         mime = "application/cbor"
     else:
-        output_codec = "dag-json"
         mime = "application/json"
     
     # Special case for the empty block
@@ -137,7 +132,7 @@ async def ipfs_add(
                 continue
 
             try:
-                created, size, cid = blockstore.upload_file(
+                _, size, cid = blockstore.upload_file(
                     file.file, file.filename, file.content_type, params
                 )
                 yield {
@@ -149,7 +144,7 @@ async def ipfs_add(
             except Exception as exc:
                 yield {"Error": str(exc)}
     
-    async def json_dumps(data: AsyncIterable[dict]):
+    async def json_dumps(data: AsyncIterable[dict[str, str] | dict[str, str | int | None]]):
         """Asynchronously serialize data to JSON."""
         async for item in data:
             yield json.dumps(item) + "\n"
@@ -170,7 +165,7 @@ async def ipfs_cat(
         offset: int = Query(
             0, description="Offset in bytes to start reading from the block."
         ),
-        length: Optional[int] = Query(
+        length: int | None = Query(
             None, description="Length in bytes to read from the block."
         )
     ):
@@ -240,7 +235,7 @@ def ipfs_dag_export(
 def ipfs_dag_get(
         cid: CID,
         state: AppState = Depends(get_blockstore),
-        output_codec: Optional[SupportedCodec] = Query(
+        output_codec: SupportedCodec | None = Query(
             None,
             description="Output codec for the DAG node. Defaults to 'dag-json'."
         )

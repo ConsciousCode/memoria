@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Callable, Iterable, Optional, Protocol, Self, overload, override
+from typing import Callable, Protocol, Self, overload, override
+from collections.abc import Iterable
 from heapq import heapify, heappop, heappush
 
 class Lexicographic(Protocol):
@@ -12,7 +13,9 @@ class LeastT:
     
     def __lt__(self, other: object, /): return True
     def __gt__(self, other: object, /): return False
+    @override
     def __eq__(self, other: object, /): return isinstance(other, LeastT)
+    @override
     def __repr__(self): return "Least"
 
 Least = LeastT.__new__(LeastT)
@@ -20,7 +23,7 @@ Least = LeastT.__new__(LeastT)
 
 _default = object()
 
-class IGraph[K, E, V, Node](ABC):
+class IGraph[K, V, Node](ABC):
     adj: dict[K, Node]
 
     ### Abstract methods for interfacing with the node ###
@@ -38,15 +41,15 @@ class IGraph[K, E, V, Node](ABC):
         '''Return the value of a node.'''
 
     @abstractmethod
-    def _edges(self, node: Node) -> Iterable[tuple[K, E]]:
+    def _edges(self, node: Node) -> Iterable[K]:
         '''Return the edges of a node.'''
     
     @abstractmethod
-    def _add_edge(self, src: Node, dst: K, edge: E):
+    def _add_edge(self, src: Node, dst: K):
         '''Add edge to a node.'''
 
     @abstractmethod
-    def _pop_edge(self, src: Node, dst: K) -> Optional[E]:
+    def _pop_edge(self, src: Node, dst: K) -> None:
         '''Remove an edge from a node. If the edge does not exist, return None.'''
 
     ### Concrete methods ###
@@ -55,6 +58,7 @@ class IGraph[K, E, V, Node](ABC):
         super().__init__()
         self.adj = {k: self._node(v) for k, v in (keys or {}).items()}
     
+    @override
     def __repr__(self):
         return f"{type(self).__name__}({self.adj!r})"
     
@@ -165,7 +169,7 @@ class IGraph[K, E, V, Node](ABC):
                 g.add_edge(dst, src, edge)
         return g
 
-    def toposort(self, key: Optional[Callable[[V], Optional[Lexicographic]]]=None) -> Iterable[K]:
+    def toposort(self, key: Callable[[V], Lexicographic | None] | None=None) -> Iterable[K]:
         '''
         Kahn's algorithm for topological sorting.
 
@@ -251,7 +255,7 @@ class SimpleGraph[K, V](IGraph[K, None, V, SimpleNode[K, V]]):
         src.edges.add(dst)
     
     @override
-    def _pop_edge(self, src: SimpleNode[K, V], dst: K) -> Optional[None]:
+    def _pop_edge(self, src: SimpleNode[K, V], dst: K):
         if dst in src.edges:
             src.edges.remove(dst)
         return None
@@ -294,5 +298,5 @@ class Graph[K, E, V](IGraph[K, E, V, Node[K, E, V]]):
         src.edges[dst] = edge
     
     @override
-    def _pop_edge(self, src: Node[K, E, V], dst: K) -> Optional[E]:
+    def _pop_edge(self, src: Node[K, E, V], dst: K) -> E | None:
         return src.edges.pop(dst)

@@ -5,23 +5,21 @@ MCP Server for the Memoria Subject
 from contextlib import contextmanager
 from datetime import datetime
 from io import BytesIO
-from typing import Annotated, Optional, cast
-from uuid import UUID
+from typing import Annotated
 import base64
 
 from fastmcp import Context, FastMCP
-from fastmcp.exceptions import ResourceError, ToolError
+from fastmcp.exceptions import ResourceError
 from mcp import SamplingMessage
 from mcp.types import ModelPreferences, Role, TextContent
 from pydantic import BaseModel, Field
-from pydantic_ai.mcp import ToolResult
 from pydantic_ai.models.mcp_sampling import MCPSamplingModelSettings
 
 from cid import CID, CIDv1
 from ipfs import CIDResolveError
 
 from memoria.repo import Repository
-from memoria.memory import AnyMemory, DraftMemory, Edge, TextData, SelfData
+from memoria.memory import AnyMemory, DraftMemory, TextData, SelfData
 from memoria.config import RecallConfig, SampleConfig
 from memoria.prompts import QUERY_PROMPT
 
@@ -58,7 +56,7 @@ def build_tags(tags: list[str]) -> str:
 def memory_to_message(ref: int, deps: list[int], memory: AnyMemory, final: bool=False) -> tuple[Role, str]:
     '''Render memory for the context.'''
     
-    tags = []
+    tags = list[str]()
     if final: tags.append("final")
     tags.append(
         f"ref:{ref}" + (f"->{','.join(map(str, deps))}" if deps else "")
@@ -118,29 +116,21 @@ def sample_to_model(sample: SampleConfig) -> MCPSamplingModelSettings:
     return settings
 
 @contextmanager
-def mcp_emu(ctx: Context):
+def mcp_emu(_ctx: Context):
     '''Get the application state from the context.'''
     with context_blockstore() as bs:
         yield MemoriaBlockstore(bs.repo, bs)
 
 @mcp.resource("ipfs://{cid}")
-def ipfs_resource(ctx: Context, cid: CIDv1):
+def ipfs_resource(_ctx: Context, cid: CIDv1):
     '''IPFS resource handler.'''
     with context_blockstore() as state:
         try: return state.dag_get(cid)
         except CIDResolveError:
             raise ResourceError(f"CID {cid} not found in IPFS blockstore")
 
-@mcp.resource("memoria://sona/{uuid}")
-def sona_resource(ctx: Context, uuid: UUID):
-    '''Sona resource handler.'''
-    with context_repo() as repo:
-        if m := repo.find_sona(uuid):
-            return m
-        raise ResourceError("Sona not found")
-
 @mcp.resource("memoria://memory/{cid}")
-def memory_resource(ctx: Context, cid: CIDv1):
+def memory_resource(_ctx: Context, cid: CIDv1):
     '''Memory resource handler.'''
     with context_repo() as repo:
         if m := repo.lookup_memory(cid):
@@ -171,11 +161,11 @@ async def upload(
             Field(description="File to upload encoded as a base64 string.")
         ],
         filename: Annotated[
-            Optional[str],
+            str | None,
             Field(description="Filename to use for the uploaded file.")
         ] = None,
         mimetype: Annotated[
-            Optional[str],
+            str | None,
             Field(description="MIME type of the file.")
         ] = None,
         params: Annotated[
@@ -207,20 +197,16 @@ async def upload(
 )
 async def recall(
         ctx: Context,
-        sona: Annotated[
-            Optional[UUID|str],
-            Field(description="Sona to recall memories from.")
-        ],
         prompt: Annotated[
             DraftMemory,
             Field(description="Prompt to base the recall on.")
         ],
         index: Annotated[
-            Optional[list[str]],
+            list[str] | None,
             Field(description="List of representative samples of the memory for use in vector similarity searching.")
         ] = None,
         timestamp: Annotated[
-            Optional[int],
+            int | None,
             Field(description="Timestamp to use for the recall. If not provided, uses the current time.")
         ] = None,
         recall_config: Annotated[
@@ -233,14 +219,10 @@ async def recall(
     and their dependencies.
     '''
     with mcp_emu(ctx) as emu:
-        if isinstance(sona, str):
-            try: sona = UUID(sona)
-            except ValueError:
-                pass
         if timestamp is None:
             timestamp = int(datetime.now().timestamp())
         return emu.repo.recall(
-            sona, prompt, timestamp, index, recall_config
+            prompt, timestamp, index, recall_config
         ).adj
 
 @mcp.tool(
@@ -251,20 +233,16 @@ async def recall(
 )
 async def query(
         ctx: Context,
-        sona: Annotated[
-            Optional[UUID|str],
-            Field(description="Sona to query memories from.")
-        ],
         prompt: Annotated[
             DraftMemory,
             Field(description="Prompt for the chat. If `null`, use only the included memories.")
         ],
         index: Annotated[
-            Optional[list[str]],
+            list[str]|None,
             Field(description="List of representative samples of the memory for use in vector similarity searching.")
         ] = None,
         timestamp: Annotated[
-            Optional[int],
+            int | None,
             Field(description="Timestamp to use for the query. If not provided, uses the current time.")
         ] = None,
         system_prompt: Annotated[
@@ -284,7 +262,7 @@ async def query(
     with mcp_emu(ctx) as emu:
         if timestamp is None:
             timestamp = int(datetime.now().timestamp())
-        g = emu.repo.recall(sona, prompt, timestamp, index, recall_config)
+        g = emu.repo.recall(prompt, timestamp, index, recall_config)
 
         refs: dict[CIDv1, int] = {}
         chatlog: list[AnyMemory] = []
@@ -324,7 +302,7 @@ async def query(
             case _:
                 raise NotImplementedError(
                     "Query response must be a TextContent, got: "
-                    f"{type(response)}: {response}"
+                    + f"{type(response)}: {response}"
                 )
         
         # TODO: empty edges?
@@ -333,28 +311,3 @@ async def query(
         # themselves for content. Don't want to spend more time right now on
         # a debug endpoint
         return [m.model_dump() for m in chatlog]
-
-@mcp.tool(
-    annotations=dict(
-        openWorldHint=False
-    )
-)
-def push(
-        ctx: Context,
-        sona: Annotated[
-            UUID|str,
-            Field(description="Sona to push the memory to.")
-        ],
-        include: Annotated[
-            list[Edge[CIDv1]],
-            Field(description="Additional memories to include in the ACT, keyed by label.")
-        ]
-    ):
-    '''
-    Insert a new memory into the sona to be processed by its next ACT
-    (Autonomous Cognitive Thread).
-    '''
-    with mcp_emu(ctx) as emu:
-        if u := emu.repo.act_push(sona, include):
-            return u
-        raise ToolError("Sona not found or prompt memory not found.")

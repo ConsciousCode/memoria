@@ -1,12 +1,17 @@
-from typing import Callable, Iterable, Iterator, Mapping, NoReturn, Optional, Protocol, Sequence
+from _typeshed import SupportsRichComparison
+from typing import Callable, NoReturn, Protocol
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import wraps
 from heapq import heappop
 import sys
+from typing_extensions import overload
 
 class JSONStructure(Protocol):
     def __json__(self) -> "json_t": ...
 
 type json_t = JSONStructure|Mapping[str, json_t]|Sequence[json_t]|str|int|float|bool|None
+
+type nonempty_tuple[T] = tuple[T, *tuple[T]]
 
 def todo_iter[C, T](fn: Callable[[C], T]):
     '''
@@ -26,8 +31,12 @@ def todo_set[T](todo: set[T]):
 def todo_list[T](todo: list[T]):
     return todo.pop(0)
 
+class RichComparison[T](Protocol):
+    def __lt__(self, other: T, /) -> bool: ...
+    def __gt__(self, other: T, /) -> bool: ...
+
 @todo_iter
-def todo_heap[T](todo: list[T]):
+def todo_heap[T: SupportsRichComparison](todo: list[T]):
     return heappop(todo)
 
 def set_pop[T](s: set[T], item: T) -> bool:
@@ -39,9 +48,15 @@ def set_pop[T](s: set[T], item: T) -> bool:
         return True
     return False
 
+@overload
+def finite(f: None, /) -> None: pass
+@overload
+def finite(f: int|float|str, /) -> float: pass
 
-def finite(f) -> float:
+def finite(f: int|float|str|None, /) -> float|None:
     '''Return a finite float, or 0.0 if the input is NaN or infinite.'''
+    if f is None:
+        return None
     f = float(f)
     if f != f or f == float('inf') or f == float('-inf'):
         return 0.0
@@ -50,13 +65,13 @@ def finite(f) -> float:
 def expected(name: str) -> NoReturn:
     raise ValueError(f"Expected a {name}.")
 
-def warn(msg):
+def warn(msg: str):
     print(f"Warning: {msg}", file=sys.stderr)
 
-def check_overflow(rest):
+def check_overflow[T](rest: Sequence[T]):
     if rest: warn("Too many arguments.")
 
-def parse_opts(arg: str) -> Iterator[tuple[str, Optional[str]]]:
+def parse_opts(arg: str) -> Iterator[tuple[str, str | None]]:
     """Parse command line options from a string."""
     if arg.startswith("--"):
         try:
@@ -74,8 +89,9 @@ def named_value(arg: str, it: Iterator[str]) -> str:
     except StopIteration:
         expected(f"value after {arg}")
 
-def argparse(argv: tuple[str, ...], config: dict[str, bool|int|type[int]|str|type[str]]):
-    which = {}
+type ap_t = bool|int|type[int]|str|type[str]
+def argparse(argv: tuple[str, ...], config: dict[str, ap_t]):
+    which = dict[str, tuple[ap_t, str]]()
     for aliases, v in config.items():
         als = aliases.split(',')
         match [a for a in als if a.startswith("--")]:
@@ -87,8 +103,8 @@ def argparse(argv: tuple[str, ...], config: dict[str, bool|int|type[int]|str|typ
             k = k.lstrip('-')
             which[k] = v, name or k
     
-    pos = []
-    opts = {
+    pos = list[str]()
+    opts: dict[str, ap_t] = {
         name: t
         for t, name in which.values()
             if isinstance(t, (bool, int, str))

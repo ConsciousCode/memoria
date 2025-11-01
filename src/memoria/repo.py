@@ -3,15 +3,14 @@ Memoria is the immutable state which can't be advanced without external
 intervention.
 '''
 
-from datetime import datetime
-from typing import Iterable, Optional, overload, override
-from uuid import UUID
+from typing import override
+from collections.abc import Iterable
 
 from cid import CIDv1, CID
 from ipfs import Blocksource
 
 from .db import DatabaseRO, FileRow
-from .memory import ACThread, AnyMemory, Edge, Memory, MemoryContext, MemoryDAG, MemoryDataAdapter, SelfData, Sona, StopReason
+from .memory import AnyMemory, Edge, Memory, MemoryContext, MemoryDAG, MemoryDataAdapter
 from .config import RecallConfig
 from .util import todo_list
 
@@ -27,20 +26,17 @@ class Repository(Blocksource):
 
     def __init__(self, db: DatabaseRO):
         super().__init__()
-        self.db = db
+        self.db: DatabaseRO = db
     
     @override
     def block_has(self, cid: CID) -> bool:
         return isinstance(cid, CIDv1) and self.db.has_cid(cid)
 
     @override
-    def block_get(self, cid: CID) -> Optional[bytes]:
+    def block_get(self, cid: CID) -> bytes | None:
         if not isinstance(cid, CIDv1):
             return None
-        data = (
-            self.lookup_memory(cid) or
-            self.lookup_act(cid)
-        )
+        data = self.lookup_memory(cid)
         return data and data.ipld_block()
     
     def register_file(self,
@@ -56,45 +52,23 @@ class Repository(Blocksource):
         This is used to register files that are uploaded to the system.
         '''
         with self.db.transaction() as db:
-            db.register_file(cid, filename, mimetype, filesize, overhead)
+            _ = db.register_file(cid, filename, mimetype, filesize, overhead)
 
-    def lookup_memory(self, cid: CID) -> Optional[Memory]:
+    def lookup_memory(self, cid: CID) -> Memory | None:
         if isinstance(cid, CIDv1):
             return self.db.select_memory_ipld(cid=cid)
-    
-    def lookup_act(self, cid: CID) -> Optional[ACThread]:
-        if isinstance(cid, CIDv1):
-            return self.db.select_act_ipld(cid=cid)
 
-    def lookup_file(self, cid: CID) -> Optional[FileRow]:
+    def lookup_file(self, cid: CID) -> FileRow | None:
         return self.db.select_file(cid=cid)
 
     def insert(self,
             memory: Memory,
-            index: Optional[list[str]] = None,
-            timestamp: Optional[int] = None
+            index: list[str] | None = None,
+            timestamp: int | None = None
         ):
         '''Append a memory to the sona file.'''
         with self.db.transaction() as db:
-            db.insert_memory(memory, index, timestamp)
-
-    @overload
-    def find_sona(self, sona: UUID) -> Optional[Sona]: ...
-    @overload
-    def find_sona(self, sona: str) -> Sona: ...
-
-    def find_sona(self, sona: UUID|str) -> Optional[Sona]:
-        with self.db.transaction() as db:
-            if row := db.find_sona(sona):
-                return Sona(
-                    uuid=UUID(bytes=row.uuid),
-                    aliases=self.db.select_sona_aliases(row.rowid),
-                    pending=self.db.get_incomplete_act(row.pending_id)
-                        if row.pending_id else None,
-                    active=self.db.get_incomplete_act(row.active_id)
-                        if row.active_id else None
-                )
-            return None
+            _ = db.insert_memory(memory, index, timestamp)
     
     def build_subgraph(self, edges: list[Edge[CIDv1]], budget: float=20) -> MemoryDAG:
         '''
@@ -212,105 +186,15 @@ class Repository(Blocksource):
                 fw.append((energy*imp, dst_id, dstcid))
         return g
 
-    def act_push(self,
-            sona: UUID|str,
-            include: list[Edge[CIDv1]]
-        ) -> Optional[UUID]:
-        '''
-        Push prompts to the sona for processing. Return the receiving
-        sona's UUID.
-        '''
-        with self.db.transaction() as db:
-            # Find or create the sona
-            if (sona_row := db.find_sona(sona)) is None:
-                # No such sona (UUID)
-                return None
-            
-            # Figure out where it's going
-            
-            if pending_thread := db.get_act_pending(sona_row.rowid):
-                # Pending thread already exists, add to its context
-                response_id = pending_thread.memory_id
-            else:
-                # No pending thread, we need to create one
-                prev_thread = ( # Previous thread to link to
-                    db.get_act_active(sona_row.rowid) or
-                    db.get_last_act(sona_row.rowid)
-                )
-
-                # Create the incomplete memory to receive the response
-                response_id = db.insert_memory(
-                    Memory(
-                        data=SelfData(parts=[]),
-                        edges=include
-                    ),
-                    timestamp=int(datetime.now().timestamp())
-                )
-
-                # Create a new pending thread
-                db.update_sona_pending(sona_row.rowid,
-                    db.insert_act(
-                        cid=None,
-                        sona_id=sona_row.rowid,
-                        memory_id=response_id,
-                        prev_id=prev_thread and prev_thread.rowid
-                    )
-                )
-            
-            db.link_memory_edges(response_id, include)
-
-            return UUID(bytes=sona_row.uuid)
-    
-    def act_next(self,
-            sona: UUID|str,
-            timestamp: int,
-            config: Optional[RecallConfig]=None
-        ) -> MemoryDAG | bool:
-        '''
-        Get the next pending thread for the sona.
-        
-        Returns False if the sona was not found, True if the sona was found but
-        there are no pending ACTs, and otherwise the memory subgraph of the
-        pending thread.
-        '''
-        with self.db.transaction() as db:
-            # Find or stage the active thread
-            if (sona_row := db.find_sona(sona)) is None:
-                return False
-            
-            if act := db.get_act_active(sona_row.rowid):
-                memory_id = act.memory_id
-            else: # No active thread, check for pending
-                if (memory_id := sona_row.pending_id) is None:
-                    return True # No threads at all
-                db.sona_stage_active(sona_row.rowid)
-            
-            # We used the incomplete memory's edges to store prompts, only now
-            #  do we actually run recall on them.
-            edges: list[Edge[CIDv1]] = []
-            for e in db.dependencies(rowid=memory_id):
-                prompt = e.target.to_partial()
-                # Don't bother with index, it should've been used for insertion
-                # before this point.
-                for row, score in db.recall(sona, prompt, None, timestamp, config):
-                    if cid := row.cid:
-                        edges.append(Edge(
-                            target=CIDv1(cid),
-                            weight=e.weight*score
-                        ))
-            
-            return self.build_subgraph(edges)
-    
     def update_invalid(self) -> bool:
         with self.db.transaction() as db:
             return db.update_invalid()
 
     def recall(self,
-            sona: Optional[UUID|str],
             prompt: AnyMemory,
             timestamp: int,
-            index: Optional[list[str]]=None,
-            config: Optional[RecallConfig]=None
+            index: list[str] | None=None,
+            config: RecallConfig | None=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
         with self.db.transaction() as db:
@@ -318,7 +202,7 @@ class Repository(Blocksource):
                 prompt.edges + [
                     Edge(target=CIDv1(row.cid), weight=score)
                         for row, score in db.recall(
-                            sona, prompt, index, timestamp, config
+                            prompt, index, timestamp, config
                         )
                 ]
             )
@@ -333,19 +217,3 @@ class Repository(Blocksource):
                 data=MemoryDataAdapter.validate_json(row.data),
                 edges=list(self.db.backward_edges(rowid=row.rowid))
             )
-    
-    def list_sonas(self,
-            page: int,
-            perpage: int
-        ) -> Iterable[Sona]:
-        '''List sonas in the database.'''
-        with self.db.transaction() as db:
-            for row in db.list_sonas(page, perpage):
-                yield Sona(
-                    uuid=UUID(bytes=row.uuid),
-                    aliases=db.select_sona_aliases(row.rowid),
-                    pending=db.get_incomplete_act(row.pending_id)
-                        if row.pending_id else None,
-                    active=db.get_incomplete_act(row.active_id)
-                        if row.active_id else None
-                )
