@@ -1,79 +1,84 @@
 type UUID bytes
 
+type TextPart struct {
+    kind string
+    content string
+}
+
+type FilePart struct {
+    kind string
+    file Link
+    filename optional string
+    mimetype string
+    filesize int
+}
+
+type ThinkPart struct {
+    kind string
+    content string
+    think_id optional string
+    signature optional string
+}
+
+type ToolPart struct {
+    kind string
+    name string
+    args {String: Any}
+    result Any
+    call_id optional string
+}
+
+type OtherPart union {
+    | TextPart "text"
+    | FilePart "file"
+} representation inline {
+    discriminantKey "kind"
+}
+
 type OtherData struct {
     kind string
     name optional string
-    content string
+    parts [OtherPart]
 }
 
-type TextData struct {
+type SelfPart union {
+    | TextPart "text"
+    | FilePart "file"
+    | ThinkPart "think"
+    | ToolPart "tool"
+} representation inline {
+    discriminantKey "kind"
+}
+
+# A self-memory
+type SelfData struct {
     kind string
-    content string
-}
-
-type FileData struct {
-    kind string
-    name optional string
-    file Link
-    mimeType optional string
-}
-
-type ProviderExport struct {
-    provider string
-    convo_id string
-    convo_title string
+    parts [SelfPart]
 }
 
 type MetaData struct {
-    export optional ProviderExport
+    kind string
+    metadata {String: Any}
+}
+
+type SystemData struct {
+    kind string
+    parts [TextPart]
 }
 
 # Contents of a memory
 type MemoryData union {
     | SelfData "self"
     | OtherData "other"
-    | TextData "text" 
-    | FileData "file"
+    | MetaData "meta"
+    | SystemData "system"
 } representation inline {
     discriminantKey "kind"
 }
 
-type Edge struct {
-    target &Memory
-    weight float
-}
-
 # Core memory structure
 type Memory struct {
+    uuid optional UUID
     data MemoryData
-    timestamp optional int
-    metadata optional Metadata
-    edges [Edge]
-}
-
-# SelfMemory compositional parts
-type Part struct {
-    content string
-    model optional string
-}
-
-# The reason a SelfMemory stopped
-type StopReason enum {
-    | endTurn
-    | stopSequence
-    | maxTokens
-}
-
-# A self-memory
-type SelfData struct {
-    kind string
-    name optional string
-    parts [Part]
-    stop_reason optional StopReason
-}
-
-type ACThread struct {
-    sona UUID
-    memory &Memory
-    prev nullable &ACThread
+    edges [&Memory]
 }

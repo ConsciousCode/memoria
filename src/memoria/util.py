@@ -1,5 +1,5 @@
 from _typeshed import SupportsRichComparison
-from typing import Callable, NoReturn, Protocol
+from typing import Callable, NoReturn, Protocol, Self, override
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import wraps
 from heapq import heappop
@@ -12,6 +12,24 @@ class JSONStructure(Protocol):
 type json_t = JSONStructure|Mapping[str, json_t]|Sequence[json_t]|str|int|float|bool|None
 
 type nonempty_tuple[T] = tuple[T, *tuple[T]]
+
+class Lexicographic(Protocol):
+    '''Protocol for lexicographical order.'''
+    def __lt__(self, other: Self, /) -> bool: ...
+
+class LeastT:
+    def __init__(self):
+        raise NotImplementedError("LeastT cannot be instantiated directly")
+    
+    def __lt__(self, other: object, /): return True
+    def __gt__(self, other: object, /): return False
+    @override
+    def __eq__(self, other: object, /): return isinstance(other, LeastT)
+    @override
+    def __repr__(self): return "Least"
+
+Least = LeastT.__new__(LeastT)
+'''A singleton representing the least element in a lexicographical order.'''
 
 def todo_iter[C, T](fn: Callable[[C], T]):
     '''

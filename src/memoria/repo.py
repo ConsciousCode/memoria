@@ -3,16 +3,16 @@ Memoria is the immutable state which can't be advanced without external
 intervention.
 '''
 
-from typing import override
+from collections import defaultdict
 from collections.abc import Iterable
+from typing import override
 
 from cid import CIDv1, CID
 from ipfs import Blocksource
 
-from .db import DatabaseRO, FileRow
-from .memory import AnyMemory, Edge, Memory, MemoryContext, MemoryDAG, MemoryDataAdapter
+from .db import DatabaseRO, MemoryRow
+from .memory import Memory, MemoryDAG, MemoryDataAdapter
 from .config import RecallConfig
-from .util import todo_list
 
 __all__ = (
     'Repository',
@@ -39,173 +39,120 @@ class Repository(Blocksource):
         data = self.lookup_memory(cid)
         return data and data.ipld_block()
     
-    def register_file(self,
-            cid: CID,
-            filename: str,
-            mimetype: str,
-            filesize: int,
-            overhead: int
-        ):
-        '''
-        Register a file in the database.
-        
-        This is used to register files that are uploaded to the system.
-        '''
-        with self.db.transaction() as db:
-            _ = db.register_file(cid, filename, mimetype, filesize, overhead)
-
     def lookup_memory(self, cid: CID) -> Memory | None:
         if isinstance(cid, CIDv1):
             return self.db.select_memory_ipld(cid=cid)
 
-    def lookup_file(self, cid: CID) -> FileRow | None:
-        return self.db.select_file(cid=cid)
-
-    def insert(self,
-            memory: Memory,
-            index: list[str] | None = None,
-            timestamp: int | None = None
-        ):
-        '''Append a memory to the sona file.'''
+    def insert(self, memory: Memory):
+        '''Append a memory to DAG.'''
         with self.db.transaction() as db:
-            _ = db.insert_memory(memory, index, timestamp)
-    
-    def build_subgraph(self, edges: list[Edge[CIDv1]], budget: float=20) -> MemoryDAG:
-        '''
-        Build a subgraph of memories.
-        
-        This is used to build a subgraph of memories that are related to the
-        initial memories. It will return a MemoryDAG containing the memories
-        and their edges.
-        '''
-        g = MemoryDAG()
-        
-        # Populate initial backward and forward edges
-        bw: list[tuple[float, int, CIDv1]] = [] # [(score, rowid, cid)]
-        fw: list[tuple[float, int, CIDv1]] = []
-        
-        for e in edges:
-            score = e.weight
-            if score <= 0:
-                break
-            
-            origcid = e.target
-            if (mr := self.db.select_memory(cid=origcid)) is None:
-                continue
-
-            g.insert(origcid, MemoryContext(
-                memory=mr.to_partial(),
-                timestamp=mr.timestamp
-            ))
-
-            energy = score*budget
-
-            b = 0
-            for edge in self.db.dependencies(rowid=mr.rowid):
-                dst, weight = edge.target, edge.weight
-                dstcid = CIDv1(dst.cid)
-                if dstcid in g:
-                    if not g.has_edge(origcid, dstcid):
-                        g.add_edge(origcid, dstcid, weight)
-                    continue
-
-                b += weight
-                if b >= energy:
-                    break
-                
-                bw.append((energy*weight, dst.rowid, CIDv1(dst.cid)))
-            
-            # TODO: Forward recall previously depended on importance
-            raise NotImplementedError
-            b = 0
-            for edge in self.db.references(rowid=mr.rowid):
-                weight, src = edge.weight, edge.target
-                if not src.cid:
-                    continue
-                dstcid = CIDv1(src.cid)
-                if dstcid in g:
-                    if not g.has_edge(dstcid, origcid):
-                        g.add_edge(dstcid, origcid, weight)
-                    continue
-
-                if not src.importance:
-                    break
-                
-                b += src.importance
-                if b >= energy:
-                    break
-                
-                fw.append((energy*src.importance, src.rowid, CIDv1(src.cid)))
-        
-        # Note: These feel so similar, maybe there's a way to reduce boilerplate?
-
-        # Search backwards for supporting memories using their edge weight
-        #  to determine how relevant they are to the current memory
-        for energy, src_id, srccid in todo_list(bw):
-            b = 0
-            for edge in self.db.dependencies(rowid=src_id):
-                dst, weight = edge.target, edge.weight
-                b += weight
-                if b >= energy:
-                    break
-                
-                dstcid = CIDv1(dst.cid)
-
-                g.insert(srccid, MemoryContext(
-                    memory=dst.to_partial(),
-                    timestamp=dst.timestamp
-                ))
-                g.add_edge(srccid, dstcid, weight)
-
-                bw.append((energy*weight, dst.rowid, dstcid))
-        
-        # Search forwards for response memories using their annotated
-        #  importance - important conclusions are more relevant.
-        # These iterate over *edges* which is why we needed to populate them
-        #  in the first place
-        for energy, dst_id, dstcid in todo_list(fw):
-            b = 0
-            for edge in self.db.references(rowid=dst_id):
-                weight, src = edge.weight, edge.target
-                # Skip incomplete memories in forward edge recall
-                if src.cid is None:
-                    continue
-                
-                if b >= energy:
-                    break
-
-                srccid = CIDv1(src.cid)
-
-                g.insert(srccid, MemoryContext(
-                    memory=src.to_partial()
-                ))
-                g.add_edge(srccid, dstcid, weight)
-
-                # TODO: Again forward recall previously depended on importance
-                raise NotImplementedError
-                fw.append((energy*imp, dst_id, dstcid))
-        return g
-
-    def update_invalid(self) -> bool:
-        with self.db.transaction() as db:
-            return db.update_invalid()
+            _ = db.insert_memory(memory)
 
     def recall(self,
-            prompt: AnyMemory,
-            timestamp: int,
-            index: list[str] | None=None,
+            roots: list[CIDv1],
             config: RecallConfig | None=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
-        with self.db.transaction() as db:
-            return self.build_subgraph(
-                prompt.edges + [
-                    Edge(target=CIDv1(row.cid), weight=score)
-                        for row, score in db.recall(
-                            prompt, index, timestamp, config
-                        )
-                ]
-            )
+        # Implements a BFS to populate the subgraph. Sweeps from the roots
+        # separately backward in time through dependencies and forward in time
+        # through references. Once the combined working sets exceed the node
+        # limit, they're sorted by refcount and then only the top are added up
+        # to the limit.
+        
+        # Normalize the config
+        config = config or RecallConfig()
+        refs_depth = config.refs or float('inf')
+        deps_depth = config.deps or float('inf')
+        memories = config.memories
+        
+        g = MemoryDAG()
+        seen = set[CIDv1](roots) # g ∪ fringe for quick lookup
+        rc = defaultdict[CIDv1, int](int) # Refcounts of fringe nodes (xor g)
+        refs = dict[CIDv1, tuple[CIDv1, MemoryRow]]() # {src: (dst, row)}
+        deps = dict[CIDv1, tuple[CIDv1, MemoryRow]]() # {dst: (src, row)}
+        refs_next = dict[CIDv1, tuple[CIDv1, MemoryRow]]()
+        deps_next = dict[CIDv1, tuple[CIDv1, MemoryRow]]()
+        
+        # Load the roots and their reference/dependency fringes
+        for mem in self.db.select_memories(roots):
+            cid = CIDv1(mem.cid)
+            g.insert(cid, mem.to_partial())
+            
+            for ref in self.db.references(rowid=mem.rowid):
+                rcid = CIDv1(ref.cid)
+                rc[rcid] += 1
+                if rcid not in seen:
+                    seen.add(rcid)
+                    refs[rcid] = cid, ref
+            
+            for dep in self.db.dependencies(rowid=mem.rowid):
+                dcid = CIDv1(dep.cid)
+                rc[dcid] += 1
+                if dcid not in seen:
+                    seen.add(dcid)
+                    deps[dcid] = cid, dep
+        
+        # Depth limit is checked at the end of the loop so we have to do it here
+        if refs_depth < 1:
+            refs.clear()
+        if deps_depth < 1:
+            deps.clear()
+        
+        depth = 0
+        
+        # Only stop if we run out or would exceed the memory limit
+        while (refs or deps) and len(seen) < memories:
+            depth += 1
+            rc.clear()
+            
+            # Unlike the roots, the fringes only advance in their
+            # respective directions. We also add edges in the graph.
+            for cid, (dst, ref) in refs.items():
+                g.insert(cid, ref.to_partial())
+                g.add_edge(cid, dst)
+                
+                for rref in self.db.references(rowid=ref.rowid):
+                    rcid = CIDv1(rref.cid)
+                    rc[rcid] += 1
+                    if rcid not in seen:
+                        seen.add(rcid)
+                        refs_next[rcid] = cid, rref
+            
+            for cid, (src, dep) in deps.items():
+                g.insert(cid, dep.to_partial())
+                g.add_edge(src, cid)
+                
+                for ddep in self.db.dependencies(rowid=dep.rowid):
+                    dcid = CIDv1(ddep.cid)
+                    rc[dcid] += 1
+                    if dcid not in seen:
+                        seen.add(dcid)
+                        deps_next[dcid] = cid, ddep
+            
+            # Swap the working sets
+            refs.clear()
+            deps.clear()
+            refs, refs_next = refs_next, refs
+            deps, deps_next = deps_next, deps
+            
+            # Check depth limits
+            if refs_depth < depth:
+                refs.clear()
+            if deps_depth < depth:
+                deps.clear()
+        
+        # Sort everything by reference count
+        rest = list[tuple[CIDv1, CIDv1, CIDv1, MemoryRow]]()
+        rest.extend(((src, src, dst, row) for src, (dst, row) in refs.items()))
+        rest.extend(((dst, src, dst, row) for dst, (src, row) in deps.items()))
+        rest.sort(key=lambda x: rc[x[0]], reverse=True)
+        
+        # Add the sorted items to the result
+        for cid, src, dst, row in rest[:memories - len(g)]:
+            g.insert(cid, row.to_partial())
+            g.add_edge(src, dst)
+        
+        return g
     
     def list_messages(self,
             page: int,
@@ -215,5 +162,5 @@ class Repository(Blocksource):
         for row in self.db.list_memories(page, perpage):
             yield Memory(
                 data=MemoryDataAdapter.validate_json(row.data),
-                edges=list(self.db.backward_edges(rowid=row.rowid))
+                edges=set(self.db.backward_edges(rowid=row.rowid))
             )

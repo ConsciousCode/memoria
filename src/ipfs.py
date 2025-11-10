@@ -4,7 +4,8 @@ Classes and functions for working with IPFS blocks and DAGs.
 
 from abc import ABC, abstractmethod
 from functools import cached_property
-from typing import IO, Callable, Iterable, Literal, Optional, override
+from typing import IO, Callable, Literal, assert_never, override
+from collections.abc import Iterable
 import os
 
 from ipld.unixfs import BigFileData, SmallFileData
@@ -30,6 +31,10 @@ class CIDResolveError(Exception):
 
 class RawBlockLink:
     """A raw codec block link with a CID and size."""
+    
+    cid: CID
+    size: int
+    
     def __init__(self, cid: CID, filesize: int):
         self.cid = cid
         self.size = filesize
@@ -39,7 +44,8 @@ class RawBlockLink:
 
 class DAGPBNode(dagpb.PBNode):
     """Enhanced PBNode with size and CID properties."""
-    size: int
+    
+    size: int = 0
 
     @cached_property
     def cid(self):
@@ -47,6 +53,9 @@ class DAGPBNode(dagpb.PBNode):
 
 class FileLeaf(DAGPBNode):
     '''Leaf of an IPFS UnixFS file.'''
+    
+    size: int
+    
     def __init__(self, data: bytes):
         super().__init__(
             Links=[],
@@ -57,6 +66,8 @@ class FileLeaf(DAGPBNode):
 class FileNode(DAGPBNode):
     '''Root of an IPFS UnixFS file, containing multiple leaves.'''
 
+    size: int
+    
     def __init__(self, nodes: Iterable[RawBlockLink|DAGPBNode]):
         size = 0
         blocksizes: list[int] = []
@@ -87,7 +98,7 @@ class Blocksource(ABC):
         pass
 
     @abstractmethod
-    def block_get(self, cid: CID) -> Optional[bytes]:
+    def block_get(self, cid: CID) -> bytes | None:
         """Retrieve a block from the IPFS DAG by its CID."""
         pass
 
@@ -101,13 +112,13 @@ class Blocksource(ABC):
             cid: CID,
             *,
             version: Literal[1, 2] = 1,
-            index: Optional[CARv2Index] = None,
+            index: CARv2Index | None = None,
             fully_indexed: bool = True
         ) -> Iterable[bytes]:
         """Export the data of a FileNode as bytes using the indicated CAR format."""
 
         # Iterate over *whole blocks* rather than just the data as in dag_cat
-        def iter_blocks(cid: CID):
+        def iter_blocks(cid: CID) -> Iterable[bytes]:
             if (block := self.block_get(cid)) is None:
                 raise CIDResolveError(cid)
             
@@ -126,12 +137,14 @@ class Blocksource(ABC):
                 fully_indexed=fully_indexed
             )
         else:
-            raise ValueError("Unsupported CAR version, must be 1 or 2")
+            raise ValueError(
+                f"Unsupported CAR version {version}, must be 1 or 2"
+            ) # pyright: ignore[reportUnreachable]
     
     def ipfs_cat(self,
             cid: CID,
             offset: int=0,
-            length: Optional[int]=None
+            length: int | None=None
         ) -> Iterable[bytes]:
         """
         Concatenate the data of a FileNode from its CID. This yields whole
@@ -196,12 +209,17 @@ class ShardLast(ShardingStrategy):
     Sharding strategy that uses the next-to-last N characters of the CID's
     representation to determine the path.
     """
+    
+    last: int
+    
     def __init__(self, last: int = 2):
         self.last = last
     
+    @override
     def name(self) -> str:
         return f"/next-to-last/{self.last}"
     
+    @override
     def shard(self, cid: CID) -> str:
         # Since Kubo v0.12 only the multihash is sharded
         # Since v0.35 base32upper is used without a multibase prefix
@@ -209,7 +227,7 @@ class ShardLast(ShardingStrategy):
         # [:-1] because next-to-last, not last (better entropy in base32)
         return f"{enc[:-1][-self.last:]}/{enc}.data"
 
-class Blockstore(Blocksource):
+class Blockstore(Blocksource, ABC):
     """Abstract base class for IPFS blockstores."""
     @abstractmethod
     def block_put(self, block: bytes, *,
@@ -268,6 +286,10 @@ class Blockstore(Blocksource):
 
 class FlatfsBlockstore(Blockstore):
     """FlatFS blockstore implementation for IPFS."""
+    
+    root: str
+    sharding: ShardingStrategy
+    
     def __init__(self, root: str, sharding: ShardingStrategy = ShardLast(2)):
         self.root = root
         self.sharding = sharding
@@ -293,11 +315,11 @@ class FlatfsBlockstore(Blockstore):
         path = self.build_path(cid)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
-            f.write(block)
+            _ = f.write(block)
         return cid
 
     @override
-    def block_get(self, cid: CID) -> Optional[bytes]:
+    def block_get(self, cid: CID) -> bytes | None:
         """Retrieve a block from the flatfs by its CID."""
         try:
             with open(self.build_path(cid), "rb") as f:
@@ -307,6 +329,9 @@ class FlatfsBlockstore(Blockstore):
 
 class CompositeBlocksource(Blocksource):
     """Block source that aggregates multiple Blocksources."""
+    
+    sources: tuple[Blocksource, ...]
+    
     def __init__(self, *sources: Blocksource):
         self.sources = sources
     
@@ -316,7 +341,7 @@ class CompositeBlocksource(Blocksource):
         return any(src.block_has(cid) for src in self.sources)
 
     @override
-    def block_get(self, cid: CID) -> Optional[bytes]:
+    def block_get(self, cid: CID) -> bytes | None:
         """Retrieve a block from the first source that has it."""
         for source in self.sources:
             if (block := source.block_get(cid)) is not None:

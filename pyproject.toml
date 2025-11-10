@@ -19,7 +19,8 @@ dependencies = [
     "sqlite-vec==0.1.6",
     "tqdm==4.67.1",
     "uvicorn==0.35.0",
-    "cachetools==5.5.2"
+    "cachetools==5.5.2",
+    "uuid-extension==0.1.0"
 ]
 
 [project.readme]

@@ -20,17 +20,18 @@ class PBNodeModel(TypedDict):
     Links: list[PBLinkModel]
     Data: bytes
 
-def _encode_pblink(link) -> PBLink:
+def _encode_pblink(link: PBLink|IPLData) -> PBLink:
     match link:
-        case dict({"Name": str(name), "Hash": hash, "Size": int(size)}):
+        case dict({"Name": str(name), "Hash": str(hash), "Size": int(size)}):
             return PBLink(
                 Name=name,
                 Hash=CID(hash).buffer,
                 Tsize=size
             )
-    raise ValueError(f"Invalid PBLink: {link}")
+        case _:
+            raise ValueError(f"Invalid PBLink: {link}")
 
-def _encode_pbnode(node) -> PBNode:
+def _encode_pbnode(node: PBNode|IPLData) -> PBNode:
     match node:
         case dict({"Links": list(links), "Data": bytes(data)}):
             if nk := node.keys() - {"Links", "Data"}:
@@ -39,7 +40,8 @@ def _encode_pbnode(node) -> PBNode:
                 Links=map(_encode_pblink, links),
                 Data=data
             )
-    raise ValueError(f"Invalid PBNode: {node}")
+        case _:
+            raise ValueError(f"Invalid PBNode: {node}")
 
 def marshal(data: PBNode|IPLData) -> bytes:
     '''Marshal DAG-PB data to bytes.'''

@@ -1,27 +1,27 @@
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 from .._common import FauxMapping
-from . import dagpb_pb2
+from .dagpb_pb2 import PBLink as RawPBLink, PBNode as RawPBNode
 
 class PBLink(FauxMapping):
     """A dag-pb link."""
-    __match_args__ = ("Hash", "Name", "Tsize")
+    __match_args__: tuple[str, ...] = ("Hash", "Name", "Tsize")
 
     def __init__(self, Hash: bytes, Name: str, Tsize: int):
-        self.Hash = Hash
-        self.Name = Name
-        self.Tsize = Tsize
+        self.Hash: bytes = Hash
+        self.Name: str = Name
+        self.Tsize: int = Tsize
 
     @classmethod
     def parse(cls, data: bytes):
-        link = dagpb_pb2.PBLink()
-        link.ParseFromString(data)
+        link = RawPBLink()
+        _ = link.ParseFromString(data)
         return cls(link.Hash, link.Name, link.Tsize)
 
 class _PBNodeLinks:
     '''Proxy class for PBNode's Links field to avoid multiple iterations.'''
-    def __init__(self, links: Iterable[dagpb_pb2.PBLink]):
-        self._links = links
+    def __init__(self, links: Iterable[RawPBLink]):
+        self._links: Iterable[RawPBLink] = links
     
     def __iter__(self):
         for link in self._links:
@@ -29,17 +29,17 @@ class _PBNodeLinks:
 
 class PBNode(FauxMapping):
     """A dag-pb node."""
-    __match_args__ = ("Data", "Links")
+    __match_args__: tuple[str, ...] = ("Data", "Links")
 
-    def __init__(self, Data: bytes, Links: Iterable[PBLink], bytesize: Optional[int]=None):
-        self.Data = Data
-        self.Links = Links
-        self.bytesize = bytesize
+    def __init__(self, Data: bytes, Links: Iterable[PBLink], bytesize: int | None=None):
+        self.Data: bytes = Data
+        self.Links: Iterable[PBLink] = Links
+        self.bytesize: int | None = bytesize
 
     @classmethod
     def unmarshal(cls, data: bytes) -> 'PBNode':
-        node = dagpb_pb2.PBNode()
-        node.ParseFromString(data)
+        node = RawPBNode()
+        _ = node.ParseFromString(data)
         return cls(node.Data, _PBNodeLinks(node.Links), len(data))
     
     def marshal(self):
@@ -52,13 +52,12 @@ class PBNode(FauxMapping):
         self.bytesize = bs
         return bs
 
-def _from_wrap(node: PBNode) -> dagpb_pb2.PBNode:
+def _from_wrap(node: PBNode) -> RawPBNode:
     """Convert a PBNode to its protobuf representation."""
-    return dagpb_pb2.PBNode(
+    return RawPBNode(
         Data=node.Data,
         Links=(
-            dagpb_pb2.PBLink(link.Hash, link.Name, link.Tsize)
+            RawPBLink(link.Hash, link.Name, link.Tsize)
                 for link in node.Links
         )
     )
-    
