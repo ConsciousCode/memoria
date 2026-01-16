@@ -1,4 +1,3 @@
-from functools import cached_property
 from heapq import heapify, heappop, heappush
 from typing import Annotated, Callable, Literal, cast, overload, override
 from collections.abc import Iterable
@@ -8,34 +7,17 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, TypeAdapter
 from pydantic_core import CoreSchema, core_schema
 
-from ipld import dagcbor, IPLData
+from ipld import IPLData
 from cid import CID, CIDv1
 
-from memoria.util import Least, Lexicographic, json_t
+from memoria.util import Least, Lexicographic, ReverseCmp, json_t, IPLDModel, IPLDRoot
 
 __all__ = (
-    'IPLDModel', 'IPLDRoot',
+    'TextPart', 'FilePart', 'ThinkPart', 'ToolPart',
+    'OtherData', 'SelfData', 'MetaData', 'SystemData',
     'BaseMemory', 'PartialMemory', 'Memory',
     'MemoryDAG'
 )
-
-class IPLDModel(BaseModel):
-    '''Base model for IPLD objects.'''
-
-    def ipld_model(self) -> IPLData:
-        '''Return the object as an IPLD model.'''
-        return self.model_dump()
-
-class IPLDRoot(IPLDModel):
-    '''Base model for IPLD objects which can get a CID.'''
-
-    def ipld_block(self) -> bytes:
-        '''Return the object as an IPLD block.'''
-        return dagcbor.marshal(self.ipld_model())
-
-    @cached_property
-    def cid(self):
-        return CIDv1.hash(self.ipld_block())
 
 class TextPart(IPLDModel):
     '''External text memory.'''
@@ -343,6 +325,12 @@ class MemoryDAG:
         '''Check if there is an edge from src to dst.'''
         return dst in self.edges(src, ())
 
+    def clear(self):
+        self.adj = {}
+    
+    def update(self, other: 'MemoryDAG'):
+        self.adj.update(other)
+
     def copy(self):
         '''Deepy copy of the graph.'''
         g = type(self)()
@@ -363,22 +351,29 @@ class MemoryDAG:
                 g.add_edge(dst, src)
         return g
 
-    def toposort(self, key: Callable[[PartialMemory], Lexicographic | None] | None=None) -> Iterable[CIDv1]:
+    def toposort(self, key: Callable[[PartialMemory], Lexicographic | None] | None=None, reverse: bool=False) -> Iterable[CIDv1]:
         '''
         Kahn's algorithm for topological sorting.
 
         :param key: Optional function to determine the lexicographical order of nodes.
+        :param reverse: Reverse the order of the sort.
         '''
 
         if key is None:
-            key = lambda v: Least
+            key = lambda _: Least
         else:
             # Replace None with Least in the key function
-            _oldkey = key
-            def _key(v: PartialMemory) -> Lexicographic:
-                ok = _oldkey(v)
+            _oldkey1 = key
+            def _key1(v: PartialMemory) -> Lexicographic:
+                ok = _oldkey1(v)
                 return Least if ok is None else ok
-            key = _key
+            key = _key1
+        
+        if reverse:
+            _oldkey2 = key
+            def _key2(v: PartialMemory) -> Lexicographic:
+                return ReverseCmp(_oldkey2(v))
+            key = _key2
         
         # Build the in-degree graph
         indeg = dict[CIDv1, _SimpleNode]()

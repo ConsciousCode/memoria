@@ -1,21 +1,44 @@
-from _typeshed import SupportsRichComparison
-from typing import Callable, NoReturn, Protocol, Self, override
-from collections.abc import Iterable, Iterator, Mapping, Sequence
-from functools import wraps
-from heapq import heappop
+from functools import cached_property
+from typing import NoReturn, Protocol, Self, override
+from collections.abc import Iterator, Mapping, Sequence
 import sys
-from typing_extensions import overload
 
-class JSONStructure(Protocol):
-    def __json__(self) -> "json_t": ...
+from pydantic import BaseModel
 
-type json_t = JSONStructure|Mapping[str, json_t]|Sequence[json_t]|str|int|float|bool|None
+from ipld import dagcbor, IPLData
+from cid import CID, CIDv1
 
-type nonempty_tuple[T] = tuple[T, *tuple[T]]
+type json_t = Mapping[str, json_t]|Sequence[json_t]|str|int|float|bool|None
+
+type nonempty_tuple[T] = tuple[T, *tuple[T, ...]]
+
+class IPLDModel(BaseModel):
+    '''Base model for IPLD objects.'''
+
+    def ipld_model(self) -> IPLData:
+        '''Return the object as an IPLD model.'''
+        return self.model_dump()
+
+class IPLDRoot(IPLDModel):
+    '''Base model for IPLD objects which can get a CID.'''
+
+    def ipld_block(self) -> bytes:
+        '''Return the object as an IPLD block.'''
+        return dagcbor.marshal(self.ipld_model())
+
+    @cached_property
+    def cid(self):
+        return CIDv1.hash(self.ipld_block())
+
+class Link[T: IPLDRoot](CID):
+    def __init__(self, cid: CID, model: type[T]):
+        self.cid = cid
+        self.model = model
 
 class Lexicographic(Protocol):
     '''Protocol for lexicographical order.'''
     def __lt__(self, other: Self, /) -> bool: ...
+    def __gt__(self, other: Self, /) -> bool: ...
 
 class LeastT:
     def __init__(self):
@@ -31,54 +54,14 @@ class LeastT:
 Least = LeastT.__new__(LeastT)
 '''A singleton representing the least element in a lexicographical order.'''
 
-def todo_iter[C, T](fn: Callable[[C], T]):
-    '''
-    Iterate over a stack, removing items as they are yielded. This can be
-    appended to during iteration.
-    '''
-    @wraps(fn)
-    def wrapper(todo: C) -> Iterable[T]:
-        while todo: yield fn(todo)
-    return wrapper
-
-@todo_iter
-def todo_set[T](todo: set[T]):
-    return todo.pop()
-
-@todo_iter
-def todo_list[T](todo: list[T]):
-    return todo.pop(0)
-
-class RichComparison[T](Protocol):
-    def __lt__(self, other: T, /) -> bool: ...
-    def __gt__(self, other: T, /) -> bool: ...
-
-@todo_iter
-def todo_heap[T: SupportsRichComparison](todo: list[T]):
-    return heappop(todo)
-
-def set_pop[T](s: set[T], item: T) -> bool:
-    '''
-    Remove an item from a set if it exists, returning True if it was present.
-    '''
-    if item in s:
-        s.remove(item)
-        return True
-    return False
-
-@overload
-def finite(f: None, /) -> None: pass
-@overload
-def finite(f: int|float|str, /) -> float: pass
-
-def finite(f: int|float|str|None, /) -> float|None:
-    '''Return a finite float, or 0.0 if the input is NaN or infinite.'''
-    if f is None:
-        return None
-    f = float(f)
-    if f != f or f == float('inf') or f == float('-inf'):
-        return 0.0
-    return f
+class ReverseCmp[T: Lexicographic]:
+    def __init__(self, wrap: T):
+        self.wrap: T = wrap
+    
+    def __lt__(self, other: Self, /) -> bool:
+        return self.wrap > other
+    def __gt__(self, other: Self, /) -> bool:
+        return self.wrap < other
 
 def expected(name: str) -> NoReturn:
     raise ValueError(f"Expected a {name}.")

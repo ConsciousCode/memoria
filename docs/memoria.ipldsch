@@ -23,7 +23,7 @@ type ThinkPart struct {
 type ToolPart struct {
     kind string
     name string
-    args {String: Any}
+    args {string: Any}
     result Any
     call_id optional string
 }

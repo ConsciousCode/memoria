@@ -1,0 +1,27 @@
+type UUID bytes
+type GITLink Link
+type Flow [Completion]
+
+type Sync struct {
+    code Link
+    triggers [&Action]
+}
+
+type Result union {
+    Any "value"
+    Any "error"
+} representation keyed
+
+type Completion struct {
+    trigger nullable &Trigger
+    flow UUID
+    concept GITLink
+    action string
+    params {string: Any}
+    result Result
+}
+
+type Trigger struct {
+    sync GITLink
+    triggers [Completion]
+}

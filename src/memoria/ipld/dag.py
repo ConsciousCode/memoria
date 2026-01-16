@@ -5,7 +5,7 @@ codec used.
 
 from typing import Iterable, Literal, overload
 import json
-import cbor2z
+import cbor2
 
 from cid import CID, BlockCodec
 

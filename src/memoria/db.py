@@ -125,11 +125,11 @@ class Database:
     @overload
     def cursor[T](self, *, return_type: type[T]) -> Cursor[T]: ...
 
-    def cursor[T](self, factory: Callable[..., T] | None=None, *, return_type: type[T] | None = None): # pyright: ignore [reportUnusedParameter]
+    def cursor[T](self, factory: Callable[..., T] | None = None, *, return_type: type[T] | None = None): # pyright: ignore [reportUnusedParameter]
         cur = self.conn.cursor()
         if factory:
             cur.row_factory = lambda cur, row: factory(**{
-                desc[0]: row[i] for i, desc in enumerate(cur.description)
+                name: row[i] for i, (name, *_) in enumerate(cur.description)
             })
         return Cursor[T](cur)
     
@@ -163,16 +163,7 @@ class DatabaseRO(Database):
     def has_cid(self, cid: CIDv1) -> bool:
         '''Check if the database has a CID.'''
         cur = self.cursor()
-        _ = cur.execute("""
-            SELECT 1 FROM memories WHERE cid = ?
-        """, (cid.buffer,))
-        if cur.fetchone():
-            return True
-        
-        _ = cur.execute("""
-            SELECT 1 FROM acthreads WHERE cid = ?
-        """, (cid.buffer,))
-
+        _ = cur.execute("SELECT 1 FROM memories WHERE cid = ?", (cid.buffer,))
         return bool(cur.fetchone())
     
     @overload
@@ -284,12 +275,23 @@ class DatabaseRO(Database):
     def list_memories(self, page: int, perpage: int) -> Iterable[MemoryRow]:
         cur = self.cursor(MemoryRow)
         return cur.execute("""
-            SELECT
-                rowid, cid, timestamp, kind, JSON(data) AS data
+            SELECT rowid, cid, timestamp, kind, JSON(data) AS data
             FROM memories
             ORDER BY rowid DESC
             LIMIT ? OFFSET ?
         """, (perpage, (page - 1) * perpage))
+    
+    def all_referenced(self, count: int|None) -> Iterable[MemoryRow]:
+        cur = self.cursor(MemoryRow)
+        return cur.execute("""
+            SELECT m.rowid AS rowid, m.cid AS cid,
+                m.uuid AS uuid, JSON(m.data) AS data
+            FROM memories m
+            LEFT JOIN edges e ON m.rowid = e.dst_id
+            GROUP BY m.rowid
+            HAVING COUNT(e.src_id) <= ?
+            ORDER BY m.uuid DESC
+        """, (count,))
 
 class DatabaseRW(DatabaseRO):
     '''Provides mutating operations for the database.'''

@@ -4,7 +4,7 @@ Classes and functions for working with IPFS blocks and DAGs.
 
 from abc import ABC, abstractmethod
 from functools import cached_property
-from typing import IO, Callable, Literal, assert_never, override
+from typing import IO, Callable, Literal, override
 from collections.abc import Iterable
 import os
 
@@ -19,7 +19,7 @@ from ipld import IPLData, unixfs
 __all__ = (
     'CIDResolveError', 'RawBlockLink', 'DAGPBNode', 'FileLeaf', 'FileNode',
     'Blocksource', 'Blockstore',
-    'FlatfsBlockstore', 'CompositeBlocksource',
+    'FlatfsBlockstore', 'KuboRPCBlockstore', 'CompositeBlocksource',
     'ShardingStrategy', 'ShardLast',
     'ChunkingStrategy', 'chunker_size'
 )
@@ -326,6 +326,112 @@ class FlatfsBlockstore(Blockstore):
                 return f.read()
         except FileNotFoundError:
             return None
+
+class KuboRPCBlockstore(Blockstore):
+    """Blockstore implementation that uses Kubo IPFS node via RPC API."""
+    
+    api_url: str
+    
+    def __init__(self, api_url: str = "http://localhost:5001"):
+        """
+        Initialize a Kubo RPC blockstore.
+        
+        Args:
+            api_url: Base URL for the Kubo RPC API (default: http://localhost:5001)
+        """
+        self.api_url = api_url.rstrip('/')
+        try:
+            import httpx
+            self._client = httpx.Client(timeout=30.0)
+        except ImportError:
+            # Fallback to requests if httpx is not available
+            import requests
+            self._client = requests.Session()
+            self._use_requests = True
+        else:
+            self._use_requests = False
+    
+    def _request(self, method: str, endpoint: str, **kwargs):
+        """Make an HTTP request to the Kubo API."""
+        url = f"{self.api_url}/api/v0{endpoint}"
+        if method == "POST":
+            resp = self._client.post(url, **kwargs)
+        else:
+            resp = self._client.get(url, **kwargs)
+        resp.raise_for_status()
+        return resp
+    
+    @override
+    def block_has(self, cid: CID) -> bool:
+        """Check if the block exists in the Kubo node."""
+        try:
+            self._request("POST", "/block/stat", params={"arg": str(cid)})
+            return True
+        except Exception:
+            return False
+    
+    @override
+    def block_get(self, cid: CID) -> bytes | None:
+        """Retrieve a block from the Kubo node."""
+        try:
+            resp = self._request("POST", "/block/get", params={"arg": str(cid)})
+            return resp.content
+        except Exception:
+            return None
+    
+    @override
+    def block_put(self, block: bytes, *,
+            cid_version: Literal[0, 1]=1,
+            codec: BlockCodec='dag-cbor',
+            function: str='sha2-256'
+        ) -> CID:
+        """Store a block in the Kubo node."""
+        # Compute the expected CID
+        expected_cid = CID(cid_version, codec, multihash(function, block))
+        
+        # Upload the block to Kubo
+        # Kubo's /block/put expects multipart/form-data with 'file' field
+        params = {
+            "format": codec,
+            "mhtype": function
+        }
+        
+        try:
+            if self._use_requests:
+                # requests library format
+                files = {"file": ("block", block, "application/octet-stream")}
+                resp = self._request("POST", "/block/put", files=files, params=params)
+            else:
+                # httpx format
+                files = {"file": block}
+                resp = self._request("POST", "/block/put", files=files, params=params)
+            
+            # Kubo returns JSON with Key field containing the CID
+            result = resp.json()
+            returned_cid_str = result.get("Key", "").strip()
+            if not returned_cid_str:
+                # Fallback: try parsing as plain text
+                returned_cid_str = resp.text.strip()
+            
+            returned_cid = CID(returned_cid_str)
+            
+            # Verify the CID matches what we expect
+            if str(returned_cid) != str(expected_cid):
+                raise ValueError(
+                    f"CID mismatch: expected {expected_cid}, got {returned_cid}"
+                )
+            
+            return returned_cid
+        except Exception as e:
+            raise RuntimeError(f"Failed to put block to Kubo: {e}") from e
+    
+    def __del__(self):
+        """Clean up the HTTP client."""
+        if hasattr(self, '_client'):
+            if self._use_requests:
+                self._client.close()
+            else:
+                self._client.close()
 
 class CompositeBlocksource(Blocksource):
     """Block source that aggregates multiple Blocksources."""
