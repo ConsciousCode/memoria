@@ -18,6 +18,8 @@ from uuid_extension import uuid7
 from aioipfs import AsyncIPFS
 import bottom
 
+from memoria.hypersync import Concept, action
+
 class Channel(BaseModel):
     name: str
     key: str | None = None
@@ -38,19 +40,21 @@ class Success(BaseModel):
 class Error(BaseModel):
     error: str
 
-class Server:
+class Server(Concept):
     '''Interpreter that connects to IRC and stores messages as memories.'''
     
-    actions: tuple[str, ...] = ('connect', 'disconnect', 'recv', 'send')
+    name = "server"
+    purpose = "Connects to IRC servers and acts like a bouncer, auto-joining channels."
+    #actions: tuple[str, ...] = ('connect', 'disconnect', 'recv', 'send')
 
     clients: dict[UUID, bottom.Client]
 
-    def __init__(self, state: dict[UUID, ServerState]):
+    def __init__(self):
         super().__init__()
-        self.state = state
         self.clients = {}
 
-    async def connect(self, *, server: UUID, host: str, port: int) -> ConnectResult | Error:
+    @action
+    async def connect(self, server: UUID, host: str, port: int) -> ConnectResult | Error:
         if (state := self.state.get(server)) is not None:
             if state.connected:
                 return ConnectResult(server=server)
@@ -69,12 +73,7 @@ class Server:
             return Error(error=e.args[0])
     
     async def disconnect(self, *, server: UUID) -> Success | Error:
-        
-
-    connect { server: UUID, url: string, port: int } => { server: UUID }
-    connect { server: UUID, url: string, port: int } => { error: string }
-    disconnect { server: UUID } => { success: true }
-    disconnect { server: UUID } => { error: string }
+        pass
 
     async def setup(self, irc: bottom.Client, state: ServerState):
         @irc.on('CLIENT_CONNECT')

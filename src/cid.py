@@ -776,23 +776,23 @@ class CIDv1(CID):
     def hash(data: bytes, *,
             version: Literal[0],
             codec: Literal['dag-pb'],
-            function: str
+            function: str='sha2-256'
         ) -> 'CIDv0': ...
     
     @overload
     @staticmethod
     def hash(data: bytes, *,
-            version: Literal[1],
+            version: Literal[1]=1,
             codec: BlockCodec,
-            function: str
+            function: str='sha2-256'
         ) -> 'CIDv1': ...
     
     @overload
     @staticmethod
     def hash(data: bytes, *,
             version: Literal[0, 1],
-            codec: BlockCodec,
-            function: str
+            codec: BlockCodec='dag-cbor',
+            function: str='sha2-256'
         ) -> 'CIDv0 | CIDv1': ...
 
     @overload

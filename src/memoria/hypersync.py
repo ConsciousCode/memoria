@@ -1,22 +1,19 @@
-from abc import ABC, abstractmethod
 import asyncio
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Sequence, MutableMapping
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from typing import Annotated, AsyncIterable, Callable, ChainMap, ClassVar, Mapping, Protocol, TypedDict, cast, get_type_hints, override
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import KW_ONLY, dataclass, field
+from functools import cached_property
+import inspect
+from typing import AsyncIterable, Awaitable, Callable, ClassVar, Mapping, Self, override
 import itertools
+from uuid import UUID
 
-from pydantic import BaseModel, Field, TypeAdapter
 from uuid_extension import UUID7
 
-from cid import CID
-from memoria.util import IPLDModel, IPLDRoot, json_t
+from cid import CID, CIDv1
+from ipld import dagcbor
 
-type value_t = (
-    None | bool | int | float | str | bytes | CID |
-    Sequence[value_t] | MutableMapping[str, value_t]
-)
+from .util import IPLDRoot
 
 @dataclass
 class Var:
@@ -25,20 +22,37 @@ class Var:
     def __str__(self):
         return f"?{self.name}"
 
-type bind_t = (
-    None | bool | int | float | str | bytes | CID |
-    Sequence[bind_t] | MutableMapping[str | Var, bind_t] | Var
+type simple_t = (
+    None | bool | int | float | str | bytes | CID
 )
+type composite_t[K, V] = simple_t | Sequence[V] | Mapping[K, V]
+type var_t[K] = composite_t[K, var_t[K]] | Var
 
-type Pattern = MutableMapping[str | Var, bind_t]
-type Template = MutableMapping[str | Var, bind_t]
-type Bindings = MutableMapping[str, value_t]
+type value_t = composite_t[str, value_t]
+type bind_t = var_t[str]
+type multibind_t = var_t[str | Var]
 
-def dump_pattern(x: Pattern | Template | Bindings):
-    return {
-        str(k): ({"?": v.name} if isinstance(v, Var) else v)
-            for k, v in x.items()
-    }
+type Pattern = Mapping[str, bind_t]
+type Multipattern = Mapping[str | Var, multibind_t]
+type Template = Mapping[str | Var, multibind_t]
+type Bindings = Mapping[str, value_t]
+
+def dump_pattern[K: str | Var](x: var_t[K]):
+    match x:
+        case dict():
+            return {
+                str(k): dump_pattern(v)
+                    for k, v in x.items()
+            }
+        
+        case list():
+            return list(map(dump_pattern, x))
+        
+        case Var(name):
+            return {"?": name}
+        
+        case _:
+            return x
 
 def mutable_hash(value: value_t):
     '''Hash mutable values to quickly check for identity.'''
@@ -78,6 +92,8 @@ class NoSuchAction(LookupError, HyperSyncError):
     '''Attempted to invoke a nonexistent action.'''
 class NoSuchConcept(LookupError, HyperSyncError):
     '''Attempted to reference a nonexistent concept.'''
+class InvokeEvent(HyperSyncError):
+    '''Attempted to invoke an event.'''
 
 class UnloadedConcept(NoSuchConcept):
     '''
@@ -85,258 +101,240 @@ class UnloadedConcept(NoSuchConcept):
     unloaded.
     '''
 
-@dataclass(frozen=True)
-class ConceptId:
-    '''An identifier for a concept.'''
-    module: str
-    concept: str
-
-    @classmethod
-    def parse(cls, s: str):
-        m, c = s.split('.', 1)
-        return cls(m, c)
-    
-    def __str__(self):
-        return f"{self.module}.{self.concept}"
-    
-    def ipld_model(self):
-        return {
-            "module": self.module,
-            "concept": self.concept
-        }
-
-@dataclass(frozen=True)
-class ActionId:
-    '''An identifier for an action.'''
-    module: str
-    concept: str
-    action: str
-
-    @property
-    def concept_id(self):
-        return ConceptId(module=self.module, concept=self.concept)
-
-    @classmethod
-    def parse(cls, s: str):
-        mc, a = s.split('/', 1)
-        m, c = mc.split('.', 1)
-        return cls(m, c, a)
-    
-    def __str__(self):
-        return f"{self.module}.{self.concept}/{self.action}"
-    
-    def ipld_model(self):
-        return {
-            "module": self.module,
-            "concept": self.concept,
-            "action": self.action
-        }
-
-@dataclass(frozen=True)
-class LocalActionId:
-    '''An action reference local to a module.'''
-    concept: str
-    action: str
-
-    @classmethod
-    def parse(cls, s: str):
-        c, a = s.split('/', 1)
-        return cls(c, a)
-    
-    def __str__(self):
-        return f"{self.concept}/{self.action}"
-    
-    def qualify(self, module: str):
-        return ActionId(module, self.concept, self.action)
+type ConceptId = str
+type ActionId = str
 
 '''
-Not implemented for match_pattern/state:
-- Key-bound variables eg {?a: ...}
+Not implemented for match_multi/state:
 - EAV-style attribute multivalues
 
 I found these difficult to implement procedurally. The best way to think about it
-is probably as a chain of monads. It already implements this using Optional/Maybe
+is probably as a chain of monads.
 '''
+
+def concat[T](vss: Iterable[Iterable[T]]) -> list[T]:
+    return [v for vs in vss for v in vs]
+
+def match_subpattern[K: str | Var, V: multibind_t](
+        k: K,
+        p: V,
+        pattern: Mapping[K, V],
+        data: Bindings,
+        bs: Bindings
+    ) -> Iterator[Bindings]:
+    match k:
+        case str():
+            if k in data:
+                yield from match_multi(p, data[k], bs)
+        
+        case Var(kn):
+            if kn in bs:
+                # Variable key
+                vk = bs[kn]
+                # Ideas:
+                # - k could be a list allowing multiple matches
+                # - k could be an int and data a list (probably illegible)
+                if isinstance(vk, str) and vk in data:
+                    yield from match_multi(p, data[vk], bs)
+            else:
+                # Key-bound variable binds to all keys not in the pattern
+                for dk, dv in data.items():
+                    if dk in pattern:
+                        continue
+                    yield from match_multi(p, dv, {**bs, kn: dk})
+
+def match_multi(
+        pattern: multibind_t,
+        data: value_t,
+        bindings: Bindings
+    ) -> Iterator[Bindings]:
+    '''Attempt to match a pattern to data. Yields all possible bindings.'''
+
+    match pattern:
+        # Variable binding
+        case Var(name):
+            if name in bindings:
+                if data == bindings[name]:
+                    yield bindings
+            else:
+                yield {**bindings, name: data}
+        
+        # Deconstruction
+        case dict():
+            # {} matches anything, need this for typing
+            if not isinstance(data, dict):
+                if not pattern:
+                    yield bindings
+                return
+
+            # For each candidate binding, expand it with submatches and iterate
+            # over the whole pattern.
+            bss = [bindings]
+            for k, p in pattern.items():
+                if not (bss := concat(match_subpattern(k, p, pattern, data, bs) for bs in bss)):
+                    break
+            
+            yield from bss
+        
+        # Sequence match
+        case list():
+            if not isinstance(data, list) or len(pattern) != len(data):
+                return
+            
+            bss = [bindings]
+            for p, d in zip(pattern, data):
+                if not (bss := concat(match_multi(p, d, bs) for bs in bss)):
+                    break
+            
+            yield from bss
+        
+        # Literal match
+        case _ if pattern == data:
+            yield bindings
+
+def match_state(
+        pattern: dict[Var, Multipattern],
+        state: dict[str, Bindings],
+        bindings: Bindings
+    ) -> Iterator[Bindings]:
+    '''Matches a concept's state, always {UUID: {attr: value}}.'''
+    
+    # Currently overkill but this will allow future EAV multivalues
+    bss = [bindings]
+
+    for var, p in pattern.items():
+        if (ent := state.get(var.name)) is None:
+            break
+        
+        if not (bss := concat(match_multi(p, ent, bs) for bs in bss)):
+            break
+    else:
+        yield from bss
 
 def match_pattern(
         pattern: bind_t,
         data: value_t,
         bindings: Bindings
     ) -> Bindings | None:
-    '''Attempt to match a pattern to data.'''
-    
-    bss = ChainMap({}, bindings)
+    '''
+    Match a simple binary pattern, as in the [when] clause. Return the
+    bindings on match, else None. This intentionally does not support key-bound
+    variables.
+    '''
 
     match pattern:
         # Variable binding
-        case Var(name):
+        case Var(name=name):
             if name in bindings:
-                if data != bindings[name]:
-                    return None
+                if data == bindings[name]:
+                    return bindings
             else:
-                bss[name] = data
+                return {**bindings, name: data}
         
         # Deconstruction
-        case dict() if isinstance(data, dict):
+        case dict():
+            # {} matches anything, need this for typing
+            if not isinstance(data, dict):
+                if not pattern:
+                    return bindings
+                return
+
             for k, p in pattern.items():
-                if isinstance(k, Var):
-                    if k.name in bss:
-                        k = bss[k.name]
-                        if not isinstance(k, str):
-                            # Only string keys are allowed
-                            return None
-                    else:
-                        raise NotImplementedError("Key-bound variables")
-                
                 if k not in data:
-                    # Key must exist to match
-                    break
-                
-                d = data[k]
-                if (bs := match_pattern(p, d, bss)) is None:
-                    return None
-                
-                bss.update(bs)
-        
-        # Non-empty dict doesn't match non-dict
-        case dict() if pattern:
-            return None
+                    return
+                if (bs := match_pattern(p, data[k], bindings)) is None:
+                    return
+                bindings = bs
+            
+            return bindings
         
         # Sequence match
         case list():
             if not isinstance(data, list) or len(pattern) != len(data):
-                return None
+                return
             
             for p, d in zip(pattern, data):
-                if (bs := match_pattern(p, d, bss)) is None:
-                    return None
-                
-                bss.update(bs)
+                if (bs := match_pattern(p, d, bindings)) is None:
+                    return
+                bindings = bs
+            return bindings
         
         # Literal match
-        case _ if pattern != data:
-            return None
-    
-    return bss.maps[0]
+        case _ if pattern == data:
+            return bindings
 
-def match_state(
-        pattern: dict[Var, Pattern],
-        state: dict[str, Bindings],
-        bindings: Bindings
-    ) -> Bindings | None:
-    '''Matches a concept's state, always {UUID: {attr: value}}.'''
-    
-    bss = ChainMap({}, bindings)
-
-    for var, pat in pattern.items():
-        if (ent := state.get(var.name)) is None:
-            return None
-        
-        if (bs := match_pattern(pat, ent, bss)) is None:
-            return None
-        
-        bss.update(bs)
-    
-    return bss.maps[0]
-
-class When(IPLDModel):
+@dataclass(frozen=True)
+class When:
     '''
     [When] clause of a sync. Determines a set of actions to match against and
     provides variable binding.
     '''
     
-    which: ActionId
+    action: ActionId
     '''The action to match against.'''
     params: Pattern
     '''Parameter bindings.'''
     result: Pattern
     '''Result bindings.'''
 
-    def __init__(self, which: str, params: Pattern, result: Pattern):
-        super().__init__(
-            which=ActionId.parse(which),
-            params=params,
-            result=result
-        )
-
-    def __str__(self):
-        return f"{self.which}: {self.params} => {self.result}"
-    
     def ipld_model(self):
         return {
-            "which": self.which.ipld_model(),
+            "action": self.action,
             "params": dump_pattern(self.params),
             "result": dump_pattern(self.result)
         }
-
+    
     def match(self,
             completion: 'Completion',
             bindings: Bindings
         ) -> Bindings | None:
         '''Attempt to match a completion with bindings, None on failure.'''
 
-        bss = ChainMap({}, bindings)
-
-        if self.which != completion.which:
-            return None
+        if self.action != completion.action:
+            return
         
-        if (bs := match_pattern(self.params, completion.params, bss)) is None:
-            return None
-        
-        bss.update(bs)
+        if (bs := match_pattern(self.params, completion.params, bindings)) is None:
+            return
+        bindings = bs
         
         if self.result:
-            if (bs := match_pattern(self.result, completion.result, bss)) is None:
-                return None
-            
-            bss.update(bs)
+            if (bs := match_pattern(self.result, completion.result, bindings)) is None:
+                return
+            bindings = bs
         
-        return bss.maps[0]
+        return bindings
 
-class Query(IPLDModel):
+@dataclass(frozen=True)
+class Query:
     '''Query over a concept's state.'''
 
-    which: ConceptId
+    concept: ConceptId
     '''Name of the concept being queried.'''
-    pattern: dict[Var, Pattern]
+    pattern: dict[Var, Multipattern]
     '''Pattern used to query the concept's state.'''
 
-    def __init__(self, which: str, pattern: dict[Var, Pattern]):
-        super().__init__(
-            which=ConceptId.parse(which),
-            pattern=pattern
-        )
-
-    def __str__(self):
-        return f"{self.which}: {self.pattern}"
-    
     def ipld_model(self):
         return {
-            "kind": "query",
-            "which": self.which.ipld_model(),
-            "pattern": dump_pattern(cast(Pattern, self.pattern))
+            "concept": self.concept,
+            "pattern": {
+                str(k): dump_pattern(v)
+                    for k, v in self.pattern.items()
+            }
         }
 
-class Call(IPLDModel):
+@dataclass(frozen=True)
+class Call:
     '''Pure function invocation within a [where] clause.'''
 
     name: str
     '''Name of the function used to look it up in the global library.'''
     params: Template
     '''Parameters passed to the function.'''
-    result: Pattern
+    result: Multipattern
     '''Pattern match over the result to retrieve new bindings.'''
 
-    def __str__(self):
-        params = ', '.join(
-            f"{name}={value if isinstance(value, Var) else repr(value)}"
-                for name, value in self.params.items()
-        )
-        return f"{self.name}({params}) => {self.result}"
-    
     def ipld_model(self):
         return {
-            "kind": "call",
             "name": self.name,
             "params": dump_pattern(self.params),
             "result": dump_pattern(self.result)
@@ -344,65 +342,71 @@ class Call(IPLDModel):
 
 type Where = Query | Call
 
-class Then(IPLDModel):
+@dataclass(frozen=True)
+class Then:
     '''
     [Then] clause of a sync specifying which action to invoke with the sync's
     bindings.
     '''
 
-    which: ActionId
+    action: ActionId
     '''Action to invoke.'''
     params: Template
     '''The parameters to invoke the action.'''
 
-    def __init__(self, which: str, params: Template):
-        super().__init__(
-            which=ActionId.parse(which),
-            params=params
-        )
-    
     def ipld_model(self):
         return {
-            "which": self.which.ipld_model(),
+            "action": self.action,
             "params": dump_pattern(self.params)
         }
 
-class Signature(TypedDict):
-    '''Signature of an action or function.'''
-
-    params: dict[str, json_t]
-    '''Json schema for the parameters to pass to an invocation.'''
-    result: dict[str, json_t]
-    '''Json schema for the result of invocation.'''
-
-def action[**P](name: Callable[P, Mapping[str, value_t]] | str):
-    def inner(func: Callable[P, Mapping[str, value_t]]) -> Callable[P, Mapping[str, value_t]]:
+def action[**P](name: Callable[P, Awaitable[Mapping[str, value_t]]] | str):
+    def inner(func: Callable[P, Awaitable[Mapping[str, value_t]]]):
         func._action_name = name # pyright: ignore [reportFunctionMemberAccess]
         return func
     
     if isinstance(name, str):
         return inner
-    name._action_name = name.__name__  # pyright: ignore [reportFunctionMemberAccess]
-    return name
+    
+    func, name = name, name.__name__
+    return inner(func)
+
+def event[**P](name: Callable[P, Awaitable[None]] | str):
+    def inner(func: Callable[P, Awaitable[None]]):
+        func._event_name = name # pyright: ignore [reportFunctionMemberAccess]
+        return func
+    
+    if isinstance(name, str):
+        return inner
+    
+    func, name = name, name.__name__
+    return inner(func)
 
 class ConceptMeta(type):
+    '''Aggregates actions and events from decorators.'''
+
     @override
     def __new__(cls, name: str, bases: tuple, dct: dict):
-        def schema(f: Callable):
-            hints = get_type_hints(f)
-            input = TypedDict("input", {
-                k: v for k, v in hints.items() if k != "return" # pyright: ignore [reportGeneralTypeIssues]
-            })
-            output = hints.get('return')
-            return {
-                "name": name,
-                "input": TypeAdapter(input).json_schema(),
-                "output": TypeAdapter(output).json_schema()
-            }
-        dct['actions'] = {
-            n: schema(v) for v in dct.values()
-                if (n := getattr(v, "_action_name", None))
-        }
+        dct['actions'] = actions = {}
+        dct['events'] = events = {}
+        for k, v in dct.items():
+            if (n := getattr(v, "_action_name", None)):
+                actions[n] = k
+            if (n := getattr(v, "_event_name", None)):
+                events[n] = k
+        
+        if (source := dct.get('source')) is None:
+            try:
+                fn = inspect.getfile(cls)
+                with open(fn, "r") as f:
+                    source = f.read()
+                dct['source'] = source
+            except FileNotFoundError:
+                pass
+        
+        if source is not None and 'cid' not in dct:
+            dct['cid'] = CIDv1.hash(source.encode('utf-8'), codec='raw')
+        
         return super().__new__(cls, name, bases, dct)
 
 class Concept(metaclass=ConceptMeta):
@@ -412,26 +416,40 @@ class Concept(metaclass=ConceptMeta):
     '''
     CID tied to the behavior of the concept and its actions to act as a
     resolvable versioning system. This can be anything but should change
-    anytime the behavior changes, so by default consider eg git-raw blobs.
+    anytime the behavior changes. For now, ConceptMeta uses dag-raw on
+    the file a concept is defined within.
     '''
+    source: str
+    '''The source code which created the CID.'''
+    actions: ClassVar[dict[str, str]]
+    '''Specifications of each action available on the object.'''
+    events: ClassVar[dict[str, str]]
+    '''Specifications of each event available on the object.'''
+
     name: ClassVar[str]
     '''The concept's name.'''
     purpose: ClassVar[str]
     '''What value does this concept add?'''
-    actions: ClassVar[dict[str, Signature]]
-    '''Specifications of each action available on the object.'''
 
     state: dict[str, Bindings]
     '''
     The concept's public, queryable state. This must be in-depth enough to
     recover any private state. {UUID: {attr: [value]}}
     '''
+    
+    async def __aenter__(self) -> Self:
+        return self
+    
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
 
-    def __init__(self, state: dict[str, Bindings]):
-        super().__init__()
+    async def bootstrap(self, state: dict[str, Bindings]) -> AsyncIterable[tuple[ActionId, Bindings, Bindings]]:
         self.state = state
+        return
+        yield
 
-class Sync(IPLDRoot):
+@dataclass(frozen=True)
+class Sync:
     '''
     A synchronization which coordinates concepts by pattern-matching over
     actions within a flow and invokes new actions.
@@ -441,22 +459,16 @@ class Sync(IPLDRoot):
     '''A readable name for debug; not globally unique.'''
     purpose: str
     '''What does the sync do?'''
-    when: list[When]
+
+    _: KW_ONLY
+
+    when: list[When] = field(default_factory=list)
     '''When clauses, determining when and what it should match.'''
-    where: list[Where]
+    where: list[Where] = field(default_factory=list)
     '''Where clause, refine bindings to zero or more binding sets.'''
-    then: list[Then]
+    then: list[Then] = field(default_factory=list)
     '''Then clause, lists actions to invoke with their parameters.'''
 
-    def __init__(self, name: str, purpose: str, *, when: list[When] | None = None, where: list[Where] | None = None, then: list[Then] | None = None):
-        super().__init__(
-            name=name,
-            purpose=purpose,
-            when=[] if when is None else when,
-            where=[] if where is None else where,
-            then=[] if then is None else then
-        )
-    
     def ipld_model(self):
         return {
             "name": self.name,
@@ -465,48 +477,29 @@ class Sync(IPLDRoot):
             "where": [where.ipld_model() for where in self.where],
             "then": [then.ipld_model() for then in self.then]
         }
-
-class Module(IPLDRoot):
-    name: str
-    '''Name of the module.'''
-    concepts: dict[ConceptId, type[Concept]]
-    '''List of concepts in the module.'''
-    syncs: dict[str, Sync]
-    '''List of syncs in the module.'''
-
-    def __init__(self, name: str, concepts: list[type[Concept]], syncs: list[Sync]):
-        super().__init__(
-            name=name,
-            concepts={ConceptId(name, c.name): c for c in concepts},
-            syncs={s.name: s for s in syncs}
-        )
-
-    async def bootstrap(self) -> AsyncIterable[tuple[str, Bindings, Bindings]]:
-        '''Bootstrap entry of a module which yields completions.'''
-        if False:
-            yield
     
-    def ipld_model(self):
-        return {
-            "name": self.name,
-            "concepts": {k: v.cid for k, v in self.concepts.items()},
-            "syncs": {k: v.cid for k, v in self.syncs.items()}
-        }
+    def ipld_block(self) -> bytes:
+        '''Return the object as an IPLD block.'''
+        return dagcbor.marshal(self.ipld_model())
+    
+    @cached_property
+    def cid(self):
+        return CIDv1.hash(self.ipld_block())
 
 class Trigger(IPLDRoot):
     '''Record of a sync which was triggered and why.'''
     
-    flow: 'Flow'
+    flow: UUID
     '''Flow the trigger occurs within.'''
-    sync: 'Sync'
+    sync: CID
     '''Sync initiated by the trigger.'''
     completions: dict[CID, 'Completion']
     '''Completions which caused the trigger.'''
 
     def ipld_model(self):
         return {
-            "flow": self.flow.cid,
-            "sync": self.sync.cid,
+            "flow": str(self.flow),
+            "sync": self.sync,
             "completions": list(sorted(self.completions))
         }
 
@@ -515,9 +508,9 @@ class Completion(IPLDRoot):
 
     trigger: Trigger | None
     '''The trigger for the completion. None for bootstrap actions.'''
-    flow: 'Flow'
+    flow: UUID
     '''Flow the completion occurred within.'''
-    which: ActionId
+    action: ActionId
     '''The name of the action being completed.'''
     params: Bindings
     '''Params passed to the action.'''
@@ -529,46 +522,38 @@ class Completion(IPLDRoot):
     def ipld_model(self):
         return {
             "trigger": None if self.trigger is None else self.trigger.cid,
-            "flow": self.flow.cid,
-            "which": self.which.ipld_model(),
+            "flow": str(self.flow),
+            "action": self.action,
             "params": self.params,
             "result": self.result,
             "state": self.state
         }
 
-class Flow(IPLDRoot):
+class Flow:
     '''State for tracking the processing of a flow.'''
 
-    uuid: str
+    uuid: UUID
     '''Flow's UUID.'''
     completions: dict[CID, Completion]
     '''All completions in the flow.'''
     triggers: dict[CID, Trigger]
     '''All triggers in the flow.'''
-    matches: defaultdict[CID, Annotated[defaultdict[int, set[CID]], Field(default_factory=defaultdict)]]
+    matches: defaultdict[CID, defaultdict[int, set[CID]]]
     '''Mapping between syncs and the completions available for matching.'''
 
     def __init__(self):
-        super().__init__(
-            uuid=str(UUID7().uuid7),
-            completions={},
-            triggers={},
-            matches=defaultdict(lambda: defaultdict(set))
-        )
-    
-    def ipld_model(self):
-        return {
-            "uuid": self.uuid,
-            "completions": list(sorted(self.completions)),
-            "triggers": list(sorted(self.triggers))
-        }
+        super().__init__()
+        self.uuid = UUID7().uuid7
+        self.completions = {}
+        self.triggers = {}
+        self.matches = defaultdict(lambda: defaultdict(set))
 
 @dataclass
 class ConceptEntry:
-    '''The engine's model of the concept.'''
-
     concept: Concept
     '''The concept itself.'''
+    bootstrap: asyncio.Task | None = None
+    '''The task for processing bootstrap events.'''
 
 async def queue_consumer[T](q: asyncio.Queue[T]):
     '''
@@ -580,76 +565,69 @@ async def queue_consumer[T](q: asyncio.Queue[T]):
         while not q.empty():
             yield q.get_nowait()
 
-@dataclass
-class ModuleEntry:
-    module: Module
-    '''The actual module.'''
-    bootstrap: asyncio.Task | None
-    '''Task which processes bootstrap actions. None if this closed.'''
-
 class Engine:
-    modules: dict[str, ModuleEntry]
-    '''Modules loaded by the engine.'''
     concepts: dict[ConceptId, ConceptEntry]
     '''All loaded concepts.'''
     syncs: dict[CID, Sync]
     '''All loaded syncs.'''
-    syncdeps: defaultdict[ActionId, dict[CID, Sync]]
+    syncdeps: defaultdict[ActionId, list[Sync]]
     '''An index of syncs by their action dependencies.'''
     funcs: dict[str, Callable]
     '''Functions loaded by the engine.'''
-    flows: dict[str, Flow]
+    flows: dict[UUID, Flow]
     '''Flows being processed.'''
     queue: asyncio.Queue[Completion]
     '''Queue of completions which have not yet been processed.'''
     tg: asyncio.TaskGroup
     '''Group of all running bootstrap tasks.'''
+    state: dict[str, dict[str, Bindings]]
+    '''App state loaded by the engine.'''
 
-    def __init__(self):
+    def __init__(self,
+            state: dict[str, dict[str, Bindings]],
+            concepts: list[Concept],
+            syncs: list[Sync]
+        ):
         super().__init__()
-        self.modules = {}
-        self.concepts = {}
+        self.concepts = {c.name: ConceptEntry(c) for c in concepts}
         self.syncs = {}
-        self.syncdeps = defaultdict(dict)
+        self.syncdeps = defaultdict(list)
         self.funcs = {}
         self.flows = {}
         self.queue = asyncio.Queue()
         self.tg = asyncio.TaskGroup()
+        self.state = state
 
-    async def _process_bootstrap(self, name: str):
-        entry = self.modules[name]
-        async for act, inp, out in entry.module.bootstrap():
-            which = LocalActionId.parse(act).qualify(name)
-            await self.queue.put(Completion(
-                trigger=None,
-                flow=self.new_flow(),
-                which=which,
-                params=inp,
-                result=out,
-                state=self.concepts[which.concept_id].concept.state
-            ))
-        
-        entry.bootstrap = None
+        for sync in syncs:
+            self.load_sync(sync)
+
+    async def _concept_bootstrap(self, ent: ConceptEntry):
+        '''Run a concept's bootstrap task which yields completions.'''
+
+        async with ent.concept as c:
+            async for act, inp, out in c.bootstrap(self.state.get(c.name, {})):
+                await self.queue.put(Completion(
+                    trigger=None,
+                    flow=self.new_flow().uuid,
+                    action=act,
+                    params=inp,
+                    result=out,
+                    state=c.state
+                ))
+        ent.bootstrap = None
+
+    def load_concept(self, concept: Concept):
+        '''Load a new concept.'''
+
+        self.concepts[concept.name] = ent = ConceptEntry(concept)
+        ent.bootstrap = self.tg.create_task(self._concept_bootstrap(ent))
     
-    def load_state(self, concept: ConceptId):
-        return {}
+    def load_sync(self, sync: Sync):
+        '''Load a new sync.'''
 
-    def load(self, module: Module):
-        '''Load a new module.'''
-        mn = module.name
-        self.modules[mn] = ModuleEntry(
-            module, self.tg.create_task(self._process_bootstrap(mn))
-        )
-        
-        for id, concept in module.concepts.items():
-            self.concepts[id] = ConceptEntry(
-                concept(self.load_state(id))
-            )
-        
-        for sync in module.syncs.values():
-            self.syncs[sync.cid] = sync
-            for when in sync.when:
-                self.syncdeps[when.which][sync.cid] = sync
+        self.syncs[sync.cid] = sync
+        for act in set(when.action for when in sync.when):
+            self.syncdeps[act].append(sync)
 
     def new_flow(self):
         flow = Flow()
@@ -657,31 +635,32 @@ class Engine:
         return flow
 
     async def invoke(self,
+            trigger: Trigger | None,
             flow: Flow,
             action: ActionId,
             **params: value_t
         ):
         '''Invoke an action and return its result.'''
         try:
-            if ce := self.concepts.get(action.concept_id):
-                c = ce.concept
-                if action.action not in c.actions:
-                    raise NoSuchAction(action)
-                
-                if a := getattr(c, action.action, None):
-                    result = a(**params)
+            c, a = action.rsplit('/', 1)
+            if ce := self.concepts.get(c):
+                con = ce.concept
+                if act := con.actions.get(a):
+                    result = await getattr(con, act)(**params)
+                elif a in con.events:
+                    raise InvokeEvent(action)
                 else:
                     raise NoSuchAction(action)
             else:
-                raise NoSuchConcept(action.concept)
+                raise NoSuchConcept(c)
             
             await self.queue.put(Completion(
-                trigger=None,
-                flow=flow,
-                which=action,
+                trigger=trigger,
+                flow=flow.uuid,
+                action=action,
                 params=params,
                 result=result,
-                state=c.state
+                state=con.state
             ))
             return result
         except Exception as err:
@@ -689,13 +668,11 @@ class Engine:
             raise
 
     async def bootstrap(self,
-            action: str,
+            action: ActionId,
             **params: value_t
         ) -> Bindings:
         '''Invoke an action ex nihilo.'''
-        return await self.invoke(
-            self.new_flow(), ActionId.parse(action), **params
-        )
+        return await self.invoke(None, self.new_flow(), action, **params)
     
     async def trigger(self,
             flow: Flow,
@@ -710,12 +687,16 @@ class Engine:
 
         # [when]
 
+        completions = dict[CID, Completion]()
+
         for candi, when in zip(candidate, sync.when):
-            if (bs := when.match(flow.completions[candi], bindings)) is None:
+            comp = flow.completions[candi]
+            if (bs := when.match(comp, bindings)) is None:
                 # Match failed
                 return False
             
             bindings.update(bs)
+            completions[candi] = comp
         
         # [where]
 
@@ -727,7 +708,7 @@ class Engine:
             for base in bss:
                 match where:
                     # Query concept state
-                    case Query(which=concept, pattern=pattern):
+                    case Query(concept=concept, pattern=pattern):
                         c = self.concepts[concept].concept
                         bs = {**base.value}
                         if not match_state(pattern, c.state, bs):
@@ -744,22 +725,31 @@ class Engine:
         
         # [then]
 
+        trigger = Trigger(
+            flow=flow.uuid,
+            sync=sync.cid,
+            completions=completions
+        )
+
         for bs in bss:
             for then in sync.then:
-                await self.invoke(flow, then.which, **bs.value)
+                # Completion already registered, we don't need the result
+                await self.invoke(trigger, flow, then.action, **bs.value)
         
         return True
 
-    @asynccontextmanager
     async def run(self):
         '''Start the engine to process flows.'''
+        
         async with self.tg:
-            yield
+            for ent in self.concepts.values():
+                ent.bootstrap = self.tg.create_task(self._concept_bootstrap(ent))
+            
             async for cmp in queue_consumer(self.queue):
-                flow = cmp.flow
+                flow = self.flows[cmp.flow]
                 flow.completions[cmp.cid] = cmp
                 # Check all syncs dependent on this action
-                for dep in self.syncdeps[cmp.which].values():
+                for dep in self.syncdeps[cmp.action]:
                     # Find candidate matches
                     ms = flow.matches[dep.cid]
                     for i, when in enumerate(dep.when):
