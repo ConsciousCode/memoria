@@ -161,10 +161,11 @@ class Server(Concept):
         self.last_message = msg_cid
         self.pending_updates.append(m)
     
-    async def bootstrap(self):
+    async def bootstrap(self, state):
         '''Main event loop for processing IRC messages.'''
 
-        for uid, state in self.state.items():
+        self.state = state
+        for uid, state in state.items():
             irc = bottom.Client(state['host'], state['port'])
 
             await self.setup(irc)

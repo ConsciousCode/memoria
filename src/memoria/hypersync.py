@@ -4,8 +4,9 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from functools import cached_property
 import inspect
-from typing import AsyncIterable, Awaitable, Callable, ClassVar, Mapping, Self, override
+from typing import AsyncIterable, Awaitable, Callable, ClassVar, Mapping, MutableMapping, MutableSequence, Self, cast, overload, override
 import itertools
+import traceback
 from uuid import UUID
 
 from uuid_extension import UUID7
@@ -22,16 +23,16 @@ class Var:
     def __str__(self):
         return f"?{self.name}"
 
-type simple_t = (
-    None | bool | int | float | str | bytes | CID
-)
+type simple_t = None | bool | int | float | str | bytes | CID
 type composite_t[K, V] = simple_t | Sequence[V] | Mapping[K, V]
 type var_t[K] = composite_t[K, var_t[K]] | Var
 
+type mutable_t = simple_t | MutableSequence[mutable_t] | MutableMapping[str, mutable_t]
 type value_t = composite_t[str, value_t]
 type bind_t = var_t[str]
 type multibind_t = var_t[str | Var]
 
+type State = MutableMapping[UUID, MutableMapping[str, mutable_t]]
 type Pattern = Mapping[str, bind_t]
 type Multipattern = Mapping[str | Var, multibind_t]
 type Template = Mapping[str | Var, multibind_t]
@@ -92,7 +93,7 @@ class NoSuchAction(LookupError, HyperSyncError):
     '''Attempted to invoke a nonexistent action.'''
 class NoSuchConcept(LookupError, HyperSyncError):
     '''Attempted to reference a nonexistent concept.'''
-class InvokeEvent(HyperSyncError):
+class EventInvoked(HyperSyncError):
     '''Attempted to invoke an event.'''
 
 class UnloadedConcept(NoSuchConcept):
@@ -360,8 +361,8 @@ class Then:
             "params": dump_pattern(self.params)
         }
 
-def action[**P](name: Callable[P, Awaitable[Mapping[str, value_t]]] | str):
-    def inner(func: Callable[P, Awaitable[Mapping[str, value_t]]]):
+def action[**P](name: Callable[P, Awaitable[Mapping[str, object]]] | str):
+    def inner(func: Callable[P, Awaitable[Mapping[str, object]]]):
         func._action_name = name # pyright: ignore [reportFunctionMemberAccess]
         return func
     
@@ -371,8 +372,8 @@ def action[**P](name: Callable[P, Awaitable[Mapping[str, value_t]]] | str):
     func, name = name, name.__name__
     return inner(func)
 
-def event[**P](name: Callable[P, Awaitable[None]] | str):
-    def inner(func: Callable[P, Awaitable[None]]):
+def event[**P](name: Callable[P, Awaitable[Mapping[str, object] | None]] | str):
+    def inner(func: Callable[P, Awaitable[Mapping[str, object] | None]]):
         func._event_name = name # pyright: ignore [reportFunctionMemberAccess]
         return func
     
@@ -392,8 +393,10 @@ class ConceptMeta(type):
         for k, v in dct.items():
             if (n := getattr(v, "_action_name", None)):
                 actions[n] = k
+                del v._action_name
             if (n := getattr(v, "_event_name", None)):
                 events[n] = k
+                del v._event_name
         
         if (source := dct.get('source')) is None:
             try:
@@ -407,6 +410,12 @@ class ConceptMeta(type):
         if source is not None and 'cid' not in dct:
             dct['cid'] = CIDv1.hash(source.encode('utf-8'), codec='raw')
         
+        if 'name' not in dct:
+            dct['name'] = name
+        
+        if 'purpose' not in dct:
+            dct['purpose'] = dct['__doc__']
+
         return super().__new__(cls, name, bases, dct)
 
 class Concept(metaclass=ConceptMeta):
@@ -431,7 +440,7 @@ class Concept(metaclass=ConceptMeta):
     purpose: ClassVar[str]
     '''What value does this concept add?'''
 
-    state: dict[str, Bindings]
+    state: State
     '''
     The concept's public, queryable state. This must be in-depth enough to
     recover any private state. {UUID: {attr: [value]}}
@@ -443,8 +452,11 @@ class Concept(metaclass=ConceptMeta):
     async def __aexit__(self, exc_type, exc, tb):
         pass
 
-    async def bootstrap(self, state: dict[str, Bindings]) -> AsyncIterable[tuple[ActionId, Bindings, Bindings]]:
-        self.state = state
+    @property
+    def static(self):
+        return self.state[UUID(int=0)]
+
+    async def bootstrap(self) -> AsyncIterable[tuple[str, Bindings, Bindings | None]]:
         return
         yield
 
@@ -516,7 +528,7 @@ class Completion(IPLDRoot):
     '''Params passed to the action.'''
     result: Bindings
     '''Result of the completion.'''
-    state: dict[str, Bindings]
+    state: Mapping[str, Bindings]
     '''State of the concept after the completion.'''
 
     def ipld_model(self):
@@ -565,6 +577,25 @@ async def queue_consumer[T](q: asyncio.Queue[T]):
         while not q.empty():
             yield q.get_nowait()
 
+@overload
+def freeze_value(value: Mapping[str, value_t] | MutableMapping[str, mutable_t]) -> Mapping[str, value_t]: ...
+@overload
+def freeze_value(value: Sequence[value_t] | MutableSequence[mutable_t]) -> Sequence[value_t]: ...
+@overload
+def freeze_value[T: simple_t](value: T) -> T: ...
+
+def freeze_value(value: value_t | mutable_t) -> value_t:
+    match value:
+        case dict():
+            return {k: freeze_value(v) for k, v in value}
+        case list():
+            return [freeze_value(v) for v in value]
+        case _:
+            return value
+
+def freeze_state(value: State) -> Mapping[str, Bindings]:
+    return {str(k): freeze_value(v) for k, v in value.items()}
+
 class Engine:
     concepts: dict[ConceptId, ConceptEntry]
     '''All loaded concepts.'''
@@ -580,11 +611,11 @@ class Engine:
     '''Queue of completions which have not yet been processed.'''
     tg: asyncio.TaskGroup
     '''Group of all running bootstrap tasks.'''
-    state: dict[str, dict[str, Bindings]]
+    state: dict[str, State]
     '''App state loaded by the engine.'''
 
     def __init__(self,
-            state: dict[str, dict[str, Bindings]],
+            state: dict[str, State],
             concepts: list[Concept],
             syncs: list[Sync]
         ):
@@ -601,18 +632,48 @@ class Engine:
         for sync in syncs:
             self.load_sync(sync)
 
+    def resolve_action(self, action: ActionId) -> tuple[Concept, ActionId]:
+        c, a = action.rsplit('/', 1)
+        if ce := self.concepts.get(c):
+            con = ce.concept
+            if act := con.actions.get(a):
+                return con, act
+            elif a in con.events:
+                raise EventInvoked(action)
+            else:
+                raise NoSuchAction(action)
+        else:
+            raise NoSuchConcept(c)
+
     async def _concept_bootstrap(self, ent: ConceptEntry):
         '''Run a concept's bootstrap task which yields completions.'''
 
         async with ent.concept as c:
-            async for act, inp, out in c.bootstrap(self.state.get(c.name, {})):
+            cn = c.name
+            c.state = self.state.get(cn, {})
+            async for evt, inp, out in c.bootstrap():
+                try:
+                    res: Bindings | None = await getattr(c, evt)(**inp)
+                    if res is None:
+                        result = {} if out is None else out
+                    elif out is None:
+                        result = {} if res is None else res
+                    else:
+                        result = {**out, **res}
+                except Exception as e:
+                    result = {"error": {
+                        "type": type(e).__name__,
+                        "message": e.args[0],
+                        "traceback": traceback.format_tb(e.__traceback__)
+                    }}
+                
                 await self.queue.put(Completion(
                     trigger=None,
                     flow=self.new_flow().uuid,
-                    action=act,
+                    action=f"{cn}/{evt}",
                     params=inp,
-                    result=out,
-                    state=c.state
+                    result=result,
+                    state=freeze_state(c.state)
                 ))
         ent.bootstrap = None
 
@@ -642,17 +703,15 @@ class Engine:
         ):
         '''Invoke an action and return its result.'''
         try:
-            c, a = action.rsplit('/', 1)
-            if ce := self.concepts.get(c):
-                con = ce.concept
-                if act := con.actions.get(a):
-                    result = await getattr(con, act)(**params)
-                elif a in con.events:
-                    raise InvokeEvent(action)
-                else:
-                    raise NoSuchAction(action)
-            else:
-                raise NoSuchConcept(c)
+            con, act = self.resolve_action(action)
+            try:
+                result = await getattr(con, act)(**params)
+            except Exception as e:
+                result = {"error": {
+                    "type": type(e).__name__,
+                    "message": e.args[0],
+                    "traceback": traceback.format_tb(e.__traceback__)
+                }}
             
             await self.queue.put(Completion(
                 trigger=trigger,
@@ -660,7 +719,7 @@ class Engine:
                 action=action,
                 params=params,
                 result=result,
-                state=con.state
+                state=freeze_state(con.state)
             ))
             return result
         except Exception as err:
@@ -711,7 +770,7 @@ class Engine:
                     case Query(concept=concept, pattern=pattern):
                         c = self.concepts[concept].concept
                         bs = {**base.value}
-                        if not match_state(pattern, c.state, bs):
+                        if not match_state(pattern, cast(dict[str, Bindings], c.state), bs):
                             # Query failed, treat as an empty set
                             continue
                         # Queries are 1:1 - wait no they're not wtf?
