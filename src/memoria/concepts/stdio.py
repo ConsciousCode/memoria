@@ -1,7 +1,8 @@
 from typing import TypedDict
-from memoria.hypersync import Concept, action, event
 
 import aioconsole
+
+from memoria.hypersync import Concept, action, event
 
 class Stdio(Concept):
     """Interface with stdio"""

@@ -1,13 +1,14 @@
 import asyncio
-from datetime import date, datetime, timedelta, timezone
-from typing import Callable, Iterable, Literal, NotRequired, Protocol, TypedDict, cast, override
+from datetime import date, datetime, timedelta
+from typing import Callable, Iterable, Literal, TypedDict, override
 from uuid import UUID
 from dataclasses import dataclass
 import calendar
 import re
 
 from uuid_extension import uuid7
-from memoria.hypersync import Bindings, Concept, action, event, mutable_t, value_t
+
+from memoria.hypersync import Concept, action, event
 
 type iso8601 = str
 
@@ -207,80 +208,60 @@ class Entry:
                 return False
         return True
 
-class Cron(Concept):
+class LocalState(TypedDict):
+    name: str
+    entry: str
+
+class Cron(Concept[LocalState]):
     """Source of time-based events"""
 
-    tg: asyncio.TaskGroup
-    dirty: set[UUID]
+    tab: dict[UUID, Entry]
 
     def __init__(self):
         super().__init__()
-        self.tg = asyncio.TaskGroup()
-        self.dirty = set()
+        self.tab = {}
     
-    async def __aenter__(self):
-        await self.tg.__aenter__()
-        return self
-    
-    async def __aexit__(self, exc_type, exc, tb):
-        return await self.tg.__aexit__(exc_type, exc, tb)
-    
-    def normalize(self, this: str|None):
-        if this is None:
-            timer = uuid7().uuid7
-        else:
-            timer = UUID(this)
-            self.dirty.add(timer)
-        
-        return timer
-    
-    class Now(TypedDict):
-        datetime: iso8601
-
-    @action
-    async def now(self) -> Now:
-        return {"datetime": datetime.now(timezone.utc).isoformat()}
-    
-    @event
-    async def job(self, *, name: str|None = None, cron: str):
-        '''Event for when a cron entry is matched.'''
-    
-    @event
-    async def reboot(self):
-        '''Event for when the cron concept starts.'''
-
-    class Construct(TypedDict):
+    class Result(TypedDict):
         cron: str
-    
-    @action
-    async def schedule(self, *,
-            cron: str | None,
-            name: str | None = None,
-            entry: str
-        ) -> Construct:
-        '''Schedule a new cron job.'''
-        this = self.normalize(cron)
-        state: dict[str, mutable_t] = {"entry": entry}
-        if name is not None:
-            state['name'] = name
-        self.state[this] = state
-
-        return {"cron": str(this)}
     
     class Success(TypedDict):
         success: bool
 
+    @event
+    async def job(self, *, name: str|None) -> Result:
+        '''Event for when a cron entry is matched.'''
+        ...
+    
+    @event
+    async def reboot(self) -> Result:
+        '''Event for when the cron concept starts.'''
+        ...
+    
     @action
-    async def unschedule(self, *,
-            cron: str
-        ) -> Success:
-        '''Unschedule an existing cron job.'''
+    async def schedule(self, *,
+            cron: str|None,
+            name: str|None = None,
+            entry: str
+        ) -> Result:
+        '''Schedule a new cron job.'''
+
+        this = uuid7().uuid7 if cron is None else UUID(cron)
+        self.tab[this] = Entry.parse(name, entry)
+        self.state[this] = {
+            "name": name,
+            "entry": entry
+        }
+        return {"cron": str(this)}
+
+    @action
+    async def cancel(self, *, cron: str) -> Success:
+        '''Cancel an existing cron job.'''
         this = UUID(cron)
         if this not in self.state:
             raise LookupError(f"cron job {this}")
         
+        del self.tab[this]
         del self.state[this]
-        self.dirty.add(this)
 
         return {"success": True}
     
@@ -288,26 +269,12 @@ class Cron(Concept):
     async def bootstrap(self):
         yield "reboot", {}, {}
 
-        tab = dict[UUID, Entry]()
+        tab: dict[UUID, Entry] = {}
         while True:
-            for dirty in self.dirty:
-                state = self.state[dirty]
-                if isinstance(st := state.get('entry'), str):
-                    if isinstance(name := state.get('name'), str|None):
-                        tab[dirty] = Entry.parse(name, st)
-                else:
-                    del tab[dirty]
-            
             now = datetime.now()
             for cron, entry in tab.items():
-                if not entry.match(now):
-                    continue
-                
-                result: dict[str, value_t] = {"cron": str(cron)}
-                if (name := entry.name) is not None:
-                    result['name'] = name
-
-                yield "job", {}, result
+                if entry.match(now):
+                    yield "job", {"name": entry.name}, {"cron": str(cron)}
             
             # Sleep until the next minute boundary
             later = now.replace(second=0, microsecond=0) + timedelta(minutes=1)

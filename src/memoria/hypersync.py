@@ -418,7 +418,7 @@ class ConceptMeta(type):
 
         return super().__new__(cls, name, bases, dct)
 
-class Concept(metaclass=ConceptMeta):
+class Concept[L](metaclass=ConceptMeta):
     '''Stateful locus of behavior.'''
 
     cid: CID
@@ -454,7 +454,11 @@ class Concept(metaclass=ConceptMeta):
 
     @property
     def static(self):
-        return self.state[UUID(int=0)]
+        return cast(L, self.state[UUID(int=0)])
+    
+    @property
+    def local(self):
+        return cast(dict[UUID, L], self.state)
 
     async def bootstrap(self) -> AsyncIterable[tuple[str, Bindings, Bindings | None]]:
         return
@@ -709,7 +713,7 @@ class Engine:
             except Exception as e:
                 result = {"error": {
                     "type": type(e).__name__,
-                    "message": e.args[0],
+                    "message": str(e.args[0]),
                     "traceback": traceback.format_tb(e.__traceback__)
                 }}
             
