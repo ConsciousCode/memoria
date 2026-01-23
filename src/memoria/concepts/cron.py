@@ -1,14 +1,13 @@
 import asyncio
 from datetime import date, datetime, timedelta
 from typing import Callable, Iterable, Literal, TypedDict, override
-from uuid import UUID
 from dataclasses import dataclass
 import calendar
 import re
 
 from uuid_extension import uuid7
 
-from memoria.hypersync import Concept, action, event
+from memoria.hypersync import Bindings, Concept, FlowId, action, event
 
 type iso8601 = str
 
@@ -17,6 +16,8 @@ SPECIAL_DOW = re.compile(r'(\d+)(#[1-5]|L)')
 
 @dataclass(frozen=True)
 class SpecialDOM:
+    '''Day Of the Month special value.'''
+
     kind: Literal["L", "W", "LW"]
     base: int
     
@@ -54,6 +55,8 @@ class SpecialDOM:
 
 @dataclass(frozen=True)
 class SpecialDOW:
+    '''Day Of the Week special value.'''
+
     kind: Literal["L", "#"]
     week: int
     nth: int
@@ -86,6 +89,7 @@ class SpecialDOW:
             )
 
 class CronField[T: SpecialDOM | SpecialDOW]:
+    '''Cron field supporting special values.'''
     simple: set[int]
     special: list[T]
     
@@ -113,6 +117,8 @@ def _parse_field[T](
         parse: Callable[[str], T] | None = None,
         names: tuple[str, ...] = ()
     ) -> Iterable[int | T]:
+    '''Parse a cron field.'''
+
     def simple(s: str):
         if s in names:
             return names.index(s) + lo
@@ -155,8 +161,8 @@ def _parse_field[T](
         yield from range(start, end + 1, step)
 
 @dataclass(frozen=True)
-class Entry:
-    name: str|None
+class Spec:
+    '''Entry in the crontab.'''
 
     minute: set[int]
     hour: set[int]
@@ -165,7 +171,7 @@ class Entry:
     week: CronField[SpecialDOW]
 
     @classmethod
-    def parse(cls, name: str|None, entry: str):
+    def parse(cls, entry: str):
         match entry:
             case "@yearly"|"@annually":
                 entry = "0 0 1 1 *"
@@ -180,7 +186,6 @@ class Entry:
         
         i, h, d, m, w = entry.split(' ')
         return cls(
-            name,
             set(_parse_field(i, 0, 59)),
             set(_parse_field(h, 0, 23)),
             CronField(_parse_field(d, 1, 31, SpecialDOM.parse)),
@@ -209,13 +214,16 @@ class Entry:
         return True
 
 class LocalState(TypedDict):
-    name: str
-    entry: str
+    extra: Bindings
+    spec: str
 
 class Cron(Concept[LocalState]):
-    """Source of time-based events"""
+    """
+    Cron concept implementation which generates `job` events whenever an entry
+    in the crontab is matched. Supports 5-field L/W in DOM and L/# in DOW.
+    """
 
-    tab: dict[UUID, Entry]
+    tab: dict[str, Spec]
 
     def __init__(self):
         super().__init__()
@@ -224,57 +232,61 @@ class Cron(Concept[LocalState]):
     class Result(TypedDict):
         cron: str
     
-    class Success(TypedDict):
-        success: bool
+    class Done(TypedDict):
+        done: Literal[True]
 
     @event
-    async def job(self, *, name: str|None) -> Result:
+    async def job(self, **_) -> Result:
         '''Event for when a cron entry is matched.'''
         ...
     
     @event
-    async def reboot(self) -> Result:
+    async def reboot(self, **_) -> Result:
         '''Event for when the cron concept starts.'''
         ...
     
     @action
     async def schedule(self, *,
+            flow: FlowId,
             cron: str|None,
-            name: str|None = None,
-            entry: str
+            spec: str,
+            **extra
         ) -> Result:
         '''Schedule a new cron job.'''
 
-        this = uuid7().uuid7 if cron is None else UUID(cron)
-        self.tab[this] = Entry.parse(name, entry)
-        self.state[this] = {
-            "name": name,
-            "entry": entry
+        if cron is None:
+            cron = str(uuid7().uuid7)
+        self.tab[cron] = Spec.parse(spec)
+        self.state[cron] = {
+            "extra": extra,
+            "spec": spec
         }
-        return {"cron": str(this)}
+        return {"cron": cron}
 
     @action
-    async def cancel(self, *, cron: str) -> Success:
+    async def cancel(self, *, cron: str, **_) -> Done:
         '''Cancel an existing cron job.'''
-        this = UUID(cron)
-        if this not in self.state:
-            raise LookupError(f"cron job {this}")
+        if cron not in self.state:
+            raise LookupError(f"cron job {cron}")
         
-        del self.tab[this]
-        del self.state[this]
+        del self.tab[cron]
+        del self.state[cron]
 
-        return {"success": True}
+        return {"done": True}
     
     @override
     async def bootstrap(self):
         yield "reboot", {}, {}
 
-        tab: dict[UUID, Entry] = {}
+        for cron, state in self.local.items():
+            self.tab[cron] = Spec.parse(state['spec'])
+
         while True:
             now = datetime.now()
-            for cron, entry in tab.items():
-                if entry.match(now):
-                    yield "job", {"name": entry.name}, {"cron": str(cron)}
+            for cron, spec in self.tab.items():
+                if spec.match(now):
+                    state = self.local[cron]
+                    yield "job", state['extra'], {"cron": cron}
             
             # Sleep until the next minute boundary
             later = now.replace(second=0, microsecond=0) + timedelta(minutes=1)

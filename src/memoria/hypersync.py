@@ -4,7 +4,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from functools import cached_property
 import inspect
-from typing import AsyncIterable, Awaitable, Callable, ClassVar, Mapping, MutableMapping, MutableSequence, Self, cast, overload, override
+from typing import Any, AsyncIterable, Awaitable, Callable, ClassVar, Mapping, MutableMapping, MutableSequence, Self, cast, overload, override
 import itertools
 import traceback
 from uuid import UUID
@@ -32,7 +32,7 @@ type value_t = composite_t[str, value_t]
 type bind_t = var_t[str]
 type multibind_t = var_t[str | Var]
 
-type State = MutableMapping[UUID, MutableMapping[str, mutable_t]]
+type State = MutableMapping[str, MutableMapping[str, mutable_t]]
 type Pattern = Mapping[str, bind_t]
 type Multipattern = Mapping[str | Var, multibind_t]
 type Template = Mapping[str | Var, multibind_t]
@@ -77,6 +77,12 @@ class ImmutablePromise[T: value_t]:
     def __init__(self, value: T):
         self.value = value
     
+    def __str__(self):
+        return str(self.value)
+    
+    def __repr__(self):
+        return repr(self.value)
+    
     def __hash__(self):
         return mutable_hash(self.value)
     
@@ -102,8 +108,10 @@ class UnloadedConcept(NoSuchConcept):
     unloaded.
     '''
 
-type ConceptId = str
-type ActionId = str
+type ConceptId = str # concept
+type ActionId = str # concept/action
+type StrUUID = str
+type FlowId = StrUUID
 
 '''
 Not implemented for match_multi/state:
@@ -355,6 +363,32 @@ class Then:
     params: Template
     '''The parameters to invoke the action.'''
 
+    def resolve(self, env: Bindings):
+        '''Resolve the parameters with the environment.'''
+
+        @overload
+        def inner(bob: Template) -> Bindings: ...
+        @overload
+        def inner(bob: multibind_t) -> value_t: ...
+
+        def inner(bob: multibind_t) -> value_t:
+            match bob:
+                case Var(name):
+                    return env[name]
+                case dict():
+                    return {
+                        str(env[k.name] if isinstance(k, Var) else k): inner(v)
+                            for k, v in bob.items()
+                    }
+                case list():
+                    return [inner(v) for v in bob]
+                case None|bool()|int()|float()|str()|bytes()|CID():
+                    return bob
+                case _:
+                    assert False
+        
+        return inner(self.params)
+
     def ipld_model(self):
         return {
             "action": self.action,
@@ -418,8 +452,10 @@ class ConceptMeta(type):
 
         return super().__new__(cls, name, bases, dct)
 
-class Concept[L](metaclass=ConceptMeta):
+class Concept[L, S=State](metaclass=ConceptMeta):
     '''Stateful locus of behavior.'''
+
+    # Provided by metaclass
 
     cid: CID
     '''
@@ -435,30 +471,39 @@ class Concept[L](metaclass=ConceptMeta):
     events: ClassVar[dict[str, str]]
     '''Specifications of each event available on the object.'''
 
+    # Overloadable (by default calculated from __name__ and __doc__)
+
     name: ClassVar[str]
     '''The concept's name.'''
     purpose: ClassVar[str]
     '''What value does this concept add?'''
 
+    # Proper instance members
+    
     state: State
     '''
     The concept's public, queryable state. This must be in-depth enough to
-    recover any private state. {UUID: {attr: [value]}}
+    recover any private ephemeral state. {UUID: {attr: [value]}}
     '''
+
+    @property
+    def static(self):
+        uid = str(UUID(int=0))
+        if (s := self.state.get(uid)) is None:
+            self.state[uid] = s = {}
+        return cast(S, s)
+    
+    @property
+    def local(self):
+        return cast(dict[str, L], self.state)
+    
+    # By default do nothing
     
     async def __aenter__(self) -> Self:
         return self
     
     async def __aexit__(self, exc_type, exc, tb):
         pass
-
-    @property
-    def static(self):
-        return cast(L, self.state[UUID(int=0)])
-    
-    @property
-    def local(self):
-        return cast(dict[UUID, L], self.state)
 
     async def bootstrap(self) -> AsyncIterable[tuple[str, Bindings, Bindings | None]]:
         return
@@ -505,8 +550,8 @@ class Sync:
 class Trigger(IPLDRoot):
     '''Record of a sync which was triggered and why.'''
     
-    flow: UUID
-    '''Flow the trigger occurs within.'''
+    flow: FlowId
+    '''Flow UUID the trigger occurs within.'''
     sync: CID
     '''Sync initiated by the trigger.'''
     completions: dict[CID, 'Completion']
@@ -514,7 +559,7 @@ class Trigger(IPLDRoot):
 
     def ipld_model(self):
         return {
-            "flow": str(self.flow),
+            "flow": self.flow,
             "sync": self.sync,
             "completions": list(sorted(self.completions))
         }
@@ -522,10 +567,6 @@ class Trigger(IPLDRoot):
 class Completion(IPLDRoot):
     '''A record of an action being completed.'''
 
-    trigger: Trigger | None
-    '''The trigger for the completion. None for bootstrap actions.'''
-    flow: UUID
-    '''Flow the completion occurred within.'''
     action: ActionId
     '''The name of the action being completed.'''
     params: Bindings
@@ -534,21 +575,25 @@ class Completion(IPLDRoot):
     '''Result of the completion.'''
     state: Mapping[str, Bindings]
     '''State of the concept after the completion.'''
+    flow: FlowId
+    '''Flow UUID the completion occurred within.'''
+    trigger: CID | None
+    '''The trigger for the completion. None for bootstrap actions.'''
 
     def ipld_model(self):
         return {
-            "trigger": None if self.trigger is None else self.trigger.cid,
-            "flow": str(self.flow),
             "action": self.action,
             "params": self.params,
             "result": self.result,
-            "state": self.state
+            "state": self.state,
+            "flow": self.flow,
+            "trigger": self.trigger
         }
 
 class Flow:
     '''State for tracking the processing of a flow.'''
 
-    uuid: UUID
+    uuid: FlowId
     '''Flow's UUID.'''
     completions: dict[CID, Completion]
     '''All completions in the flow.'''
@@ -559,7 +604,7 @@ class Flow:
 
     def __init__(self):
         super().__init__()
-        self.uuid = UUID7().uuid7
+        self.uuid = str(UUID7().uuid7)
         self.completions = {}
         self.triggers = {}
         self.matches = defaultdict(lambda: defaultdict(set))
@@ -571,16 +616,6 @@ class ConceptEntry:
     bootstrap: asyncio.Task | None = None
     '''The task for processing bootstrap events.'''
 
-async def queue_consumer[T](q: asyncio.Queue[T]):
-    '''
-    Async generator which waits until something is pushed to the queue
-    and then yields everything in it.
-    '''
-    while True:
-        yield await q.get()
-        while not q.empty():
-            yield q.get_nowait()
-
 @overload
 def freeze_value(value: Mapping[str, value_t] | MutableMapping[str, mutable_t]) -> Mapping[str, value_t]: ...
 @overload
@@ -591,7 +626,7 @@ def freeze_value[T: simple_t](value: T) -> T: ...
 def freeze_value(value: value_t | mutable_t) -> value_t:
     match value:
         case dict():
-            return {k: freeze_value(v) for k, v in value}
+            return {k: freeze_value(v) for k, v in value.items()}
         case list():
             return [freeze_value(v) for v in value]
         case _:
@@ -599,6 +634,13 @@ def freeze_value(value: value_t | mutable_t) -> value_t:
 
 def freeze_state(value: State) -> Mapping[str, Bindings]:
     return {str(k): freeze_value(v) for k, v in value.items()}
+
+def format_error(e: Exception):
+    return {
+        "type": type(e).__name__,
+        "message": str(e.args[0]),
+        "traceback": traceback.format_tb(e.__traceback__)
+    }
 
 class Engine:
     concepts: dict[ConceptId, ConceptEntry]
@@ -609,7 +651,7 @@ class Engine:
     '''An index of syncs by their action dependencies.'''
     funcs: dict[str, Callable]
     '''Functions loaded by the engine.'''
-    flows: dict[UUID, Flow]
+    flows: dict[FlowId, Flow]
     '''Flows being processed.'''
     queue: asyncio.Queue[Completion]
     '''Queue of completions which have not yet been processed.'''
@@ -620,7 +662,7 @@ class Engine:
 
     def __init__(self,
             state: dict[str, State],
-            concepts: list[Concept],
+            concepts: list[Concept[Any, Any]],
             syncs: list[Sync]
         ):
         super().__init__()
@@ -635,8 +677,124 @@ class Engine:
 
         for sync in syncs:
             self.load_sync(sync)
+    
+    # Methods intended to be overridden to report meta-events
 
-    def resolve_action(self, action: ActionId) -> tuple[Concept, ActionId]:
+    async def uncaught(self,
+            error: Exception,
+            flow: FlowId,
+            trigger: CID | None = None
+        ) -> Bindings | None:
+        '''
+        An unknown exception was thrown. This is always a programming error.
+        Returns the result to use in the action's completion or None to leave
+        it incomplete.
+        '''
+        return {"error": format_error(error)}
+    
+    async def ignored(self, cmp: Completion):
+        '''
+        An action was completed but it wasn't matched by any sync [when]
+        clauses. There are always terminal actions, but it can indicate an
+        overlooked edge case. For instance, matching an error completion.
+        '''
+    
+    async def event_invoked(self, event: ActionId) -> Bindings | None:
+        '''
+        An event was invoked by a sync which is invalid. Return either the
+        result to give the action completion or None to leave it incomplete.
+        '''
+    
+    async def no_such_action(self, action: ActionId) -> Bindings | None:
+        '''
+        An action was invoked which does not exist on an existant concept.
+        Return either the result to give the action completion or None to
+        leave it incomplete.
+        '''
+        return None
+
+    async def no_such_concept(self, concept: str) -> Bindings | None:
+        '''
+        A nonexistant concept was referenced. Return either the result to give
+        the action completion or None to leave it incomplete.
+        '''
+        return None
+
+    # Public methods
+
+    async def complete(self,
+            action: ActionId,
+            params: Bindings,
+            result: Bindings,
+            state: Mapping[str, Bindings] | None = None,
+            flow: FlowId|None = None,
+            trigger: CID|None = None
+        ):
+        '''Submit an action completion.'''
+        if state is None:
+            c, _ = action.rsplit("/", 1)
+            state = self.concepts[c].concept.state
+
+        await self.queue.put(Completion(
+            trigger=trigger,
+            flow=flow or self.new_flow().uuid,
+            action=action,
+            params=params,
+            result=result,
+            state=state
+        ))
+
+    async def invoke(self,
+            action: ActionId,
+            params: Bindings,
+            flow: FlowId |  None = None,
+            trigger: CID | None = None
+        ) -> Bindings | None:
+        '''
+        Invoke an action and return its result. If None is returned, this
+        indicates an error where it could not be completed.
+        '''
+        if flow is None:
+            flow = self.new_flow().uuid
+        try:
+            con, act = self.resolve_action(action)
+        except EventInvoked as e:
+            return await self.event_invoked(e.args[0])
+        except NoSuchAction as e:
+            return await self.no_such_action(e.args[0])
+        except NoSuchConcept as e:
+            return await self.no_such_concept(e.args[0])
+        
+        try:
+            result: Bindings = await getattr(con, act)(flow=flow, **params)
+        except Exception as e:
+            return await self.uncaught(e, flow, trigger)
+        
+        await self.complete(
+            action, params, result,
+            freeze_state(con.state),
+            flow=flow,
+            trigger=trigger
+        )
+        return result
+
+    def load_concept(self, concept: Concept):
+        '''
+        Load a new concept. This must be 
+        '''
+
+        self.concepts[concept.name] = ent = ConceptEntry(concept)
+        ent.bootstrap = self.tg.create_task(self._concept_bootstrap(ent))
+    
+    def load_sync(self, sync: Sync):
+        '''Load a new sync.'''
+
+        self.syncs[sync.cid] = sync
+        for act in set(when.action for when in sync.when):
+            self.syncdeps[act].append(sync)
+
+    def resolve_action(self, action: ActionId) -> tuple[Concept, str]:
+        '''Resolve an ActionId to a concept and the name of the method.'''
         c, a = action.rsplit('/', 1)
         if ce := self.concepts.get(c):
             con = ce.concept
@@ -656,8 +814,11 @@ class Engine:
             cn = c.name
             c.state = self.state.get(cn, {})
             async for evt, inp, out in c.bootstrap():
+                flow = self.new_flow().uuid
                 try:
-                    res: Bindings | None = await getattr(c, evt)(**inp)
+                    res: Bindings | None = await getattr(c, evt)(
+                        flow=flow, **inp
+                    )
                     if res is None:
                         result = {} if out is None else out
                     elif out is None:
@@ -665,78 +826,20 @@ class Engine:
                     else:
                         result = {**out, **res}
                 except Exception as e:
-                    result = {"error": {
-                        "type": type(e).__name__,
-                        "message": e.args[0],
-                        "traceback": traceback.format_tb(e.__traceback__)
-                    }}
+                    result = {"error": format_error(e)}
                 
-                await self.queue.put(Completion(
-                    trigger=None,
-                    flow=self.new_flow().uuid,
-                    action=f"{cn}/{evt}",
-                    params=inp,
-                    result=result,
-                    state=freeze_state(c.state)
-                ))
+                await self.complete(
+                    f"{cn}/{evt}", inp, result,
+                    freeze_state(c.state),
+                    flow=flow
+                )
         ent.bootstrap = None
-
-    def load_concept(self, concept: Concept):
-        '''Load a new concept.'''
-
-        self.concepts[concept.name] = ent = ConceptEntry(concept)
-        ent.bootstrap = self.tg.create_task(self._concept_bootstrap(ent))
-    
-    def load_sync(self, sync: Sync):
-        '''Load a new sync.'''
-
-        self.syncs[sync.cid] = sync
-        for act in set(when.action for when in sync.when):
-            self.syncdeps[act].append(sync)
 
     def new_flow(self):
         flow = Flow()
         self.flows[flow.uuid] = flow
         return flow
 
-    async def invoke(self,
-            trigger: Trigger | None,
-            flow: Flow,
-            action: ActionId,
-            **params: value_t
-        ):
-        '''Invoke an action and return its result.'''
-        try:
-            con, act = self.resolve_action(action)
-            try:
-                result = await getattr(con, act)(**params)
-            except Exception as e:
-                result = {"error": {
-                    "type": type(e).__name__,
-                    "message": str(e.args[0]),
-                    "traceback": traceback.format_tb(e.__traceback__)
-                }}
-            
-            await self.queue.put(Completion(
-                trigger=trigger,
-                flow=flow.uuid,
-                action=action,
-                params=params,
-                result=result,
-                state=freeze_state(con.state)
-            ))
-            return result
-        except Exception as err:
-            #await self.uncaught_error(flow, err)
-            raise
-
-    async def bootstrap(self,
-            action: ActionId,
-            **params: value_t
-        ) -> Bindings:
-        '''Invoke an action ex nihilo.'''
-        return await self.invoke(None, self.new_flow(), action, **params)
-    
     async def trigger(self,
             flow: Flow,
             sync: Sync,
@@ -786,6 +889,7 @@ class Engine:
             
             bss = {bs for nbs in nbss for bs in nbs}
         
+        print(bindings, bss)
         # [then]
 
         trigger = Trigger(
@@ -794,10 +898,17 @@ class Engine:
             completions=completions
         )
 
+        tcid = trigger.cid
+        flow.triggers[tcid] = trigger
+
         for bs in bss:
             for then in sync.then:
                 # Completion already registered, we don't need the result
-                await self.invoke(trigger, flow, then.action, **bs.value)
+                await self.invoke(
+                    then.action, then.resolve(bs.value),
+                    flow=flow.uuid,
+                    trigger=tcid
+                )
         
         return True
 
@@ -808,11 +919,17 @@ class Engine:
             for ent in self.concepts.values():
                 ent.bootstrap = self.tg.create_task(self._concept_bootstrap(ent))
             
-            async for cmp in queue_consumer(self.queue):
+            while True:
+                cmp = await self.queue.get()
                 flow = self.flows[cmp.flow]
                 flow.completions[cmp.cid] = cmp
+
+                if not (deps := self.syncdeps.get(cmp.action)):
+                    await self.ignored(cmp)
+                    continue
+                
                 # Check all syncs dependent on this action
-                for dep in self.syncdeps[cmp.action]:
+                for dep in deps:
                     # Find candidate matches
                     ms = flow.matches[dep.cid]
                     for i, when in enumerate(dep.when):

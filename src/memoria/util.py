@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from ipld import dagcbor, IPLData
 from cid import CID, CIDv1
 
-type json_t = Mapping[str, json_t]|Sequence[json_t]|str|int|float|bool|None
+type json_t = None|bool|int|float|str|Sequence[json_t]|Mapping[str, json_t]
 
 type nonempty_tuple[T] = tuple[T, *tuple[T, ...]]
 

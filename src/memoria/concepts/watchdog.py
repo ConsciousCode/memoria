@@ -1,15 +1,14 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Type, TypedDict, override
-from uuid import UUID
+from typing import Literal, TypedDict, override
 
 from uuid_extension import uuid7
 
-from memoria.hypersync import Concept, action, event
+from memoria.hypersync import Bindings, Concept, FlowId, action, event
 
 type iso8601 = str
 
-class Tasks:
+class Timer:
     task: asyncio.Task
     reset: asyncio.Event
     
@@ -19,20 +18,23 @@ class Tasks:
         self.reset = asyncio.Event()
 
 class LocalState(TypedDict):
-    name: str|None
+    extra: Bindings
     timeout: float
     expire_at: iso8601
 
 class Watchdog(Concept[LocalState]):
-    """Source of time-based events"""
+    """
+    Watchdog timer generates `expired` events whenever it reaches its
+    countdown before `reset` is called.
+    """
 
-    tasks: dict[UUID, Tasks]
+    timers: dict[str, Timer]
     tg: asyncio.TaskGroup
-    queue: asyncio.Queue[UUID]
+    queue: asyncio.Queue[str]
 
     def __init__(self):
         super().__init__()
-        self.tasks = {}
+        self.timers = {}
         self.tg = asyncio.TaskGroup()
         self.queue = asyncio.Queue()
     
@@ -43,10 +45,10 @@ class Watchdog(Concept[LocalState]):
     async def __aexit__(self, exc_type, exc, tb):
         return await self.tg.__aexit__(exc_type, exc, tb)
     
-    async def task(self, timer: UUID, timeout: float):
+    async def task(self, timer: str, timeout: float):
         '''Process the actual timer task.'''
 
-        task = self.tasks[timer]
+        task = self.timers[timer]
         while True:
             try:
                 if timeout > 0:
@@ -61,78 +63,74 @@ class Watchdog(Concept[LocalState]):
                 ).isoformat()
             except TimeoutError:
                 await self.queue.put(timer)
+                # Wait until the watchdog is eventually reset
+                await task.reset.wait()
             
-            # Wait until the watchdog is eventually reset
-            await task.reset.wait()
             task.reset.clear()
     
     class Result(TypedDict):
         timer: str
     
-    class Success(TypedDict):
-        success: bool
+    class Done(TypedDict):
+        done: Literal[True]
 
     @event
-    async def expired(self) -> Result:
+    async def expired(self, **_) -> Result:
         '''The watchdog timer has expired.'''
         ...
     
     @action
     async def start(self, *,
-            name: str|None = None,
+            flow: FlowId,
             timer: str|None = None,
-            timeout: float
+            timeout: float,
+            **extra
         ) -> Result:
-        '''Start a watchdog timer with a given name and timeout.'''
+        '''Start a watchdog timer with a given timeout.'''
 
         expire_at = datetime.now(timezone.utc) + timedelta(seconds=timeout)
 
         if timer is None:
-            this = uuid7().uuid7
-        else:
-            this = UUID(timer)
-            if state := self.local.get(this):
-                if name is None:
-                    name = state['name']
+            timer = str(uuid7().uuid7)
+        elif tt := self.timers.get(timer):
+            tt.task.cancel()
         
-        self.local[this] = {
-            "name": name,
+        self.local[timer] = {
+            "extra": extra,
             "timeout": timeout,
             "expire_at": expire_at.isoformat()
         }
-        self.tasks[this] = Tasks(
-            self.tg.create_task(self.task(this, timeout))
+        self.timers[timer] = Timer(
+            self.tg.create_task(self.task(timer, timeout))
         )
 
-        return {"timer": str(this)}
+        return {"timer": timer}
     
     @action
-    async def reset(self, timer: str) -> Success:
+    async def reset(self, *_, timer: str) -> Done:
         '''Reset a given watchdog timer.'''
 
-        this = UUID(timer)
-        if eph := self.tasks.get(this):
+        if eph := self.timers.get(timer):
             eph.reset.set()
-            state = self.local[this]
+            state = self.local[timer]
             timeout = state['timeout']
             state['expire_at'] = (
                 datetime.now(timezone.utc) + timedelta(seconds=timeout)
             ).isoformat()
-            return {"success": True}
+            return {"done": True}
         else:
-            raise LookupError(this)
+            raise LookupError(timer)
     
     @action
-    async def cancel(self, timer: str) -> Success:
+    async def cancel(self, *_, timer: str) -> Done:
         '''Cancel a given watchdog timer.'''
 
-        this = UUID(timer)
-        if tt := self.tasks.get(this):
+        if tt := self.timers.get(timer):
             tt.task.cancel()
-            del self.tasks[this]
-            return {"success": True}
+            del self.timers[timer]
+            return {"done": True}
         else:
-            raise LookupError(this)
+            raise LookupError(timer)
 
     @override
     async def bootstrap(self):
@@ -140,11 +138,11 @@ class Watchdog(Concept[LocalState]):
         for timer, state in self.local.items():
             expire_at = datetime.fromisoformat(state['expire_at'])
             timeout = (expire_at - datetime.now()).total_seconds()
-            self.tasks[timer] = Tasks(
+            self.timers[timer] = Timer(
                 self.tg.create_task(self.task(timer, timeout))
             )
         
         while True:
             timer = await self.queue.get()
             if state := self.local.get(timer):
-                yield "expired", {}, {"timer": str(timer)}
+                yield "expired", state['extra'], {"timer": timer}

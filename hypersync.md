@@ -346,3 +346,6 @@ type Flow {
     triggers: {&Trigger}
 }
 ```
+
+Bootstrap/event {concept, action, params} => {result}
+when Bootstrap/event -> Flow/trigger -> ...actions -> 
