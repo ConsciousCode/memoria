@@ -4,7 +4,7 @@ from typing import Literal, TypedDict, override
 
 from uuid_extension import uuid7
 
-from memoria.hypersync import Bindings, Concept, FlowId, action, event
+from memoria.hypersync import Bindings, Concept, FlowId, action, stimulus
 
 type iso8601 = str
 
@@ -74,8 +74,8 @@ class Watchdog(Concept[LocalState]):
     class Done(TypedDict):
         done: Literal[True]
 
-    @event
-    async def expired(self, **_) -> Result:
+    @stimulus
+    async def expired(self) -> Result:
         '''The watchdog timer has expired.'''
         ...
     

@@ -2,7 +2,7 @@ from typing import Literal, TypedDict
 
 import aioconsole
 
-from memoria.hypersync import Concept, action, event
+from memoria.hypersync import Concept, action, stimulus
 
 # This might actually be inappropriate. Typically stdio interaction is opt-in,
 # calling eg `input()`, but here input is exposed as events. It doesn't
@@ -14,17 +14,17 @@ class Stdio(Concept):
     """Interface with stdio"""
 
     class Input(TypedDict):
-        data: str
+        text: str
 
-    @event
-    async def input(self, **_) -> Input:
-        ...
+    @action
+    async def input(self, *, prompt: str="") -> Input:
+        return {"text": await aioconsole.ainput(prompt)}
     
     class Done(TypedDict):
         done: Literal[True]
     
     @action
-    async def print(self, *, data: str, **_) -> Done:
+    async def print(self, *, data: str) -> Done:
         print(data)
         return {"done": True}
 

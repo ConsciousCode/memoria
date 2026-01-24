@@ -1,14 +1,27 @@
-from typing import Literal, NotRequired, TypedDict, override
+from typing import Literal, TypedDict, override
 
-from memoria.hypersync import Concept, action, stimulus
+from memoria.hypersync import ActionId, Bindings, Concept, Engine, FlowId, Sync, action, stimulus
 
-class StaticState(TypedDict):
-    done: NotRequired[bool]
+HyperInvoke = Sync("HyperInvoke", 
+    "Hypersync which invokes a "
+)
 
-class Bootstrap(Concept[object, StaticState]):
+class HyperConcept(Concept):
     '''
-    Concept used to bootstrap the rest of the system on the first boot.
+    Concept for manipulating and referring to concepts.
     '''
+
+    name = "Concept"
+
+    engine: Engine
+
+    def load(self, engine: Engine):
+        self.engine = engine
+
+    @action
+    async def invoke(self, *, action: ActionId, params: Bindings, flow: FlowId):
+        '''Pivot for invoking actions.'''
+        return {}
     
     class Done(TypedDict):
         done: Literal[True]

@@ -5,7 +5,7 @@ from uuid import UUID
 from aiohttp import web
 from uuid_extension import uuid7
 
-from memoria.hypersync import Bindings, Concept, action, event
+from memoria.hypersync import Bindings, Concept, action, stimulus
 
 class Request(TypedDict):
     server: str
@@ -86,15 +86,14 @@ class HTTP(Concept):
     class ReqResult(TypedDict):
         request: str
 
-    @event
+    @stimulus
     async def request(self, *,
             method: str,
             url: str,
             path: str,
             query: dict[str, list[str]],
             headers: dict[str, str],
-            body: bytes,
-            **_
+            body: bytes
         ) -> ReqResult:
         '''An HTTP request to be processed by the server.'''
         ...
@@ -106,8 +105,7 @@ class HTTP(Concept):
             headers: dict[str, str] | None = None,
             content_type: str | None = None,
             charset: str | None = None,
-            text: str | None = None,
-            **_
+            text: str | None = None
         ):
         '''Respond to an HTTP request.'''
         if req := self.reqs.get(request):
@@ -130,8 +128,7 @@ class HTTP(Concept):
     async def start(self, *,
             server: str|None = None,
             host: str = "0.0.0.0",
-            port: int,
-            **_
+            port: int
         ) -> Create:
         '''Start a new HTTP server.'''
         if server is None:

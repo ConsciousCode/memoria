@@ -5,7 +5,7 @@ from uuid import UUID
 
 from uuid_extension import uuid7
 
-from memoria.hypersync import Bindings, Concept, FlowId, action, event
+from memoria.hypersync import Bindings, Concept, FlowId, action, stimulus
 
 type iso8601 = str
 
@@ -67,8 +67,8 @@ class Timer(Concept[LocalState]):
     class Done(TypedDict):
         done: Literal[True]
 
-    @event
-    async def trigger(self, **_) -> Result:
+    @stimulus
+    async def trigger(self) -> Result:
         '''Event for when a timer is triggered.'''
         ...
     
@@ -106,7 +106,7 @@ class Timer(Concept[LocalState]):
         return {"timer": timer}
     
     @action
-    async def cancel(self, *, timer: str, **_) -> Done:
+    async def cancel(self, *, timer: str) -> Done:
         '''Cancel a timer.'''
 
         if (task := self.timers.get(timer)) is not None:
@@ -118,8 +118,7 @@ class Timer(Concept[LocalState]):
     @action
     async def sleep(self, *,
             until: iso8601|None = None,
-            delay: int|None = None,
-            **_
+            delay: int|None = None
         ) -> Done:
         '''Sleep until a datetime with a delay.'''
         now = datetime.now()

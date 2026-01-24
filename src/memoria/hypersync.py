@@ -2,7 +2,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import KW_ONLY, dataclass, field
-from functools import cached_property
+from functools import cached_property, wraps
 import inspect
 from typing import Any, AsyncIterable, Awaitable, Callable, ClassVar, Mapping, MutableMapping, MutableSequence, Self, cast, overload, override
 import itertools
@@ -99,8 +99,8 @@ class NoSuchAction(LookupError, HyperSyncError):
     '''Attempted to invoke a nonexistent action.'''
 class NoSuchConcept(LookupError, HyperSyncError):
     '''Attempted to reference a nonexistent concept.'''
-class EventInvoked(HyperSyncError):
-    '''Attempted to invoke an event.'''
+class StimInvoked(HyperSyncError):
+    '''Attempted to invoke a stimulus.'''
 
 class UnloadedConcept(NoSuchConcept):
     '''
@@ -317,14 +317,14 @@ class When:
 class Query:
     '''Query over a concept's state.'''
 
-    concept: ConceptId
+    concept: ConceptId | Var
     '''Name of the concept being queried.'''
     pattern: dict[Var, Multipattern]
     '''Pattern used to query the concept's state.'''
 
     def ipld_model(self):
         return {
-            "concept": self.concept,
+            "concept": dump_pattern(self.concept),
             "pattern": {
                 str(k): dump_pattern(v)
                     for k, v in self.pattern.items()
@@ -358,7 +358,7 @@ class Then:
     bindings.
     '''
 
-    action: ActionId
+    action: ActionId | Var
     '''Action to invoke.'''
     params: Template
     '''The parameters to invoke the action.'''
@@ -391,14 +391,37 @@ class Then:
 
     def ipld_model(self):
         return {
-            "action": self.action,
+            "action": dump_pattern(self.action),
             "params": dump_pattern(self.params)
         }
+
+def ignore_extra(func: Callable):
+    '''Process the function as if it has a dummy **kwargs parameter.'''
+    sig = inspect.signature(func)
+    accepted = set[str]()
+    
+    for name, param in sig.parameters.items():
+        if param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+            accepted.add(name)
+        elif param.kind == inspect.Parameter.VAR_KEYWORD:
+            # Don't need to ignore if there's a kwargs
+            return func
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **{
+            k: v for k, v in kwargs.items() if k in accepted
+        })
+
+    return wrapper
 
 def action[**P](name: Callable[P, Awaitable[Mapping[str, object]]] | str):
     def inner(func: Callable[P, Awaitable[Mapping[str, object]]]):
         func._action_name = name # pyright: ignore [reportFunctionMemberAccess]
-        return func
+        return ignore_extra(func)
     
     if isinstance(name, str):
         return inner
@@ -406,10 +429,10 @@ def action[**P](name: Callable[P, Awaitable[Mapping[str, object]]] | str):
     func, name = name, name.__name__
     return inner(func)
 
-def event[**P](name: Callable[P, Awaitable[Mapping[str, object] | None]] | str):
+def stimulus[**P](name: Callable[P, Awaitable[Mapping[str, object] | None]] | str):
     def inner(func: Callable[P, Awaitable[Mapping[str, object] | None]]):
-        func._event_name = name # pyright: ignore [reportFunctionMemberAccess]
-        return func
+        func._stim_name = name # pyright: ignore [reportFunctionMemberAccess]
+        return ignore_extra(func)
     
     if isinstance(name, str):
         return inner
@@ -423,14 +446,14 @@ class ConceptMeta(type):
     @override
     def __new__(cls, name: str, bases: tuple, dct: dict):
         dct['actions'] = actions = {}
-        dct['events'] = events = {}
+        dct['stimuli'] = stims = {}
         for k, v in dct.items():
             if (n := getattr(v, "_action_name", None)):
                 actions[n] = k
                 del v._action_name
-            if (n := getattr(v, "_event_name", None)):
-                events[n] = k
-                del v._event_name
+            if (n := getattr(v, "_stim_name", None)):
+                stims[n] = k
+                del v._stim_name
         
         if (source := dct.get('source')) is None:
             try:
@@ -468,8 +491,8 @@ class Concept[L, S=State](metaclass=ConceptMeta):
     '''The source code which created the CID.'''
     actions: ClassVar[dict[str, str]]
     '''Specifications of each action available on the object.'''
-    events: ClassVar[dict[str, str]]
-    '''Specifications of each event available on the object.'''
+    stimuli: ClassVar[dict[str, str]]
+    '''Specifications of each stimulus available on the object.'''
 
     # Overloadable (by default calculated from __name__ and __doc__)
 
@@ -488,10 +511,8 @@ class Concept[L, S=State](metaclass=ConceptMeta):
 
     @property
     def static(self):
-        uid = str(UUID(int=0))
-        if (s := self.state.get(uid)) is None:
-            self.state[uid] = s = {}
-        return cast(S, s)
+        # Concept static state should always be initialized with a UUID
+        return cast(S, self.state[str(UUID(int=0))])
     
     @property
     def local(self):
@@ -578,7 +599,7 @@ class Completion(IPLDRoot):
     flow: FlowId
     '''Flow UUID the completion occurred within.'''
     trigger: CID | None
-    '''The trigger for the completion. None for bootstrap actions.'''
+    '''The trigger for the completion. None for stimuli.'''
 
     def ipld_model(self):
         return {
@@ -614,7 +635,7 @@ class ConceptEntry:
     concept: Concept
     '''The concept itself.'''
     bootstrap: asyncio.Task | None = None
-    '''The task for processing bootstrap events.'''
+    '''The task for processing stimuli.'''
 
 @overload
 def freeze_value(value: Mapping[str, value_t] | MutableMapping[str, mutable_t]) -> Mapping[str, value_t]: ...
@@ -679,8 +700,22 @@ class Engine:
             self.load_sync(sync)
     
     # Methods intended to be overridden to report meta-events
+    # These effectively serve as hypersyncs or hyperconcept pivots
+
+    async def bootstrap(self,
+            concept: Concept
+        ) -> AsyncIterable[tuple[str, Bindings, Bindings|None]]:
+        '''
+        Bootstrap a concept. Yields tuples of a stimulus on the concept,
+        params to invoke it with, and the result of the stimulus. The stimulus
+        is called and then the results are shallow merged.
+        '''
+        async for b in concept.bootstrap():
+            yield b
 
     async def uncaught(self,
+            action: ActionId,
+            params: Bindings,
             error: Exception,
             flow: FlowId,
             trigger: CID | None = None
@@ -699,13 +734,23 @@ class Engine:
         overlooked edge case. For instance, matching an error completion.
         '''
     
-    async def event_invoked(self, event: ActionId) -> Bindings | None:
+    async def stim_invoked(self,
+            stim: ActionId,
+            params: Bindings,
+            flow: FlowId,
+            trigger: CID | None
+        ) -> Bindings | None:
         '''
-        An event was invoked by a sync which is invalid. Return either the
+        A stimulus was invoked by a sync which is invalid. Return either the
         result to give the action completion or None to leave it incomplete.
         '''
     
-    async def no_such_action(self, action: ActionId) -> Bindings | None:
+    async def no_action(self,
+            action: ActionId,
+            params: Bindings,
+            flow: FlowId,
+            trigger: CID | None
+        ) -> Bindings | None:
         '''
         An action was invoked which does not exist on an existant concept.
         Return either the result to give the action completion or None to
@@ -713,7 +758,12 @@ class Engine:
         '''
         return None
 
-    async def no_such_concept(self, concept: str) -> Bindings | None:
+    async def no_concept(self,
+            concept: str,
+            params: Bindings,
+            flow: FlowId,
+            trigger: CID | None
+        ) -> Bindings | None:
         '''
         A nonexistant concept was referenced. Return either the result to give
         the action completion or None to leave it incomplete.
@@ -737,7 +787,7 @@ class Engine:
 
         await self.queue.put(Completion(
             trigger=trigger,
-            flow=flow or self.new_flow().uuid,
+            flow=flow or self._new_flow().uuid,
             action=action,
             params=params,
             result=result,
@@ -755,20 +805,20 @@ class Engine:
         indicates an error where it could not be completed.
         '''
         if flow is None:
-            flow = self.new_flow().uuid
+            flow = self._new_flow().uuid
         try:
-            con, act = self.resolve_action(action)
-        except EventInvoked as e:
-            return await self.event_invoked(e.args[0])
+            con, act = self._resolve_action(action)
+        except StimInvoked as e:
+            return await self.stim_invoked(action, params, flow, trigger)
         except NoSuchAction as e:
-            return await self.no_such_action(e.args[0])
+            return await self.no_action(action, params, flow, trigger)
         except NoSuchConcept as e:
-            return await self.no_such_concept(e.args[0])
+            return await self.no_concept(action, params, flow, trigger)
         
         try:
             result: Bindings = await getattr(con, act)(flow=flow, **params)
         except Exception as e:
-            return await self.uncaught(e, flow, trigger)
+            return await self.uncaught(action, params, e, flow, trigger)
         
         await self.complete(
             action, params, result,
@@ -793,15 +843,15 @@ class Engine:
         for act in set(when.action for when in sync.when):
             self.syncdeps[act].append(sync)
 
-    def resolve_action(self, action: ActionId) -> tuple[Concept, str]:
+    def _resolve_action(self, action: ActionId) -> tuple[Concept, str]:
         '''Resolve an ActionId to a concept and the name of the method.'''
         c, a = action.rsplit('/', 1)
         if ce := self.concepts.get(c):
             con = ce.concept
             if act := con.actions.get(a):
                 return con, act
-            elif a in con.events:
-                raise EventInvoked(action)
+            elif a in con.stimuli:
+                raise StimInvoked(action)
             else:
                 raise NoSuchAction(action)
         else:
@@ -812,12 +862,17 @@ class Engine:
 
         async with ent.concept as c:
             cn = c.name
-            c.state = self.state.get(cn, {})
-            async for evt, inp, out in c.bootstrap():
-                flow = self.new_flow().uuid
+            if (state := self.state.get(cn)) is None:
+                # Bootstrap with a UUID
+                state: State|None = {
+                    str(UUID(int=0)): {"uuid": str(UUID7().uuid7)}
+                }
+            c.state = state
+            async for event, result, out in self.bootstrap(c):
+                flow = self._new_flow().uuid
                 try:
-                    res: Bindings | None = await getattr(c, evt)(
-                        flow=flow, **inp
+                    res: Bindings | None = await getattr(c, event)(
+                        flow=flow, **result
                     )
                     if res is None:
                         result = {} if out is None else out
@@ -826,21 +881,23 @@ class Engine:
                     else:
                         result = {**out, **res}
                 except Exception as e:
-                    result = {"error": format_error(e)}
+                    result = await self.uncaught(event, result, e, flow)
+                    if result is None:
+                        continue
                 
                 await self.complete(
-                    f"{cn}/{evt}", inp, result,
+                    f"{cn}/{event}", result, result,
                     freeze_state(c.state),
                     flow=flow
                 )
         ent.bootstrap = None
 
-    def new_flow(self):
+    def _new_flow(self):
         flow = Flow()
         self.flows[flow.uuid] = flow
         return flow
 
-    async def trigger(self,
+    async def _trigger(self,
             flow: Flow,
             sync: Sync,
             candidate: Iterable[CID]
@@ -853,7 +910,7 @@ class Engine:
 
         # [when]
 
-        completions = dict[CID, Completion]()
+        completions: dict[CID, Completion] = {}
 
         for candi, when in zip(candidate, sync.when):
             comp = flow.completions[candi]
@@ -866,7 +923,7 @@ class Engine:
         
         # [where]
 
-        bss: set[ImmutablePromise[Bindings]] = {ImmutablePromise(bindings)}
+        bss = {ImmutablePromise(bindings)}
         for where in sync.where:
             # For each binding we have thus far, we want to expand them
             # into the sets of bindings
@@ -875,8 +932,11 @@ class Engine:
                 match where:
                     # Query concept state
                     case Query(concept=concept, pattern=pattern):
-                        c = self.concepts[concept].concept
                         bs = {**base.value}
+                        if isinstance(concept, Var):
+                            if not isinstance(concept := bs[concept.name], str):
+                                continue
+                        c = self.concepts[concept].concept
                         if not match_state(pattern, cast(dict[str, Bindings], c.state), bs):
                             # Query failed, treat as an empty set
                             continue
@@ -889,7 +949,6 @@ class Engine:
             
             bss = {bs for nbs in nbss for bs in nbs}
         
-        print(bindings, bss)
         # [then]
 
         trigger = Trigger(
@@ -903,9 +962,14 @@ class Engine:
 
         for bs in bss:
             for then in sync.then:
+                if isinstance(action := then.action, Var):
+                    if not isinstance(action := bindings[action.name], str):
+                        # Todo: Report invalid?
+                        continue
+                
                 # Completion already registered, we don't need the result
                 await self.invoke(
-                    then.action, then.resolve(bs.value),
+                    action, then.resolve(bs.value),
                     flow=flow.uuid,
                     trigger=tcid
                 )
@@ -948,6 +1012,6 @@ class Engine:
                         if len(candidate) != len(set(candidate)):
                             continue
 
-                        if await self.trigger(flow, dep, candidate):
+                        if await self._trigger(flow, dep, candidate):
                             # Successfully processed, don't try any more
                             break

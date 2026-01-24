@@ -7,7 +7,7 @@ import re
 
 from uuid_extension import uuid7
 
-from memoria.hypersync import Bindings, Concept, FlowId, action, event
+from memoria.hypersync import Bindings, Concept, FlowId, action, stimulus
 
 type iso8601 = str
 
@@ -235,13 +235,13 @@ class Cron(Concept[LocalState]):
     class Done(TypedDict):
         done: Literal[True]
 
-    @event
-    async def job(self, **_) -> Result:
+    @stimulus
+    async def job(self) -> Result:
         '''Event for when a cron entry is matched.'''
         ...
     
-    @event
-    async def reboot(self, **_) -> Result:
+    @stimulus
+    async def reboot(self) -> Result:
         '''Event for when the cron concept starts.'''
         ...
     
@@ -264,7 +264,7 @@ class Cron(Concept[LocalState]):
         return {"cron": cron}
 
     @action
-    async def cancel(self, *, cron: str, **_) -> Done:
+    async def cancel(self, *, cron: str) -> Done:
         '''Cancel an existing cron job.'''
         if cron not in self.state:
             raise LookupError(f"cron job {cron}")

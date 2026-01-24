@@ -4,9 +4,9 @@ class Test(Concept):
     """Test concept that does nothing."""
 
     @action
-    async def nop(self, **_):
+    async def nop(self):
         return {"done": True}
     
     @action
-    async def echo(self, *, value: str, **_):
+    async def echo(self, *, value: str):
         return {"value": value}

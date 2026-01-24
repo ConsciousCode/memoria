@@ -170,28 +170,88 @@ class CLIEngine(Engine):
 
     @override
     async def uncaught(self,
+            action: ActionId,
+            params: Bindings,
             error: Exception,
             flow: FlowId,
             trigger: CID | None = None
         ):
         print("Uncaught", error)
-        return await super().uncaught(error, flow, trigger)
+        fmt = await super().uncaught(action, params, error, flow, trigger)
+        await self.invoke(
+            "Report/uncaught", {
+                "action": action,
+                "params": params,
+                "error": fmt
+            },
+            flow, trigger
+        )
+        # Format the error for the completion
+        return fmt
     
     @override
     async def ignored(self, cmp: Completion):
+        if cmp.action.startswith("Report"):
+            # Avoid an infinite loop, also blacklist other reports
+            return
         print("Ignored:", cmp.action, cmp.params, cmp.result)
+        await self.invoke(
+            "Report/ignored", {
+                "action": cmp.action,
+                "params": cmp.params,
+                "result": cmp.result
+            },
+            cmp.flow, cmp.trigger
+        )
     
     @override
-    async def event_invoked(self, event: ActionId):
-        print("EventInvoked:", event)
+    async def stim_invoked(self,
+            stim: ActionId,
+            params: Bindings,
+            flow: FlowId,
+            trigger: CID | None
+        ):
+        print("StimInvoked:", stim)
+
+        await self.invoke(
+            "Report/stimulus_invoked", {
+                "stimulus": stim,
+                "params": params
+            },
+            flow, trigger
+        )
     
     @override
-    async def no_such_action(self, action: ActionId):
+    async def no_action(self,
+            action: ActionId,
+            params: Bindings,
+            flow: FlowId,
+            trigger: CID | None
+        ):
         print("NoSuchAction:", action)
+        await self.invoke(
+            "Report/no_action", {
+                "action": action,
+                "params": params
+            },
+            flow, trigger
+        )
 
     @override
-    async def no_such_concept(self, concept: str):
+    async def no_concept(self,
+            concept: str,
+            params: Bindings,
+            flow: FlowId,
+            trigger: CID | None
+        ):
         print("NoSuchConcept:", concept)
+        await self.invoke(
+            "Report/no_concept", {
+                "concept": concept,
+                "params": params
+            },
+            flow, trigger
+        )
 
 async def repl(engine: CLIEngine):
     env = {}
@@ -259,6 +319,18 @@ async def main(name, *argv):
                 then=[
                     Then("HTTP/respond", {"request": Var("request"), "text": "yes"}),
                     Then("Stdio/print", {"data": "yes"})
+                ]
+            ),
+            Sync("LLMTool",
+                purpose="Invoke actions to fulfill LLM tool call requests",
+                when=[
+                    When("Chat/completion", {}, {
+                        "tool_calls": {
+                            Var(""): {
+
+                            }
+                        }
+                    })
                 ]
             )
         ]

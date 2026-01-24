@@ -1,6 +1,6 @@
 import asyncio
 from typing import TypedDict
-from memoria.hypersync import Engine, Sync, Concept, Var, When, Then, action, event
+from memoria.hypersync import Engine, Sync, Concept, Var, When, Then, action, stimulus
 
 import aioconsole
 
@@ -11,7 +11,7 @@ class Stdio(Concept):
     class Input(TypedDict):
         data: str
 
-    @event
+    @stimulus
     async def input(self) -> Input:
         ...
     
