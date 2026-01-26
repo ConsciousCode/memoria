@@ -5,8 +5,7 @@ PRAGMA foreign_keys=ON;
 **/
 CREATE TABLE IF NOT EXISTS memories (
     rowid INTEGER PRIMARY KEY,
-    uuid BLOB UNIQUE,
-    cid BLOB UNIQUE NOT NULL,
+    uuid BLOB UNIQUE NOT NULL,
     data JSONB NOT NULL
 );
 

@@ -7,9 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from cid import CIDv1
-
-from .memory import Memory, MemoryDataAdapter, PartialMemory
+from .memory import Memory, MemoryDataAdapter
 from .util import nonempty_tuple
 
 __all__ = (
@@ -29,20 +27,17 @@ type JSONB = str
 ## PrimaryKey aliases also give us little semantic type hints for the linter
 
 class MemoryRow(BaseModel):
-    '''A completed memory, has a CID.'''
-    
+    '''A memory row from the database.'''
+
     type PrimaryKey = int
-    
+
     rowid: PrimaryKey
-    cid: bytes
-    uuid: bytes | None
+    uuid: bytes
     data: JSONB
 
-    def to_partial(self, edges: Iterable[CIDv1]=()) -> PartialMemory:
-        u = self.uuid
-        return PartialMemory(
-            uuid=None if u is None else UUID(bytes=u),
-            cid=CIDv1(self.cid),
+    def to_memory(self, edges: Iterable[UUID]=()) -> Memory:
+        return Memory(
+            uuid=UUID(bytes=self.uuid),
             data=MemoryDataAdapter.validate_json(self.data),
             edges=set(edges)
         )
@@ -160,132 +155,128 @@ class DatabaseRO(Database):
             self.rollback()
             raise
     
-    def has_cid(self, cid: CIDv1) -> bool:
-        '''Check if the database has a CID.'''
+    def has_uuid(self, uuid: UUID) -> bool:
+        '''Check if the database has a UUID.'''
         cur = self.cursor()
-        _ = cur.execute("SELECT 1 FROM memories WHERE cid = ?", (cid.buffer,))
+        _ = cur.execute("SELECT 1 FROM memories WHERE uuid = ?", (uuid.bytes,))
         return bool(cur.fetchone())
-    
+
     @overload
-    def select_memory(self, *, cid: CIDv1) -> MemoryRow | None: ...
+    def select_memory(self, *, uuid: UUID) -> MemoryRow | None: ...
     @overload
     def select_memory(self, *, rowid: int) -> MemoryRow | None: ...
-    
+
     def select_memory(self, *,
-            cid: CIDv1 | None=None,
+            uuid: UUID | None=None,
             rowid: int | None=None
         ) -> MemoryRow | None:
-        '''Lookup a memory object by CID or rowid.'''
+        '''Lookup a memory object by UUID or rowid.'''
         return self.cursor(MemoryRow).execute("""
-            SELECT rowid, cid, uuid, JSON(data) as data
+            SELECT rowid, uuid, JSON(data) as data
             FROM memories
-            WHERE cid = ? OR rowid = ?
-        """, (cid and cid.buffer, rowid)).fetchone()
-    
-    def select_memories(self, cids: Iterable[CIDv1]) -> Iterable[MemoryRow]:
-        '''Lookup a memory object by CID or rowid.'''
+            WHERE uuid = ? OR rowid = ?
+        """, (uuid and uuid.bytes, rowid)).fetchone()
+
+    def select_memories(self, uuids: Iterable[UUID]) -> Iterable[MemoryRow]:
+        '''Lookup memory objects by UUID.'''
         return self.cursor(MemoryRow).executemany("""
-            SELECT rowid, cid, uuid, JSON(data) as data
+            SELECT rowid, uuid, JSON(data) as data
             FROM memories
-            WHERE cid = ? OR rowid = ?
-        """, ((cid.buffer,) for cid in cids))
-    
-    def select_memory_ipld(self, *, cid: CIDv1) -> PartialMemory | None:
+            WHERE uuid = ?
+        """, ((uuid.bytes,) for uuid in uuids))
+
+    def select_memory_full(self, *, uuid: UUID) -> Memory | None:
         '''
-        Lookup a memory by CID, returning the complete Memory object.
+        Lookup a memory by UUID, returning the complete Memory object.
         This is used to retrieve the memory data and edges.
         '''
-        if mr := self.select_memory(cid=cid):
-            return mr.to_partial(self.backward_edges(rowid=mr.rowid))
+        if mr := self.select_memory(uuid=uuid):
+            return mr.to_memory(self.backward_edges(rowid=mr.rowid))
     
     @overload
-    def backward_edges(self, *, rowid: int) -> Iterable[CIDv1]: ...
+    def backward_edges(self, *, rowid: int) -> Iterable[UUID]: ...
     @overload
-    def backward_edges(self, *, cid: CIDv1) -> Iterable[CIDv1]: ...
+    def backward_edges(self, *, uuid: UUID) -> Iterable[UUID]: ...
 
     def backward_edges(self, *,
             rowid: int | None=None,
-            cid: CIDv1 | None=None
-        ) -> Iterable[CIDv1]:
+            uuid: UUID | None=None
+        ) -> Iterable[UUID]:
         '''Get all edges leading from the given memory.'''
         cur = self.cursor(return_type=tuple[bytes])
         _ = cur.execute("""
-            SELECT dst.cid
+            SELECT dst.uuid
             FROM edges e
                 JOIN memories dst ON e.dst_id = dst.rowid
                 LEFT JOIN memories src ON e.src_id = src.rowid
-            WHERE src.cid = ? OR src.rowid = ?
-        """, (cid and cid.buffer, rowid))
-        for mcid, in cur:
-            yield CIDv1(mcid)
+            WHERE src.uuid = ? OR src.rowid = ?
+        """, (uuid and uuid.bytes, rowid))
+        for uuid_bytes, in cur:
+            yield UUID(bytes=uuid_bytes)
 
     @overload
     def dependencies(self, *, rowid: int) -> Iterable[MemoryRow]: ...
     @overload
-    def dependencies(self, *, cid: CIDv1) -> Iterable[MemoryRow]: ...
+    def dependencies(self, *, uuid: UUID) -> Iterable[MemoryRow]: ...
 
     def dependencies(self, *,
             rowid: int | None=None,
-            cid: CIDv1 | None=None
+            uuid: UUID | None=None
         ) -> Iterable[MemoryRow]:
         '''
-        Get all edges leading to the given memory, returning the source id
-        and weight of the edge.
+        Get all edges leading to the given memory, returning the destination
+        memories (the memories that this memory depends on).
         '''
         return self.cursor(MemoryRow).execute("""
             SELECT
-                dst.rowid as rowid, dst.cid as cid,
-                dst.uuid as uuid, JSON(dst.data) as data
+                dst.rowid as rowid, dst.uuid as uuid, JSON(dst.data) as data
             FROM edges e
                 JOIN memories dst ON e.dst_id = dst.rowid
-                LEFT JOIN memories src ON e.src_d = src.rowid
-            WHERE src.cid = ? OR src.rowid = ?
-        """, (cid and cid.buffer, rowid))
+                LEFT JOIN memories src ON e.src_id = src.rowid
+            WHERE src.uuid = ? OR src.rowid = ?
+        """, (uuid and uuid.bytes, rowid))
     
     @overload
-    def references(self, *, cid: CIDv1) -> Iterable[MemoryRow]: ...
+    def references(self, *, uuid: UUID) -> Iterable[MemoryRow]: ...
     @overload
     def references(self, *, rowid: int) -> Iterable[MemoryRow]: ...
-    
+
     def references(self, *,
         rowid: int | None=None,
-        cid: CIDv1 | None=None
+        uuid: UUID | None=None
     ) -> Iterable[MemoryRow]:
         '''
-        Get all edges leading from the given memory, returning the destination id
-        and weight of the edge.
+        Get all memories that reference this memory (memories that point TO this one).
         '''
         return self.cursor(MemoryRow).execute("""
             SELECT
-                m.rowid as rowid, m.cid as cid,
-                m.uuid as uuid, JSON(m.data) as data
+                src.rowid as rowid, src.uuid as uuid, JSON(src.data) as data
             FROM edges e
                 JOIN memories src ON e.src_id = src.rowid
                 JOIN memories dst ON e.dst_id = dst.rowid
-            WHERE dst.cid = ? OR dst.rowid = ?
-        """, (cid and cid.buffer, rowid))
+            WHERE dst.uuid = ? OR dst.rowid = ?
+        """, (uuid and uuid.bytes, rowid))
     
     def all_memories(self) -> Iterable[MemoryRow]:
         return self.cursor(MemoryRow).execute("""
-            SELECT rowid, cid, uuid, JSON(data) as data
+            SELECT rowid, uuid, JSON(data) as data
             FROM memories
             ORDER BY uuid DESC
         """)
-    
+
     def list_memories(self, page: int, perpage: int) -> Iterable[MemoryRow]:
         cur = self.cursor(MemoryRow)
         return cur.execute("""
-            SELECT rowid, cid, timestamp, kind, JSON(data) AS data
+            SELECT rowid, uuid, JSON(data) AS data
             FROM memories
             ORDER BY rowid DESC
             LIMIT ? OFFSET ?
         """, (perpage, (page - 1) * perpage))
-    
+
     def all_referenced(self, count: int|None) -> Iterable[MemoryRow]:
         cur = self.cursor(MemoryRow)
         return cur.execute("""
-            SELECT m.rowid AS rowid, m.cid AS cid,
-                m.uuid AS uuid, JSON(m.data) AS data
+            SELECT m.rowid AS rowid, m.uuid AS uuid, JSON(m.data) AS data
             FROM memories m
             LEFT JOIN edges e ON m.rowid = e.dst_id
             GROUP BY m.rowid
@@ -295,37 +286,35 @@ class DatabaseRO(Database):
 
 class DatabaseRW(DatabaseRO):
     '''Provides mutating operations for the database.'''
-    
+
     def insert_memory(self, memory: Memory) -> int:
-        cid = memory.cid.buffer
-        uid = memory.uuid
+        uid = memory.uuid.bytes
         cur = self.cursor(return_type=tuple[int])
         _ = cur.execute("""
-            INSERT OR IGNORE INTO memories (cid, uuid, data)
-            VALUES (?, ?, JSONB(?))
+            INSERT OR IGNORE INTO memories (uuid, data)
+            VALUES (?, JSONB(?))
         """, (
-            cid,
-            None if uid is None else uid,
+            uid,
             memory.data.model_dump_json()
         ))
-        
+
         if rowid := cur.lastrowid:
-            # Continue insertion
+            # Continue insertion - add edges
             _ = cur.executemany("""
                 INSERT OR IGNORE INTO edges (src_id, dst_id)
                 SELECT ?, rowid
-                FROM memories m WHERE cid = ?
-            """, ((rowid, e.buffer) for e in memory.edges))
+                FROM memories m WHERE uuid = ?
+            """, ((rowid, e.bytes) for e in memory.edges))
         # 0 (ignored) or None (error)
         else:
             # Memory already exists
             row = cur.execute("""
-                SELECT rowid FROM memories WHERE cid = ?
-            """, (cid,)).fetchone()
+                SELECT rowid FROM memories WHERE uuid = ?
+            """, (uid,)).fetchone()
             if row is None:
                 raise RuntimeError(
-                    "Failed to either insert memory or lookup by CID."
+                    "Failed to either insert memory or lookup by UUID."
                 )
             rowid, = row
-        
+
         return rowid
