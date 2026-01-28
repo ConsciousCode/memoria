@@ -11,11 +11,15 @@ At each turn:
 6. Store new memories in the DAG
 """
 
-import os
+import inspect
 import sys
+from typing import assert_never, cast
 from uuid import UUID
 from pathlib import Path
+import re
+import itertools
 
+import yaml
 from uuid_extension import uuid7 as _uuid7
 
 def uuid7():
@@ -24,136 +28,206 @@ def uuid7():
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+from memoria.util import json_t
 from memoria.db import database
 from memoria.subject import Subject
 from memoria.config import RecallConfig
+from memoria import memory
 from memoria.memory import (
-    Memory, OtherData, SelfData, TextPart, MemoryDAG
+    Memory, OtherMemory, SelfMemory, TextPart, MemoryDAG
 )
 
-try:
-    from anthropic import Anthropic
-    HAS_ANTHROPIC = True
-except ImportError:
-    HAS_ANTHROPIC = False
-    print("Warning: anthropic package not installed. Install with: pip install anthropic")
-    print("Falling back to echo mode (no actual LLM calls)")
+from pydantic_ai import Agent, BinaryContent, FilePart, ModelMessage, ModelRequest, ModelRequestPart, ModelResponse, ModelResponsePart, UserContent
+from pydantic_ai.messages import (
+    SystemPromptPart, UserPromptPart, TextPart, ThinkingPart,
+    ToolCallPart, ToolReturnPart
+)
 
+FRONTMATTER = re.compile(r'^---\n([\s\S\n]+?)\n---([\s\S\n]*)$')
 
-def format_memory_frontmatter(uuid: UUID, memory: Memory, simplified_id: int) -> str:
-    """Format a memory as markdown with frontmatter."""
-    lines = ["---"]
-    lines.append(f"id: {simplified_id}")
-    lines.append(f"uuid: {uuid}")
+def convert_metadata(m: Memory, idmap: dict[UUID, int]):
+    extra = m.__pydantic_extra__
+    metadata = {
+        "id": idmap[m.uuid],
+        "edges": [idmap[e] for e in m.edges],
+        **({} if extra is None else extra)
+    }
 
-    # Add edge references as simplified IDs (if we have them in context)
-    if memory.edges:
-        edge_ids = [str(e) for e in memory.edges]
-        lines.append(f"edges: [{', '.join(edge_ids)}]")
+    frontmatter = yaml.safe_dump(
+        metadata, default_flow_style=False, sort_keys=False
+    )
+    return f"---\n{frontmatter}---"
 
-    # Add metadata from memory data
-    if memory.data.kind == "other":
-        lines.append("role: user")
-    elif memory.data.kind == "self":
-        lines.append("role: assistant")
-        if memory.data.model:
-            lines.append(f"model: {memory.data.model}")
-    elif memory.data.kind == "system":
-        lines.append("role: system")
-    elif memory.data.kind == "meta":
-        lines.append("role: meta")
-        for key, value in memory.data.metadata.items():
-            lines.append(f"{key}: {value}")
+def load_file(uuid: UUID) -> bytes|None:
+    # TODO: Consider directory sharding
+    return None
 
-    lines.append("---")
-    lines.append("")
+def convert_self(m: SelfMemory, idmap: dict[UUID, int]) -> tuple[list[ModelResponsePart], list[ToolReturnPart]]:
+    parts: list[ModelResponsePart] = [
+        TextPart(content=convert_metadata(m, idmap))
+    ]
+    tools: list[ToolReturnPart] = []
 
-    # Add content
-    if hasattr(memory.data, 'parts'):
-        for part in memory.data.parts:
-            if part.kind == "text":
-                lines.append(part.content)
+    for part in m.parts:
+        match part:
+            case memory.TextPart(content=content):
+                parts.append(TextPart(content=content))
+            
+            case memory.ThinkPart(content=c, think_id=tid, signature=sig):
+                parts.append(ThinkingPart(c, id=tid, signature=sig))
+            
+            case memory.ToolPart(name=name, args=args, result=result, call_id=cid):
+                parts.append(ToolCallPart(name, args, cid))
+                tools.append(ToolReturnPart(name, result, cid))
+            
+            case memory.FilePart(file=uuid, mimetype=mt):
+                # This isn't really implemented and requires the agent generate
+                # its own multimedia, probably out of scope
+                if content := load_file(uuid):
+                    parts.append(FilePart(BinaryContent(
+                        content, media_type=mt
+                    )))
+                else:
+                    parts.append(TextPart(
+                        f"[file failed to load {mt} {uuid}]"
+                    ))
+            
+            case x:
+                assert_never(x)
+    
+    return parts, tools
 
-    return "\n".join(lines)
+def convert_other(m: OtherMemory, idmap: dict[UUID, int]) -> UserPromptPart:
+    parts: list[UserContent] = [convert_metadata(m, idmap)]
+    for part in m.parts:
+        match part:
+            case memory.TextPart(content=content):
+                if isinstance(parts[-1], str):
+                    parts[-1] += content
+                else:
+                    parts.append(content)
+            
+            case memory.FilePart(file=uuid, mimetype=mt):
+                if content := load_file(uuid):
+                    parts.append(BinaryContent(content, media_type=mt))
+                else:
+                    parts.append(f"[file failed to load {mt} {uuid}]")
+            
+            case x:
+                assert_never(x)
+    
+    return UserPromptPart(parts)
 
-
-def format_foliation(dag: MemoryDAG) -> str:
-    """Format a memory foliation as markdown with frontmatter."""
+def dag_to_messages(g: MemoryDAG) -> tuple[list[ModelMessage], dict[UUID, int]]:
+    """
+    Convert memory DAG to pydantic_ai message objects.
+    Returns (system_prompts, conversation_messages).
+    """
     # Create UUID -> simplified ID mapping
-    uuid_to_id = {uuid: i for i, uuid in enumerate(dag.keys(), 1)}
+    idmap: dict[UUID, int] = {uuid: i for i, uuid in enumerate(g.keys(), 1)}
 
-    sections = []
-    for uuid, memory in dag.items():
-        simplified_id = uuid_to_id.get(uuid, 0)
-        sections.append(format_memory_frontmatter(uuid, memory, simplified_id))
+    # In memory tool calls and results are paired together, so we have
+    # to untether them into request-response with a running list.
+    pending: list[ModelRequestPart] = []
+    ms: list[ModelMessage] = []
 
-    return "\n\n---\n\n".join(sections)
+    # Sort by UUID as a tie-breaker for temporal ordering
+    for uuid in g.toposort(key=lambda x: x.uuid):
+        match m := g[uuid]:
+            case SelfMemory():
+                # Don't want to let these persist over multiple messages
+                if pending:
+                    ms.append(ModelRequest(pending))
 
+                parts, tools = convert_self(m, idmap)
+                ms.append(ModelResponse(parts))
+                pending = cast(list[ModelRequestPart], tools)
+            
+            case OtherMemory():
+                pending.append(convert_other(m, idmap))
+                ms.append(ModelRequest(pending))
+                pending = []
+            
+            case x:
+                assert_never(x)
+    
+    if pending:
+        ms.append(ModelRequest(pending))
 
-def parse_frontmatter(text: str) -> tuple[dict, str]:
-    """Parse markdown frontmatter from text."""
-    if not text.startswith("---"):
-        return {}, text
+    return ms, idmap
 
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return {}, text
-
-    frontmatter_text = parts[1].strip()
-    content = parts[2].strip()
-
-    metadata = {}
-    for line in frontmatter_text.split("\n"):
-        line = line.strip()
-        if ":" in line:
-            key, value = line.split(":", 1)
-            metadata[key.strip()] = value.strip()
-
-    return metadata, content
-
-
-def get_recent_roots(subject: Subject, n: int = 3) -> list[UUID]:
-    """Get the N most recent memory UUIDs as roots for recall."""
-    roots = []
-    for memory in subject.list_memories(page=1, perpage=n):
-        roots.append(memory.uuid)
-    return roots
-
-
-def create_user_memory(text: str, edges: set[UUID] | None = None) -> Memory:
+def create_other(text: str, edges: set[UUID], metadata: dict[str, json_t] | None = None) -> Memory:
     """Create a user memory from text input."""
-    return Memory(
+    return OtherMemory(
         uuid=uuid7(),
-        data=OtherData(
-            parts=[TextPart(content=text)]
-        ),
+        metadata={} if metadata is None else metadata,
+        parts=[memory.TextPart(content=text)],
         edges=edges or set()
     )
 
+def format_frontmatter(text: str):
+    return 
 
-def create_assistant_memory(text: str, edges: set[UUID] | None = None, model: str | None = None) -> Memory:
+def parse_frontmatter(text: str) -> tuple[dict[str, json_t], str]:
+    if (m := FRONTMATTER.match(text)) is None:
+        raise ValueError("No frontmatter")
+
+    try:
+        data = yaml.safe_load(m[1])
+    except yaml.YAMLError:
+        raise ValueError("No frontmatter") from None
+    
+    if not isinstance(data, dict):
+        raise ValueError("Frontmatter is not a dictionary")
+    
+    return data, m[2]
+
+def create_self(text: str, idmap: dict[int, UUID], frontmatter: dict[str, json_t], metadata: dict[str, json_t]|None = None) -> Memory:
     """Create an assistant memory from LLM output."""
-    return Memory(
+
+    frontmatter.pop('id')
+    if not isinstance(es := frontmatter.pop('edges'), list):
+        raise TypeError("Edges are not a list")
+    edges = set(idmap[e] for e in cast(list[int], es))
+
+    return SelfMemory(
         uuid=uuid7(),
-        data=SelfData(
-            parts=[TextPart(content=text)],
-            model=model
-        ),
-        edges=edges or set()
+        metadata={} if metadata is None else metadata,
+        edges=edges,
+        parts=[memory.TextPart(content=text)]
     )
 
+class Session[T]:
+    def __init__(self, size: int):
+        self.size = size
+        self.history: list[T] = []
+    
+    def add(self, value: T):
+        self.history.append(value)
+    
+    def get(self):
+        return self.history[-self.size:]
 
-def chatbot_loop(db_path: str = "memoria.db", model: str = "claude-3-5-sonnet-20241022"):
+WINDOW = 10
+
+def chatbot_loop(db_path: str = "memoria.db", model_name: str = "anthropic:claude-3-5-haiku-latest"):
     """Main chatbot REPL loop."""
 
-    # Initialize client if available
-    client = None
-    if HAS_ANTHROPIC:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if api_key:
-            client = Anthropic(api_key=api_key)
-        else:
-            print("Warning: ANTHROPIC_API_KEY not set. Falling back to echo mode.")
+    # Initialize agent with current system prompt
+    agent = Agent(
+        model_name,
+        system_prompt=inspect.cleandoc("""
+            You are a helpful assistant. This conversation was reconstructed from a DAG of your memories, and your responses will be stored in that memory. User memories are linked to every recalled message they saw, while your memories are linked to every message you previously said was a dependency. Every response is in Markdown with frontmatter for metadata. Every response contains its id and dependencies:
+            ---
+            id: 9
+            depends: [2, 5, 7]
+            tags: [tag1, tag2]
+            custom_field: value
+            ---
+            Your actual response here.
+        """)
+    )
+    history: list[Memory] = []
 
     with database(db_path) as db:
         subject = Subject(db)
@@ -170,9 +244,7 @@ def chatbot_loop(db_path: str = "memoria.db", model: str = "claude-3-5-sonnet-20
         while True:
             try:
                 # Get user input
-                user_input = input("You: ").strip()
-
-                if not user_input:
+                if not (user_input := input("You: ").strip()):
                     continue
 
                 # Handle commands
@@ -184,72 +256,46 @@ def chatbot_loop(db_path: str = "memoria.db", model: str = "claude-3-5-sonnet-20
                     print("(History cleared - not implemented in MVP)")
                     continue
 
-                # Create user memory
-                user_memory = create_user_memory(user_input)
-                subject.add_memory(user_memory)
+                # Construct the roots and recall
+                roots = set(itertools.chain(
+                    subject.list_ids(0, 5),
+                    (m.uuid for m in history[-WINDOW:])
+                ))
+                foliation = subject.recall(roots, recall_config)
+                ms, idmap = dag_to_messages(foliation)
+                mapid = {i: u for u, i in idmap.items()}
 
-                # Get recent roots and recall foliation
-                roots = get_recent_roots(subject, n=5)
-                if not roots:
-                    # First message, no history
-                    foliation_text = ""
-                else:
-                    foliation = subject.recall(roots, recall_config)
-                    foliation_text = format_foliation(foliation)
+                # Create user memory (after recall)
+                om = create_other(
+                    user_input, set(m.uuid for m in history)
+                )
+                idmap[om.uuid] = len(idmap)
+                mapid[len(idmap)] = om.uuid
+                subject.add_memory(om)
+                
+                fm = convert_metadata(om, idmap)
 
-                # Prepare context for LLM
-                system_prompt = """You are a helpful assistant. Your responses will be stored in a memory DAG.
-You can include frontmatter metadata in your responses using YAML frontmatter format:
----
-tags: [tag1, tag2]
-custom_field: value
----
+                print(ms)
 
-Your actual response here."""
+                # Call the agent
+                result = agent.run_sync(f"{fm}\n{user_input}", message_history=ms)
+                assistant_text = result.output
+                print(assistant_text)
 
-                if client:
-                    # Call LLM
-                    messages = []
-                    if foliation_text:
-                        messages.append({
-                            "role": "user",
-                            "content": f"Previous context:\n\n{foliation_text}\n\n---\n\nCurrent message: {user_input}"
-                        })
-                    else:
-                        messages.append({
-                            "role": "user",
-                            "content": user_input
-                        })
-
-                    response = client.messages.create(
-                        model=model,
-                        max_tokens=1024,
-                        system=system_prompt,
-                        messages=messages
-                    )
-
-                    assistant_text = response.content[0].text
-                else:
-                    # Echo mode
-                    assistant_text = f"Echo: {user_input}"
-
-                # Parse response
-                metadata, content = parse_frontmatter(assistant_text)
+                # Parse response for metadata
+                frontmatter, content = parse_frontmatter(assistant_text)
 
                 # Create assistant memory
-                assistant_memory = create_assistant_memory(
+                subject.add_memory(create_self(
                     content,
-                    edges={user_memory.uuid},  # Link to the user's message
-                    model=model if client else "echo"
-                )
-                subject.add_memory(assistant_memory)
+                    mapid,
+                    frontmatter=frontmatter,
+                    metadata={
+                        "model": model_name
+                    }
+                ))
 
-                # Display response
-                print(f"\nAssistant: {content}\n")
-
-                if metadata:
-                    print(f"[Metadata: {metadata}]")
-                    print()
+                print(f"\nAssistant: {assistant_text}\n")
 
             except KeyboardInterrupt:
                 print("\n\nGoodbye!")

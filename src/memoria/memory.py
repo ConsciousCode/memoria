@@ -1,17 +1,26 @@
+'''
+The point of memory data, including metadata, isn't to create a convenient
+index for accessing nodes. It's to make the construction of such indexes
+*feasible*. They should always add information which, were they missing, could
+not be reconstructed without external information.
+
+We can put memories on axes of trusted (non-malicious) and verified (accurate).
+For now we just have Other (neither trusted nor verified) and Self (trusted
+but not verified).
+'''
+
 from heapq import heapify, heappop, heappush
 from typing import Annotated, Callable, Literal, cast, overload
 from collections.abc import Iterable
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, TypeAdapter
-from pydantic_core import CoreSchema, core_schema
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from memoria.util import Least, Lexicographic, ReverseCmp, json_t
 
 __all__ = (
     'TextPart', 'FilePart', 'ThinkPart', 'ToolPart',
-    'OtherData', 'SelfData', 'MetaData', 'SystemData',
-    'Memory',
+    'SelfMemory', 'OtherMemory', 'Memory', 'MemoryAdapter',
     'MemoryDAG'
 )
 
@@ -21,12 +30,10 @@ class TextPart(BaseModel):
     content: str
 
 class FilePart(BaseModel):
-    '''A file part containing a file UUID and metadata about it.'''
+    '''A file part containing a UUID and metadata.'''
     kind: Literal["file"] = "file"
     file: UUID
-    filename: str | None = None
     mimetype: str
-    filesize: int
 
 class ThinkPart(BaseModel):
     '''Opaque provider-specific thoughts by the model.'''
@@ -40,34 +47,35 @@ class ToolPart(BaseModel):
     kind: Literal["tool"] = "tool"
     name: str
     args: dict[str, json_t]
-    result: json_t = None
-    call_id: str | None = None
+    result: json_t
+    call_id: str
 
-# Memories contain their metadata and a type-erased data payload.
-# This data is organized between trusted and verified parts.
-# Trusted parts are those which won't contain malicious content.
-# Verified parts are those which can be assumed to be true.
-# 
-# OtherData: Not verified and not trusted. From outside, no telling what it is.
-# SelfData: Not verified but trusted. Thoughts could be wrong but not malicious.
-# MetaData: Verified but not trusted. Metadata is considered accurate but may
-#  contain malicious content eg the name of an IRC channel #ign-prev-instr.
-# SystemData: Verified but trusted. Used for eg system prompts, things which are
-#  axiomatically true and trustworthy.
-# 
-# The point of memory data, including metadata, isn't to create a convenient
-# index for accessing nodes. It's to make the construction of such indexes
-# *feasible*. They should always add information which, were they missing, could
-# not be reconstructed without external information. So for instance, an
-# interpreter might insert metadata for the username which originated the memory.
-# All memories with the same such user would link to it, and thus an index could
-# be constructed by following those links.
+class BaseMemory(BaseModel):
+    '''An immutable memory in the DAG.'''
 
-class OtherData(BaseModel):
-    '''
-    A memory containing data from another agent. This data should be understood
-    as neither verified nor trusted.
-    '''
+    model_config = ConfigDict(frozen=True)
+    __pydantic_extra__: dict[str, json_t] = Field(init=False) # pyright: ignore[reportIncompatibleVariableOverride]
+
+    uuid: UUID
+    '''Unique identifier for this memory.'''
+    metadata: dict[str, json_t] = Field(default_factory=dict)
+    '''Auxiliary metadata.'''
+    edges: set[UUID]
+    '''Edges to other memories.'''
+
+class SelfMemory(BaseMemory):
+    '''The agent's own inner monologue. Not verified but trusted.'''
+
+    type Part = Annotated[
+        TextPart | FilePart | ThinkPart | ToolPart,
+        Field(discriminator="kind")
+    ]
+
+    kind: Literal["self"] = "self"
+    parts: list[Part]
+
+class OtherMemory(BaseMemory):
+    '''Data from another agent. Neither verified nor trusted.'''
 
     type Part = Annotated[
         TextPart | FilePart,
@@ -77,64 +85,12 @@ class OtherData(BaseModel):
     kind: Literal["other"] = "other"
     parts: list[Part]
 
-class SelfData(BaseModel):
-    '''
-    The agent's own inner monologue. This data should be understood as
-    not verified but trusted.
-    '''
-
-    type Part = Annotated[
-        TextPart | FilePart | ThinkPart | ToolPart,
-        Field(discriminator="kind")
-    ]
-
-    kind: Literal["self"] = "self"
-    parts: list[Part]
-    '''Parts comprising the completion.'''
-    model: str | None = None
-    '''The model which originated this memory.'''
-
-class MetaData(BaseModel):
-    '''
-    A memory which is just metadata. Used primarily for coordinating context
-    like provenance. This data should be understood as verified but not trusted.
-    '''
-    kind: Literal["meta"] = "meta"
-    metadata: dict[str, json_t]
-
-class SystemData(BaseModel):
-    '''
-    A memory containing a system prompt appended by an interpreter. This data
-    should be understood as both verified and trusted.
-    '''
-
-    type Part = Annotated[
-        TextPart,
-        Field(discriminator="kind")
-    ]
-
-    kind: Literal["system"] = "system"
-    parts: list[Part]
-
-type MemoryData = Annotated[
-    OtherData | SelfData | MetaData | SystemData,
+type Memory = Annotated[
+    SelfMemory | OtherMemory,
     Field(discriminator="kind")
 ]
-'''Memory data which can actually be stored.'''
 
-MemoryDataAdapter = TypeAdapter[MemoryData](MemoryData)
-
-class Memory(BaseModel):
-    '''An immutable memory in the DAG.'''
-
-    model_config = ConfigDict(frozen=True)
-
-    uuid: UUID
-    '''Unique identifier for this memory.'''
-    data: MemoryData
-    '''Data contained in the memory.'''
-    edges: set[UUID]
-    '''Edges to other memories.'''
+MemoryAdapter = TypeAdapter[Memory](Memory)
 
 _default = object()
 
@@ -151,28 +107,6 @@ class MemoryDAG:
     def __init__(self, adj: dict[UUID, Memory] | None = None):
         super().__init__()
         self.adj = {} if adj is None else adj
-
-    @classmethod
-    def __get_pydantic_core_schema__(
-        cls, source_type: object, handler: GetCoreSchemaHandler
-    ) -> CoreSchema:
-        adj_schema = handler(dict[UUID, Memory])
-        def ser(inst: MemoryDAG):
-            return inst.adj
-        return core_schema.json_or_python_schema(
-            json_schema=core_schema.chain_schema([
-                adj_schema,
-                core_schema.no_info_plain_validator_function(cls)
-            ]),
-            python_schema=core_schema.union_schema([
-                core_schema.is_instance_schema(cls),
-                core_schema.chain_schema([
-                    adj_schema,
-                    core_schema.no_info_plain_validator_function(cls)
-                ])
-            ]),
-            serialization=core_schema.plain_serializer_function_ser_schema(ser)
-        )
 
     def __contains__(self, key: UUID) -> bool:
         return key in self.adj
@@ -198,12 +132,9 @@ class MemoryDAG:
     @overload
     def get[D](self, key: UUID, /, default: D) -> Memory | D: ...
 
-    def get[D](self, key: UUID, /, default: D = _default) -> Memory | D:
+    def get[D](self, key: UUID, /, default: D = None) -> Memory | D:
         '''Get the value of a node, or return default if not found.'''
-        val = self.adj.get(key, default)
-        if val is _default:
-            raise KeyError(key)
-        return val
+        return self.adj.get(key, default)
 
     def insert(self, key: UUID, value: Memory):
         if key not in self.adj:

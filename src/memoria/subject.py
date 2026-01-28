@@ -33,7 +33,7 @@ class Subject:
             _ = db.insert_memory(memory)
 
     def recall(self,
-            roots: list[UUID],
+            roots: set[UUID],
             config: RecallConfig | None=None
         ) -> MemoryDAG:
         '''Recall memories based on a prompt as a memory subgraph.'''
@@ -50,7 +50,7 @@ class Subject:
         memories = config.memories
 
         g = MemoryDAG()
-        seen = set[UUID](roots) # g ∪ fringe for quick lookup
+        seen = roots.copy() # g ∪ fringe for quick lookup
         rc = defaultdict[UUID, int](int) # Refcounts of fringe nodes (xor g)
         refs = dict[UUID, tuple[UUID, MemoryRow]]() # {src: (dst, row)}
         deps = dict[UUID, tuple[UUID, MemoryRow]]() # {dst: (src, row)}
@@ -147,3 +147,6 @@ class Subject:
             yield row.to_memory(
                 edges=set(self.db.backward_edges(rowid=row.rowid))
             )
+    
+    def list_ids(self, page: int, perpage: int) -> Iterable[UUID]:
+        return self.db.list_ids(page, perpage)

@@ -12,3 +12,6 @@ A DAG provides a partial ordering over the causal structure of a conversation, a
 ## Extensions
 ### Multi-agent coordination
 The append-only immutability of the memory makes a natural synchronization point for multiple asynchronous agents. An agent can pull from shared memory without issue and then append new memories which appear in relevant future queries to other agents. This promises to enable multi-agent coordination without drift in individual subjective experience. For example, multiple agents dedicated to different social media platforms can hold simultaneous conversations while at each turn receiving relevant updates appended by the other agents as if they had originated them. "I'm talking to Becky now, she wants to order pizza".
+
+### Attention masking
+Rather than linearize with a topological sort, if one has access to the model itself they could embed the graph structure in a binary mask ala causal masking. This may provide better clarity to the structure than simple in-band references and edges, but requires privileged access. References and edges probably still can't be removed because they provide multi-shot learning of the kind of edge annotation the completion should include.

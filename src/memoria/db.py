@@ -4,10 +4,11 @@ from collections.abc import Iterable, Iterator, Sequence
 import sqlite3
 import os
 from uuid import UUID
+import json
 
 from pydantic import BaseModel
 
-from .memory import Memory, MemoryDataAdapter
+from .memory import Memory, MemoryAdapter
 from .util import nonempty_tuple
 
 __all__ = (
@@ -36,11 +37,10 @@ class MemoryRow(BaseModel):
     data: JSONB
 
     def to_memory(self, edges: Iterable[UUID]=()) -> Memory:
-        return Memory(
-            uuid=UUID(bytes=self.uuid),
-            data=MemoryDataAdapter.validate_json(self.data),
-            edges=set(edges)
-        )
+        base = json.loads(self.data)
+        base['uuid'] = UUID(bytes=self.uuid)
+        base['edges'] = set(edges)
+        return MemoryAdapter.validate_python(base)
 
 class EdgeRow(BaseModel):
     src_id: MemoryRow.PrimaryKey
@@ -177,13 +177,13 @@ class DatabaseRO(Database):
             WHERE uuid = ? OR rowid = ?
         """, (uuid and uuid.bytes, rowid)).fetchone()
 
-    def select_memories(self, uuids: Iterable[UUID]) -> Iterable[MemoryRow]:
+    def select_memories(self, uuids: set[UUID]) -> Iterable[MemoryRow]:
         '''Lookup memory objects by UUID.'''
-        return self.cursor(MemoryRow).executemany("""
+        return self.cursor(MemoryRow).execute(f"""
             SELECT rowid, uuid, JSON(data) as data
             FROM memories
-            WHERE uuid = ?
-        """, ((uuid.bytes,) for uuid in uuids))
+            WHERE uuid IN ({(',?'*len(uuids))[1:]})
+        """, tuple(uuid.bytes for uuid in uuids))
 
     def select_memory_full(self, *, uuid: UUID) -> Memory | None:
         '''
@@ -273,6 +273,17 @@ class DatabaseRO(Database):
             LIMIT ? OFFSET ?
         """, (perpage, (page - 1) * perpage))
 
+    def list_ids(self, page: int, perpage: int) -> Iterator[UUID]:
+        cur = self.cursor(return_type=tuple[bytes])
+        cur.execute("""
+            SELECT uuid
+            FROM memories
+            ORDER BY rowid DESC
+            LIMIT ? OFFSET ?
+        """, (perpage, (page - 1) * perpage))
+        for uuid, in cur:
+            yield UUID(bytes=uuid)
+
     def all_referenced(self, count: int|None) -> Iterable[MemoryRow]:
         cur = self.cursor(MemoryRow)
         return cur.execute("""
@@ -293,10 +304,7 @@ class DatabaseRW(DatabaseRO):
         _ = cur.execute("""
             INSERT OR IGNORE INTO memories (uuid, data)
             VALUES (?, JSONB(?))
-        """, (
-            uid,
-            memory.data.model_dump_json()
-        ))
+        """, (uid, memory.model_dump_json(exclude={'uuid', 'edges'})))
 
         if rowid := cur.lastrowid:
             # Continue insertion - add edges
