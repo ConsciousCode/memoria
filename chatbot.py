@@ -1,25 +1,14 @@
 #!/usr/bin/env python3
-"""
-Simple chatbot MVP demonstrating the memory DAG concept.
-
-At each turn:
-1. User provides input
-2. Query for a foliation over the memory DAG
-3. Format as markdown with frontmatter
-4. Send to LLM
-5. Parse response and extract metadata from frontmatter
-6. Store new memories in the DAG
-"""
 
 import inspect
 import sys
-from typing import assert_never, cast
+from typing import Annotated, assert_never, cast
 from uuid import UUID
 from pathlib import Path
 import re
 import itertools
 
-import yaml
+from pydantic import BaseModel, Field
 from uuid_extension import uuid7 as _uuid7
 
 def uuid7():
@@ -45,26 +34,13 @@ from pydantic_ai.messages import (
 
 FRONTMATTER = re.compile(r'^---\n([\s\S\n]+?)\n---([\s\S\n]*)$')
 
-def convert_metadata(m: Memory, idmap: dict[UUID, int]):
-    extra = m.__pydantic_extra__
-    metadata = {
-        "id": idmap[m.uuid],
-        "edges": [idmap[e] for e in m.edges],
-        **({} if extra is None else extra)
-    }
-
-    frontmatter = yaml.safe_dump(
-        metadata, default_flow_style=False, sort_keys=False
-    )
-    return f"---\n{frontmatter}---"
-
 def load_file(uuid: UUID) -> bytes|None:
     # TODO: Consider directory sharding
     return None
 
 def convert_self(m: SelfMemory, idmap: dict[UUID, int]) -> tuple[list[ModelResponsePart], list[ToolReturnPart]]:
     parts: list[ModelResponsePart] = [
-        TextPart(content=convert_metadata(m, idmap))
+        #TextPart(content=convert_metadata(m, idmap))
     ]
     tools: list[ToolReturnPart] = []
 
@@ -165,30 +141,8 @@ def create_other(text: str, edges: set[UUID], metadata: dict[str, json_t] | None
         edges=edges or set()
     )
 
-def format_frontmatter(text: str):
-    return 
-
-def parse_frontmatter(text: str) -> tuple[dict[str, json_t], str]:
-    if (m := FRONTMATTER.match(text)) is None:
-        raise ValueError("No frontmatter")
-
-    try:
-        data = yaml.safe_load(m[1])
-    except yaml.YAMLError:
-        raise ValueError("No frontmatter") from None
-    
-    if not isinstance(data, dict):
-        raise ValueError("Frontmatter is not a dictionary")
-    
-    return data, m[2]
-
-def create_self(text: str, idmap: dict[int, UUID], frontmatter: dict[str, json_t], metadata: dict[str, json_t]|None = None) -> Memory:
+def create_self(msgs: list[ModelResponse], edges: set[UUID]) -> Memory:
     """Create an assistant memory from LLM output."""
-
-    frontmatter.pop('id')
-    if not isinstance(es := frontmatter.pop('edges'), list):
-        raise TypeError("Edges are not a list")
-    edges = set(idmap[e] for e in cast(list[int], es))
 
     return SelfMemory(
         uuid=uuid7(),
@@ -197,16 +151,16 @@ def create_self(text: str, idmap: dict[int, UUID], frontmatter: dict[str, json_t
         parts=[memory.TextPart(content=text)]
     )
 
-class Session[T]:
-    def __init__(self, size: int):
-        self.size = size
-        self.history: list[T] = []
-    
-    def add(self, value: T):
-        self.history.append(value)
-    
-    def get(self):
-        return self.history[-self.size:]
+class MemoriaResult(BaseModel, extra='allow'):
+    '''Core memory logged to Memoria. Allows arbitrary metadata.'''
+    depends: Annotated[set[int],
+        Field(description="Ids of memories this response depends on.")
+    ]
+    response: Annotated[str,
+        Field(description="Response to send to the user.")
+    ]
+
+    __pydantic_extra__: dict[str, json_t] = Field(init=False) # pyright: ignore[reportIncompatibleVariableOverride]
 
 WINDOW = 10
 
@@ -216,6 +170,7 @@ def chatbot_loop(db_path: str = "memoria.db", model_name: str = "anthropic:claud
     # Initialize agent with current system prompt
     agent = Agent(
         model_name,
+        output_type=MemoriaResult,
         system_prompt=inspect.cleandoc("""
             You are a helpful assistant. This conversation was reconstructed from a DAG of your memories, and your responses will be stored in that memory. User memories are linked to every recalled message they saw, while your memories are linked to every message you previously said was a dependency. Every response is in Markdown with frontmatter for metadata. Every response contains its id and dependencies:
             ---
@@ -273,23 +228,19 @@ def chatbot_loop(db_path: str = "memoria.db", model_name: str = "anthropic:claud
                 mapid[len(idmap)] = om.uuid
                 subject.add_memory(om)
                 
-                fm = convert_metadata(om, idmap)
-
                 print(ms)
 
                 # Call the agent
-                result = agent.run_sync(f"{fm}\n{user_input}", message_history=ms)
-                assistant_text = result.output
-                print(assistant_text)
-
-                # Parse response for metadata
-                frontmatter, content = parse_frontmatter(assistant_text)
+                result = agent.run_sync(user_input, message_history=ms)
+                output = result.output
+                
+                print(result.response)
 
                 # Create assistant memory
                 subject.add_memory(create_self(
-                    content,
+                    output.response,
                     mapid,
-                    frontmatter=frontmatter,
+                    frontmatter=output.__pydantic_extra__,
                     metadata={
                         "model": model_name
                     }
